@@ -904,14 +904,16 @@ function processSectionTemplate(
   host: Host,
   options: RenderOptions,
 ): { outputPath: string; content: string } {
-  const tmplContent = fs.readFileSync(sectionTmplPath, 'utf-8');
+  const tmplContent = fs.readFileSync(sectionTmplPath, 'utf-8').replace(/\r\n/g, '\n');
   const relTmplPath = path.relative(ROOT, sectionTmplPath);
   const hostConfig = getHostConfig(host);
 
   // Read the owning SKILL.md.tmpl so the section inherits the parent's name +
   // tier + benefits-from (TemplateContext parity). Fall back to the dir name.
   const parentTmplPath = path.join(ROOT, skillDir, 'SKILL.md.tmpl');
-  const parentContent = fs.existsSync(parentTmplPath) ? fs.readFileSync(parentTmplPath, 'utf-8') : '';
+  const parentContent = fs.existsSync(parentTmplPath)
+    ? fs.readFileSync(parentTmplPath, 'utf-8').replace(/\r\n/g, '\n')
+    : '';
   const parentName = (parentContent && extractNameAndDescription(parentContent).name) || skillDir;
   const ctx = buildContext(parentContent || tmplContent, parentTmplPath, host, options, parentName);
 

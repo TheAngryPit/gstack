@@ -67,6 +67,8 @@ test('every operational line in adapted ship sections is conserved with host rew
     // checkouts with core.autocrlf=true feed CRLF on disk, but generation
     // deliberately normalizes the input before resolver and rewrite passes.
     let adapted = adaptNativeTemplate(readFileSync(join(root,source),'utf8').replace(/\r\n/g,'\n'), ctx, source);
+    const windowsSource = source.replaceAll('/', '\\');
+    expect(adaptNativeTemplate(readFileSync(join(root,source),'utf8').replace(/\r\n/g,'\n'), ctx, windowsSource)).toBe(adapted);
     for(const rewrite of changes) adapted=adapted.split(rewrite.from).join(rewrite.to);
     adapted=rewriteCarvedSectionRefs(adapted,ctx);
     for(const line of adapted.split('\n')) {

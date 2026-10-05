@@ -1,14 +1,17 @@
 import { expect, test } from 'bun:test';
 import { readFileSync, mkdtempSync, mkdirSync, realpathSync, rmSync, existsSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(import.meta.dir, '..');
 const setup = readFileSync(resolve(root, 'setup'), 'utf8');
+const bash = process.platform === 'win32'
+  ? process.env.PATH?.split(delimiter).map(directory => join(directory, 'bash.exe')).find(existsSync) ?? 'bash'
+  : 'bash';
 
 test('setup remains syntactically valid', () => {
-  expect(spawnSync('bash', ['-n', resolve(root, 'setup')]).status).toBe(0);
+  expect(spawnSync(bash, ['-n', resolve(root, 'setup')]).status).toBe(0);
 });
 
 test('setup defaults to status and only explicit installation writes synthetic hook definitions', () => {
@@ -23,7 +26,7 @@ test('setup defaults to status and only explicit installation writes synthetic h
   const script = `log() { :; }\nbun_cmd() { "$BUN_BIN" "$@"; }\n${setup.slice(start, end)}`;
   try {
     for (const action of ['status', 'install']) {
-      const result = spawnSync('bash', ['-eu', '-c', script], {
+      const result = spawnSync(bash, ['-eu', '-c', script], {
         encoding: 'utf8', timeout: 5000,
         env: { PATH: '/usr/bin:/bin', BUN_BIN: process.execPath, CODEX_HOME: fixture,
           SOURCE_GSTACK_DIR: root, CODEX_GSTACK: root, CODEX_HOOKS_ACTION: action },
@@ -47,8 +50,11 @@ test('minimal Codex runtime includes native lifecycle assets without Claude asse
   mkdirSync(join(source, 'hosts/claude/hooks'), { recursive: true });
   const start = setup.indexOf('create_codex_runtime_root() {');
   const end = setup.indexOf('\n}', start) + 2;
+  const linkDistsStart = setup.indexOf('_link_runtime_dists() {');
+  const linkDistsEnd = setup.indexOf('\n}', linkDistsStart) + 2;
+  const linkDists = setup.slice(linkDistsStart, linkDistsEnd);
   try {
-    const result = spawnSync('bash', ['-eu', '-c', `_link_or_copy() { ln -s "$1" "$2"; }\n${setup.slice(start, end)}\ncreate_codex_runtime_root "$1" "$2"`, 'fixture', source, target], {
+    const result = spawnSync(bash, ['-eu', '-c', `_link_or_copy() { ln -s "$1" "$2"; }\n${linkDists}\n${setup.slice(start, end)}\ncreate_codex_runtime_root "$1" "$2"`, 'fixture', source, target], {
       encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, timeout: 5000,
     });
     expect(result.status).toBe(0);
@@ -72,7 +78,7 @@ for (const [first, last] of [
     const block = setup.slice(start, end + last.length);
     // Unset source/home variables plus nounset fail before any accidental
     // invocation if the host guard regresses. No real config/home is touched.
-    const result = spawnSync('bash', ['-uc', `INSTALL_CLAUDE=0\n${block}`], {
+    const result = spawnSync(bash, ['-uc', `INSTALL_CLAUDE=0\n${block}`], {
       encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, timeout: 5000,
     });
     expect(result.status).toBe(0);

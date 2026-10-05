@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
 const scratch = mkdtempSync(join(tmpdir(), 'gstack-codex-complete-output-'));
@@ -21,7 +21,7 @@ function corpus(dir: string): Array<{ path: string; text: string }> {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
     const path = join(dir, entry.name);
     return entry.isDirectory() ? corpus(path)
-      : /\.(?:md|yaml)$/.test(entry.name) ? [{ path: relative(skills, path), text: readFileSync(path, 'utf8') }] : [];
+      : /\.(?:md|yaml)$/.test(entry.name) ? [{ path: relative(skills, path).split(sep).join('/'), text: readFileSync(path, 'utf8') }] : [];
   });
 }
 

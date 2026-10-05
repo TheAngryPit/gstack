@@ -20,6 +20,10 @@ cancellation is uncertain, pause and report it. Native refusals remain binding.`
 /** Adapt dispatch at the source-template seam; all other hosts keep original bytes. */
 export function adaptNativeTemplate(text: string, ctx: TemplateContext, source: string): string {
   if (ctx.host !== 'codex') return text;
+  // `path.relative()` uses backslashes on Windows. Normalize the source key
+  // before matching host-specific template paths so the same Codex adapters
+  // run on every platform.
+  source = source.replaceAll('\\', '/');
   if (ctx.skillName === 'office-hours') {
     text = text.replace('second opinion (Codex or Claude subagent)', 'second opinion (native reviewer)')
       .replace('against cross-model challenge (kept original premise when Codex disagreed', 'against independent-context challenge (kept original premise when the reviewer disagreed');
