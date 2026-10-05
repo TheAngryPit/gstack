@@ -253,31 +253,12 @@ If A:
 git worktree add "$SPAWN_PATH" -b "$SPAWN_BRANCH" "$PIN_SHA" 2>&1
 ```
 
-**Error: worktree create fails** (disk full, path exists, etc.): print:
-"Worktree create failed — `$ERROR`. Spawning agent in current dir instead. Your
-in-progress changes will be visible to the agent. Cancel with Ctrl+C if not
-desired." Then fall back to current dir (still spawn): set `SPAWN_PATH` to the
-repository root (`git rev-parse --show-toplevel`).
+{{SPEC_WORKTREE_FAILURE}}
 
-If A and worktree created: spawn `claude -p` with the spec piped via stdin:
-
-```bash
-[ -r "${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was spawned." >&2; exit 1; }
-cd -- "${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
-[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was spawned." >&2; exit 1; }
-SPAWN_PATH=$(pwd -P)
-cat "$ARCHIVE_PATH" | (cd "$SPAWN_PATH" && claude -p 2>&1) &
-SPAWN_PID=$!
-echo "Spawned: PID $SPAWN_PID in $SPAWN_PATH (branch $SPAWN_BRANCH)"
-echo "Follow with: cd $SPAWN_PATH && claude --resume"
-```
-
-Update archive frontmatter with `spec_worktree_path: $SPAWN_PATH` and
-`spec_executed: true` (atomic re-write).
+{{SPEC_HOST_DISPATCH}}
 
 **Stash restore safety (when B path was chosen):** Do NOT auto-restore inline
 — the spawned agent may take hours. Instead print: "Stash preserved as
 `$STASH_REF`. Restore later with `git stash list` then `git stash apply
 stash^{/$STASH_REF}`. Before restore, re-run `git status` to make sure your
 worktree is clean." Do NOT drop the stash; user owns it.
-

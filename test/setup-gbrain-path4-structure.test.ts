@@ -28,20 +28,21 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { expandHostSetup } from './helpers/expand-host-setup';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const SKILL_DIR = path.join(ROOT, 'setup-gbrain');
 const SECTIONS_DIR = path.join(SKILL_DIR, 'sections');
 
 // Skeleton template — always loaded; owns detect, path dispatch, Steps 5/5a/6/7/9/10.
-const skeleton = fs.readFileSync(path.join(SKILL_DIR, 'SKILL.md.tmpl'), 'utf-8');
+const skeleton = expandHostSetup(fs.readFileSync(path.join(SKILL_DIR, 'SKILL.md.tmpl'), 'utf-8'));
 // Per-path init procedures (Paths 1/2a/2b/3/4 + Switch) — Step 4 body.
-const brainInit = fs.readFileSync(path.join(SECTIONS_DIR, 'brain-init.md.tmpl'), 'utf-8');
+const brainInit = expandHostSetup(fs.readFileSync(path.join(SECTIONS_DIR, 'brain-init.md.tmpl'), 'utf-8'));
 // Step 8 CLAUDE.md persist body (both mode blocks + the gated guidance write).
-const claudeMdPersist = fs.readFileSync(
+const claudeMdPersist = expandHostSetup(fs.readFileSync(
   path.join(SECTIONS_DIR, 'claude-md-persist.md.tmpl'),
   'utf-8',
-);
+));
 // Skeleton + every section template — total behavior, order-stable.
 const union = [skeleton]
   .concat(
@@ -49,7 +50,7 @@ const union = [skeleton]
       .readdirSync(SECTIONS_DIR)
       .filter((f) => f.endsWith('.md.tmpl'))
       .sort()
-      .map((f) => fs.readFileSync(path.join(SECTIONS_DIR, f), 'utf-8')),
+      .map((f) => expandHostSetup(fs.readFileSync(path.join(SECTIONS_DIR, f), 'utf-8'))),
   )
   .join('\n');
 

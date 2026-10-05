@@ -17,9 +17,7 @@ Find-and-replace (or append) the section. Block format depends on mode:
 - Current repo policy: {read-write|read-only|deny|unset}
 ```
 
-The bearer token is **never** written to CLAUDE.md (CLAUDE.md is checked
-in to git in many projects). It lives only in `~/.claude.json` where
-`claude mcp add` placed it.
+The bearer token is never written to CLAUDE.md; it lives only in ~/.claude.json with mode 0600.
 
 ### Paths 1, 2a, 2b, 3 (Local stdio)
 

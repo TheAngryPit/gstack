@@ -2,6 +2,8 @@ import { outsideVoiceFailurePolicy, outsideVoiceFor, outsideVoiceInvocation, out
 import { type TemplateContext, quoteSafePath, toShellPath } from './types';
 import { binaryAssignment } from './runtime-root';
 import { usesLazySections } from './sections';
+import { generateCodexNativeReview } from './codex-native-review';
+import { replaceBlock } from './native-template-utils';
 import { AI_SLOP_BLACKLIST, OPENAI_HARD_REJECTIONS, OPENAI_LITMUS_CHECKS, CC_BACKGROUND_DEFAULT_SINCE } from './constants';
 import { OVERUSED_FONTS_DISPLAY, BANNED_FONTS, FONTS_BODY_UI_OK, FONTS_MONO_OK, FONTS_VERIFIED_FREE, HANDOFF_COMMANDS, selectCatalog, catalogEntries, renderCatalog, detectorSlopEntries, judgmentTellEntries } from '../../lib/design-catalog';
 import { SENTINEL, DETECT_EXIT_ECHO, DETECT_LIMITS } from '../../lib/design-detect-contract';
@@ -10,8 +12,18 @@ import { DOM_DUMP_FILE } from '../../lib/dom-dump-script';
 export function generateDesignReviewLite(ctx: TemplateContext): string {
   const litmusList = OPENAI_LITMUS_CHECKS.map((item, i) => `${i + 1}. ${item}`).join(' ');
   const rejectionList = OPENAI_HARD_REJECTIONS.map((item, i) => `${i + 1}. ${item}`).join(' ');
-  // Each supported host uses its selected outside reviewer.
-  const codexBlock = `
+  // Codex uses an advertised fresh native context; other hosts keep their
+  // configured outside-review provider and its existing provenance path.
+  const codexBlock = ctx.host === 'codex' ? `
+6. **Native Codex design challenge** (optional, default-on when requested):
+
+${generateCodexNativeReview(ctx, 'optional lightweight design challenge')}
+Supply the approved diff and relevant frontend source, then run the seven litmus
+checks (${litmusList}) and hard rejections (${rejectionList}). Return at most five
+specific findings with file:line evidence. Separate missing evidence from clean
+results; timeout or dispatch failure is review_not_run. This is a fresh context,
+not cross-model evidence.
+` : `
 
 6. **${outsideVoiceFor(ctx).label} design voice** (optional, automatic if available):
 
@@ -590,7 +602,7 @@ Tie everything to user goals and product objectives. Always suggest specific imp
 }
 
 export function generateDesignSketch(ctx: TemplateContext): string {
-  return `## Visual Sketch (UI ideas only)
+  const output = `## Visual Sketch (UI ideas only)
 
 If the chosen approach involves user-facing UI (screens, pages, forms, dashboards,
 or interactive elements), generate a rough wireframe to help the user visualize it.
@@ -683,6 +695,18 @@ ${outsideVoiceProvenance(ctx, 'design-sketch')}
 
 Present ${outsideVoiceFor(ctx).label} output under \`${outsideVoiceFor(ctx).label.toUpperCase()} SAYS (design sketch):\` and subagent output under \`${outsideVoiceFor(ctx).nativeLabel.toUpperCase()} SUBAGENT (design direction):\`.
 Error handling: all non-blocking. On failure, skip and continue.`;
+  if (ctx.host !== 'codex') return output;
+  return replaceBlock(output, '**Step 6: Outside design voices** (optional)', 'Error handling: all non-blocking.', `**Step 6: Optional native design challenge**
+
+If the operator wants an additional direction, offer it once with the native
+question capability; decline or unavailable means review_not_run and continue.
+
+${generateCodexNativeReview(ctx, 'optional design direction')}
+Supply the approved product approach and wireframe, not the brainstorming history.
+Ask for a visual thesis, content plan (hero → support → detail → CTA), and two
+interaction ideas that change the page feel. Request specific font names, hex
+color values, and spacing values; label unverified font availability. Present the actual output;
+the operator chooses whether to use it.`);
 }
 
 export function generateDesignOutsideVoices(ctx: TemplateContext): string {
@@ -827,6 +851,41 @@ Fill in each cell from the ${outsideVoiceFor(ctx).label} and subagent outputs. C
 
 Use the same scorecard format as /plan-design-review (shown above). Fill in from both outputs.
 Merge findings into the triage with \`[${outsideVoiceFor(ctx).id}]\` / \`[subagent]\` / \`[cross-model]\` tags.`;
+
+  if (ctx.host === 'codex') {
+    const nativeA = codexPrompt
+      .replace('Read the plan file at [plan-file-path].', 'Review the approved plan supplied in the packet.')
+      .replace('Review the frontend source code in this repo.', 'Review the approved frontend source evidence supplied in the packet; report missing cross-file evidence.')
+      .replace('Read the complete product brief at [the absolute DESIGN_BRIEF path printed above].', 'Read the complete approved product brief supplied in the packet.');
+    const nativeB = subagentPrompt
+      .replace('Read the plan file at [plan-file-path].', 'Review the approved plan supplied in the packet.')
+      .replace('Review the frontend source code in this repo.', 'Review the approved frontend source evidence supplied in the packet; report missing cross-file evidence.')
+      .replace('Read the complete product brief at [the absolute DESIGN_BRIEF path printed above].', 'Read the complete approved product brief supplied in the packet.');
+    return `## Design Outside Voices (native Codex contexts)
+
+${generateCodexNativeReview(ctx, isAutomatic ? 'independent design critique' : 'optional independent design critique')}
+${isAutomatic ? 'Run automatically after the primary audit.' : 'Offer once before the detailed review/proposal; a decline skips both voices.'}
+Prepare only the approved plan, product brief, frontend excerpts or product context
+needed for these prompts. Include the exact evidence each lens needs and declare
+omissions. Do not pass the conversation or unrelated/private material.
+
+**Native voice A — ${isPlanDesignReview ? 'hard rules and litmus checks' : isDesignReview ? 'source audit' : 'design direction'}:**
+${nativeA}
+
+**Native voice B — ${isPlanDesignReview ? 'completeness' : isDesignReview ? 'consistency' : 'alternative direction'}:**
+${nativeB}
+
+Present each completed output under its actual reviewer identity. A failed, unavailable
+or timed-out context is review_not_run, never NO FINDINGS. These are separate native
+contexts, not cross-model evidence. For litmus reviews, record every check as PASS,
+FAIL, DISAGREE, NOT SPECIFIED or NOT RUN, and preserve each hard rejection. Apply the
+existing seven-pass integration and user decision gates; never auto-select a direction.
+${isDesignConsultation ? 'Show agreement and genuine divergences as alternatives; Vítor chooses.' : ''}
+
+Log actual source, scope/revision, findings and completion gaps. Only completed clean
+reviews may be logged clean; do not infer provider diversity or turn failure into
+clean coverage.`;
+  }
 
 
   return `## Design Outside Voices (independent)

@@ -48,8 +48,9 @@ const codex = defineHost({
     },
   },
 
-  // Outside-review resolvers route to Claude Code; Review Army has its own restriction.
-  suppressedResolvers: ['REVIEW_ARMY', ...GBRAIN_RESOLVERS],
+  // Codex review and Review Army dispatch use native bounded contexts. GBrain
+  // remains suppressed until the generator validates the explicit binding.
+  suppressedResolvers: [...GBRAIN_RESOLVERS],
 
   coAuthorTrailer: 'Co-Authored-By: OpenAI Codex <noreply@openai.com>',
   boundaryInstruction: 'IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. Do not invoke any installed skill (Codex home skills/, .agents/); answer directly. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.',

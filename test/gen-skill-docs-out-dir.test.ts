@@ -17,6 +17,23 @@ const ROOT = path.resolve(import.meta.dir, '..');
 //   (d) bin/ refs are left pointing at the global install,
 //   (e) the out-dir section file gained the Save Results to Brain block.
 describe('gen-skill-docs --out-dir (B2 render isolation)', () => {
+  test('a partial single-host render exits nonzero and preserves conflicting output', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-partial-host-'));
+    const collision = path.join(out, '.agents', 'skills', 'gstack-autoplan');
+    fs.mkdirSync(path.dirname(collision), { recursive: true });
+    fs.writeFileSync(collision, 'owned fixture, not a render directory');
+    try {
+      const result = spawnSync(process.execPath,
+        ['scripts/gen-skill-docs.ts', '--host', 'codex', '--out-dir', out],
+        { cwd: ROOT, encoding: 'utf8', timeout: 30_000 });
+      expect(result.stderr).toContain('ERROR (codex):');
+      expect(result.status).toBe(1);
+      expect(fs.readFileSync(collision, 'utf8')).toBe('owned fixture, not a render directory');
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
+  });
+
   function hashFile(p: string): string {
     return createHash('sha256').update(fs.readFileSync(p)).digest('hex');
   }
@@ -234,19 +251,57 @@ describe('gen-skill-docs --out-dir (B2 render isolation)', () => {
 
   test('--host codex --out-dir adds no tracked dirt and is byte-identical to the in-place render', () => {
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-out-codex-'));
-    const inPlaceShip = path.join(ROOT, '.agents', 'skills', 'gstack-ship', 'SKILL.md');
+    // Bun resolves import.meta.dir physically; use the same spelling for
+    // section-root parity on macOS (/var is an alias of /private/var).
+    const fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-source-codex-')));
+    const inPlaceShip = path.join(fixture, '.agents', 'skills', 'gstack-ship', 'SKILL.md');
     // Compared before/after rather than asserting empty, so a dev's own
     // unrelated dirty files can't false-fail the suite (#2569 pattern).
     const beforePorcelain = porcelain();
     try {
-      // 1) Fresh IN-PLACE codex render — the existing behavior: it writes
-      //    only the gitignored .agents/ tree (itself invisible to porcelain).
+      // Copy current source bytes, including untracked implementation files,
+      // into an independent checkout. Never inherit live generated trees or
+      // symlinks: in-place generation can prune stale generated directories.
+      const listing = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+        { cwd: ROOT, encoding: 'utf8', timeout: 30_000 });
+      expect(listing.status, listing.stderr).toBe(0);
+      const sourceHashes = new Map<string,string>();
+      const sources = [...new Set(listing.stdout.split('\0').filter(Boolean))].filter(rel =>
+        !rel.split(path.sep).some(part => part.startsWith('.')) &&
+        fs.existsSync(path.join(ROOT,rel)) && fs.lstatSync(path.join(ROOT,rel)).isFile());
+      const sourceBytes = sources.reduce((sum,rel)=>sum+fs.statSync(path.join(ROOT,rel)).size,0);
+      for (const rel of sources) {
+        const source = path.join(ROOT,rel);
+        const target = path.join(fixture, rel);
+        fs.mkdirSync(path.dirname(target), {recursive:true});
+        try {
+          // APFS clones retain independent bytes without duplicating the
+          // source allocation. FORCE must never silently become a full copy.
+          fs.copyFileSync(source, target, fs.constants.COPYFILE_FICLONE_FORCE);
+        } catch(error) {
+          const code=(error as NodeJS.ErrnoException).code;
+          // No fallback on this Darwin host or on any space failure. Other
+          // filesystems may use portable copies only with full-source space
+          // plus a conservative reserve for the two generated output trees.
+          if (process.platform==='darwin' || !['ENOTSUP','EOPNOTSUPP','ENOSYS','EXDEV','EINVAL'].includes(code || '')) throw error;
+          const volume=fs.statfsSync(fixture);
+          if (volume.bavail*volume.bsize < sourceBytes + 256*1024*1024) {
+            throw new Error('Insufficient space for a portable fixture copy; clone unsupported.');
+          }
+          fs.copyFileSync(source,target);
+        }
+        sourceHashes.set(rel, hashFile(target));
+      }
+      // Dependencies are input-only; generated output trees remain independent.
+      fs.symlinkSync(path.join(ROOT,'node_modules'),path.join(fixture,'node_modules'),'dir');
+      expect(fs.existsSync(path.join(fixture,'.agents'))).toBe(false);
+      // 1) Fresh IN-PLACE render only inside the disposable fixture.
       const inPlace = spawnSync(
         'bun',
         ['run', 'scripts/gen-skill-docs.ts', '--host', 'codex'],
-        { cwd: ROOT, encoding: 'utf-8', timeout: 120_000 },
+        { cwd: fixture, encoding: 'utf-8', timeout: 120_000 },
       );
-      expect(inPlace.status).toBe(0);
+      expect(inPlace.status, `${inPlace.stderr}\n${inPlace.stdout}`).toBe(0);
       expect(porcelain()).toBe(beforePorcelain);
       const inPlaceBytes = fs.readFileSync(inPlaceShip);
 
@@ -254,19 +309,23 @@ describe('gen-skill-docs --out-dir (B2 render isolation)', () => {
       const res = spawnSync(
         'bun',
         ['run', 'scripts/gen-skill-docs.ts', '--host', 'codex', '--out-dir', outDir],
-        { cwd: ROOT, encoding: 'utf-8', timeout: 120_000 },
+        { cwd: fixture, encoding: 'utf-8', timeout: 120_000 },
       );
-      expect(res.status).toBe(0);
+      expect(res.status, `${res.stderr}\n${res.stdout}`).toBe(0);
       expect(porcelain()).toBe(beforePorcelain);
+      for (const [rel, hash] of sourceHashes) expect(hashFile(path.join(fixture,rel)), rel).toBe(hash);
 
       const outShip = path.join(outDir, '.agents', 'skills', 'gstack-ship', 'SKILL.md');
       expect(fs.existsSync(outShip)).toBe(true);
-      expect(fs.readFileSync(outShip).equals(inPlaceBytes)).toBe(true);
+      // Codex now loads host-specific sections. Only their served base differs
+      // between an in-place render and an isolated out-dir.
+      expect(fs.readFileSync(outShip, 'utf8').split(outDir).join(fixture)).toBe(inPlaceBytes.toString('utf8'));
 
       // Codex metadata (agents/openai.yaml) mirrors into the out-dir too.
       expect(fs.existsSync(path.join(outDir, '.agents', 'skills', 'gstack-ship', 'agents', 'openai.yaml'))).toBe(true);
     } finally {
       fs.rmSync(outDir, { recursive: true, force: true });
+      fs.rmSync(fixture, { recursive: true, force: true });
     }
   }, 120_000);
 

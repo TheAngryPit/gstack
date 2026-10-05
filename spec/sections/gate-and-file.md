@@ -388,8 +388,7 @@ git worktree add "$SPAWN_PATH" -b "$SPAWN_BRANCH" "$PIN_SHA" 2>&1
 **Error: worktree create fails** (disk full, path exists, etc.): print:
 "Worktree create failed — `$ERROR`. Spawning agent in current dir instead. Your
 in-progress changes will be visible to the agent. Cancel with Ctrl+C if not
-desired." Then fall back to current dir (still spawn): set `SPAWN_PATH` to the
-repository root (`git rev-parse --show-toplevel`).
+desired." Then fall back to current dir (still spawn).
 
 If A and worktree created: spawn `claude -p` with the spec piped via stdin:
 
@@ -412,4 +411,3 @@ Update archive frontmatter with `spec_worktree_path: $SPAWN_PATH` and
 `$STASH_REF`. Restore later with `git stash list` then `git stash apply
 stash^{/$STASH_REF}`. Before restore, re-run `git status` to make sure your
 worktree is clean." Do NOT drop the stash; user owns it.
-

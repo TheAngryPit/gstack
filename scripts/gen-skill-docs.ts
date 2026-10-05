@@ -23,8 +23,10 @@ import { HOST_PATHS } from './resolvers/types';
 import { RESOLVERS } from './resolvers/index';
 import { rewriteCarvedSectionRefs, SKILL_BYTE_CEILING, usesLazySections } from './resolvers/sections';
 import { insertRuntimePreludes } from './resolvers/runtime-root';
+import { adaptNativeTemplate } from './resolvers/native-template';
 import { ALL_HOST_NAMES, resolveHostArg, getHostConfig } from '../hosts/index';
 import type { HostConfig } from './host-config';
+import { loadCodexBrain } from '../lib/gbrain-codex-binding';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 import { ALL_MODEL_NAMES, resolveModel, type Model } from './models';
@@ -82,11 +84,12 @@ export interface GenerationResult {
 }
 
 /** Canonical generation never reads local detection state unless opted in. */
-function loadGbrainOverride(respectDetection: boolean): boolean {
+function loadGbrainOverride(respectDetection: boolean, host: Host): boolean {
   if (!respectDetection) return false;
   const stateDir = resolveStateRoot();
   try {
     const json = JSON.parse(fs.readFileSync(path.join(stateDir, 'gbrain-detection.json'), 'utf-8'));
+    if (json.gbrain_binding_host && json.gbrain_binding_host !== host) return false;
     // Slow, remote, locked and briefly unreachable engines are still usable (#1964/#2051/#2456, A2).
     return ['ok', 'timeout', 'db-unreachable', 'thin-client', 'engine-locked'].includes(json.gbrain_local_status ?? '');
   } catch {
@@ -97,6 +100,12 @@ function loadGbrainOverride(respectDetection: boolean): boolean {
 function effectiveSuppressedResolvers(hostConfig: HostConfig, options: RenderOptions): Set<string> {
   let list = hostConfig.suppressedResolvers || [];
   if (options.gbrainDetected) {
+    // A local detector status is only a hint. Codex GBrain content may render
+    // only when the explicit saved binding still matches the selected local
+    // stdio registration and brain configuration.
+    if (hostConfig.name === 'codex') {
+      try { loadCodexBrain(); } catch { return new Set(list); }
+    }
     list = list.filter(r => r !== 'GBRAIN_CONTEXT_LOAD' && r !== 'GBRAIN_SAVE_RESULTS');
   }
   return new Set(list);
@@ -827,7 +836,7 @@ function processTemplate(tmplPath: string, host: Host, options: RenderOptions): 
   const skillName = ctx.skillName;
 
   // Replace placeholders + assert none remain (shared path with section generation).
-  let content = resolvePlaceholders(tmplContent, ctx, currentHostConfig, relTmplPath, options);
+  let content = resolvePlaceholders(adaptNativeTemplate(tmplContent, ctx, relTmplPath), ctx, currentHostConfig, relTmplPath, options);
 
   // Preprocess voice triggers: fold into description, strip field from frontmatter.
   // Must run BEFORE transformFrontmatter so all hosts see the updated description,
@@ -907,7 +916,7 @@ function processSectionTemplate(
   const ctx = buildContext(parentContent || tmplContent, parentTmplPath, host, options, parentName);
 
   // Resolve placeholders against the section body (shared guard catches stragglers).
-  let content = resolvePlaceholders(tmplContent, ctx, hostConfig, relTmplPath, options);
+  let content = resolvePlaceholders(adaptNativeTemplate(tmplContent, ctx, relTmplPath), ctx, hostConfig, relTmplPath, options);
 
   // External hosts: rewrite cross-reference paths/tools (no frontmatter to transform).
   if (host !== 'claude') {
@@ -955,7 +964,7 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
     model: settings.model ?? null,
     catalogMode: settings.catalogMode ?? 'trim',
     explainLevel: settings.explainLevel ?? 'default',
-    gbrainDetected: loadGbrainOverride(settings.respectDetection ?? false),
+    gbrainDetected: false,
   };
   const hosts = settings.host === 'all' ? ALL_HOST_NAMES as Host[] : [settings.host ?? 'claude'];
   const log = settings.log ?? (() => {});
@@ -1014,6 +1023,7 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
   }
 
   for (const host of hosts) {
+    options.gbrainDetected = loadGbrainOverride(settings.respectDetection ?? false, host);
     try {
       const hostConfig = getHostConfig(host);
       const tokenBudget: Array<{ skill: string; lines: number; tokens: number }> = [];

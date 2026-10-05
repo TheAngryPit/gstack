@@ -5,10 +5,10 @@
  * on demand. The SAME template ships to every host, so these resolvers make the
  * carve host-aware:
  *
- *  - On CLAUDE and for QA on every host: {{SECTION:id}} emits a STOP-Read pointer to the generated section
+ *  - On CLAUDE and CODEX, and for the size-carved skills on every host: {{SECTION:id}} emits a STOP-Read pointer to the generated section
  *    file (the skeleton), and the section .md is generated + installed separately.
  *  - Other skills on external hosts: {{SECTION:id}} INLINES the section template's content,
- *    so external hosts keep the full monolith ship skill (no section files, no
+ *    so uncarved external skills keep their full monolith (no section files, no
  *    host-portable-path problem). Inlined content keeps its own {{RESOLVER}}
  *    tokens, which the generator's multi-pass resolve expands.
  *
@@ -33,7 +33,7 @@ const CARVED_ON_EVERY_HOST = ['qa', 'qa-only', 'ship', 'plan-ceo-review'];
 export const SKILL_BYTE_CEILING = 160_000;
 
 export function usesLazySections(host: Host, skill: string): boolean {
-  return host === 'claude' || CARVED_ON_EVERY_HOST.includes(skill);
+  return host === 'claude' || host === 'codex' || CARVED_ON_EVERY_HOST.includes(skill);
 }
 
 /**
@@ -79,25 +79,23 @@ function findSection(skill: string, id: string): SectionEntry {
   return entry;
 }
 
-/**
- * Pointer to a carved section file. Claude keeps its global-root path; QA and
- * every external host point relative to the installed skill directory, because
- * external runtime roots (`$GSTACK_ROOT`) carry no `<skill>/sections/` tree
- * while setup links or copies whole skill directories.
- */
+/** Pointer to a carved section file for the host's installed skill. */
 export function sectionPath(ctx: TemplateContext, skill: string, id: string): string {
   const entry = findSection(skill, id);
-  if (ctx.host !== 'claude' || skill === 'qa' || skill === 'qa-only') {
+  if ((ctx.host !== 'claude' && ctx.host !== 'codex') || skill === 'qa' || skill === 'qa-only') {
     fs.accessSync(path.join(ROOT, skill, 'sections', `${entry.file}.tmpl`), fs.constants.R_OK);
     const installedName = ctx.host === 'claude' ? `\`${skill}\`/\`gstack-${skill}\`` : `\`${skill.startsWith('gstack-') ? skill : `gstack-${skill}`}\``;
     return `\`sections/${entry.file}\` relative to the installed ${installedName} SKILL.md directory`;
   }
-  return `\`${ctx.paths.skillRoot}/${skill}/sections/${entry.file}\``;
+  const root = ctx.host === 'codex'
+    ? `${ctx.paths.skillRoot}/.agents/skills/gstack-${skill}`
+    : `${ctx.paths.skillRoot}/${skill}`;
+  return `\`${root}/sections/${entry.file}\``;
 }
 
 /**
- * {{SECTION:id}} — installed-file pointer for QA; otherwise Claude pointers
- * and external inline content retain their existing behavior.
+ * {{SECTION:id}} — installed-file pointer on lazy hosts and all-host carved skills;
+ * other combinations inline the section body.
  */
 export const SECTION: ResolverFn = (ctx: TemplateContext, args?: string[]): string => {
   const id = args?.[0];

@@ -12,15 +12,27 @@ const context = (host: string, skillName = 'design-consultation'): TemplateConte
 for (const { name: host } of ALL_HOST_CONFIGS) {
   test(`${host}: proposal prompt requests the same completion marker that dispatch validates`, () => {
     const text = generateDesignOutsideVoices(context(host));
-    const prompt = text.match(/"(Given this product context, propose a complete design direction:[\s\S]*?)"\n/)!;
-    expect(prompt).not.toBeNull();
-    expect(prompt[1]).toContain('Recommendation: <direction> because <product-specific reason>');
+    const prompt = text.match(/"(Given this product context, propose a complete design direction:[\s\S]*?)"\n/);
     expect(validateOutsideReview('Recommendation: use a compact triage table because operators compare many incident rows.', 'review').completed).toBe(true);
     expect(validateOutsideReview('A compact table sounds nice.', 'review').completed).toBe(false);
+    if (host === 'codex') {
+      expect(prompt).toBeNull();
+      expect(text).toContain('## Design Outside Voices (native Codex contexts)');
+      expect(text).toContain('**Native voice A — design direction:**');
+      expect(text).toContain('**Native voice B — alternative direction:**');
+      expect(text).toContain('Recommendation: <direction> because <product-specific reason>');
+      expect(text).toContain('failed, unavailable\nor timed-out context is review_not_run');
+      expect(text).toContain('These are separate native\ncontexts, not cross-model evidence.');
+      expect(text).not.toContain('codex exec');
+      return;
+    }
+
+    expect(prompt).not.toBeNull();
+    expect(prompt![1]).toContain('Recommendation: <direction> because <product-specific reason>');
     const preparation = outsideVoiceInvocation(context(host), { timeoutMs: 300000, purpose: 'design-direction' });
     expect(preparation).toContain('missing Recommendation marker');
     expect(preparation).not.toMatch(/severity|no.findings|clean\/PASS/i);
-    expect(preparation.includes('Claude Code has no tools, git or path access')).toBe(host === 'codex');
+    expect(preparation.includes('Claude Code has no tools, git or path access')).toBe(false);
     expect(preparation).toContain('including actual plan/spec/source');
     expect(text).toContain('outside_status="unavailable"');
     expect(text).toContain('otherwise \"none\"');

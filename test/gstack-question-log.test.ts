@@ -87,6 +87,25 @@ describe('gstack-question-log — valid payloads', () => {
     expect(rec.followed_recommendation).toBe(true);
   });
 
+  test('native source preserves long and multi-answer values without truncation', () => {
+    const answers = ['x'.repeat(180), 'second answer'];
+    const r = run(
+      JSON.stringify({
+        skill: 'codex',
+        question_id: 'native_choice_01',
+        question_summary: 'native question',
+        user_choice: answers.join(' | '),
+        native_answers: answers,
+        source: 'codex-import-native',
+        tool_use_id: 'codex-native-' + 'a'.repeat(64),
+      }),
+    );
+    expect(r.status).toBe(0);
+    const rec = JSON.parse(readLog()[0]);
+    expect(rec.user_choice).toBe(answers.join(' | ').slice(0, 64));
+    expect(rec.native_answers).toEqual(answers);
+  });
+
   test('followed_recommendation=false when user_choice differs from recommended', () => {
     const r = run(
       JSON.stringify({
@@ -224,6 +243,20 @@ describe('gstack-question-log — rejected payloads', () => {
       }),
     );
     expect(r.status).not.toBe(0);
+  });
+
+  test('native source requires a bounded answer array', () => {
+    const r = run(
+      JSON.stringify({
+        skill: 'codex',
+        question_id: 'native-choice',
+        question_summary: 'native question',
+        user_choice: 'ok',
+        source: 'codex-import-native',
+      }),
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('native_answers');
   });
 });
 

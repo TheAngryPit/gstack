@@ -16,10 +16,12 @@ import { toShellPath, type TemplateContext } from './types';
 import { CC_BACKGROUND_DEFAULT_SINCE } from './constants';
 import { outsideVoiceFailurePolicy, outsideVoiceFor, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance } from './outside-voice';
 import { runtimeRootPrelude } from './runtime-root';
+import { nativeSecondOpinion, nativeAdversarialStep, nativePlanReview, nativeDocReview } from './codex-native-workflows';
 
 const CODEX_BOUNDARY = 'Filesystem boundary: do not read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. They hold skill definitions, not repository code to review. Do not invoke any installed skill (Codex home skills/, .agents/), hook, or tool instruction; answer directly. Do not modify agents/openai.yaml. Review only the repository code.\\n\\n';
 
 export function generateCodexSecondOpinion(ctx: TemplateContext): string {
+  if (ctx.host === 'codex') return nativeSecondOpinion(ctx);
 
   return `## Phase 3.5: Cross-Model Second Opinion (optional)
 
@@ -230,6 +232,8 @@ Fill fields from this attempt, not the parent's ${isShip ? 'Step 9.4' : 'Step 5.
 }
 
 export function generateAdversarialStep(ctx: TemplateContext): string {
+
+  if (ctx.host === 'codex') return nativeAdversarialStep(ctx);
 
   const isShip = ctx.skillName === 'ship';
   const stepNum = isShip ? '11' : '4.8';
@@ -621,6 +625,8 @@ After processing the queue, report findings, dispositions and remaining disagree
 }
 
 export function generateCodexPlanReview(ctx: TemplateContext): string {
+  if (ctx.host === 'codex') return nativePlanReview(ctx);
+
   const ceo = ctx.skillName === 'plan-ceo-review';
   const needsApprovalReadiness = ['plan-ceo-review', 'plan-eng-review'].includes(ctx.skillName);
   const result = `## Outside Voice — Independent Plan Challenge (default-on)
@@ -663,6 +669,8 @@ ${outsideVoiceProvenance(ctx, 'plan-review')}
 }
 
 export function generateCodexDocReview(ctx: TemplateContext): string {
+
+  if (ctx.host === 'codex') return nativeDocReview(ctx);
 
   return `## ${outsideVoiceFor(ctx).label} Documentation Review (default-on)
 

@@ -20,6 +20,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { expandHostSetup } from './helpers/expand-host-setup';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const TMPL = path.join(ROOT, 'setup-gbrain', 'SKILL.md.tmpl');
@@ -31,18 +32,18 @@ const MEMORY_DOC = path.join(ROOT, 'setup-gbrain', 'memory.md');
 // sections/transcript-gate.md.tmpl; the skeleton keeps dispatch + the Step 10
 // verdict prose. Negative (no-bare-invocation) checks run over the UNION so a
 // stale form can't hide in any template file.
-const tmpl = fs.readFileSync(TMPL, 'utf-8');
-const transcriptGate = fs.readFileSync(
+const tmpl = expandHostSetup(fs.readFileSync(TMPL, 'utf-8'));
+const transcriptGate = expandHostSetup(fs.readFileSync(
   path.join(SECTIONS_DIR, 'transcript-gate.md.tmpl'),
   'utf-8',
-);
+));
 const tmplUnion = [tmpl]
   .concat(
     fs
       .readdirSync(SECTIONS_DIR)
       .filter((f) => f.endsWith('.md.tmpl'))
       .sort()
-      .map((f) => fs.readFileSync(path.join(SECTIONS_DIR, f), 'utf-8')),
+      .map((f) => expandHostSetup(fs.readFileSync(path.join(SECTIONS_DIR, f), 'utf-8'))),
   )
   .join('\n');
 const memoryDoc = fs.readFileSync(MEMORY_DOC, 'utf-8');

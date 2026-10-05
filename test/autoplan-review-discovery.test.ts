@@ -102,11 +102,19 @@ describe('autoplan reads installed host methodology', () => {
           // C4: a carved review (every host's plan-ceo-review; Claude's four) keeps its body in sections/.
           const sectionSource = path.join(generatedRoot, reviewName, 'sections/review-sections.md');
           const carved = fs.existsSync(sectionSource);
-          if (host.name === 'codex') expect(loaded + (carved ? fs.readFileSync(sectionSource, 'utf8') : '')).toContain('"outside_provider":"claude-code"');
+          if (host.name === 'codex') {
+            const methodologyText = loaded + (carved ? fs.readFileSync(sectionSource, 'utf8') : '');
+            // Codex uses native fresh-context review, so its installed method
+            // must carry the native contract rather than the legacy Claude CLI
+            // provenance marker emitted on other hosts.
+            expect(methodologyText).toContain('fresh native reviewer');
+            expect(methodologyText).not.toContain('"outside_provider":"claude-code"');
+          }
           const phase = review === 'plan-devex-review' ? 'dx' : review.split('-')[1]!;
-          const phaseBody = host.name === 'claude'
-            ? fs.readFileSync(path.join(generatedRoot, 'autoplan', 'sections', `${phase}-phase.md`), 'utf8')
-            : body;
+          const generatedPhase = host.name === 'claude'
+            ? path.join(generatedRoot, 'autoplan', 'sections', `${phase}-phase.md`)
+            : path.join(generatedRoot, entryName, 'sections', `${phase}-phase.md`);
+          const phaseBody = fs.existsSync(generatedPhase) ? fs.readFileSync(generatedPhase, 'utf8') : body;
           const directive = phaseBody.split('\n').find(line => line.startsWith('Before dispatch, Read ')
             && (line.includes(`methodology ${phase} `) || line.includes(`/${review}/SKILL.md`) || line.includes(`/gstack-${review}/SKILL.md`)));
           expect(directive).toBeDefined();

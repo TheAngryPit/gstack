@@ -1,6 +1,6 @@
 # Spike: Codex session storage format for plan-tune cathedral
 
-**Status:** complete (2026-05-27)
+**Status:** historical baseline, extended for native request_user_input (2026-09-11)
 **Surfaces:** D5 (Codex import parses structured files, not regex)
 **Downstream consumers:** T9 (gstack-codex-session-import)
 
@@ -56,17 +56,21 @@ embedded in the `session_meta` event. CLI version recorded.
 | `task_complete`   |  6    | task complete |
 | `web_search_end`  |  2    | web search completion |
 
-## Critical finding: Codex has no `AskUserQuestion` tool
+## Historical finding: older Codex sessions had no `AskUserQuestion` tool
 
-Codex doesn't surface AskUserQuestion as a tool call in `response_item`
-stream. Gstack skills running on Codex emit AskUserQuestion-shaped
+The 2026-05-27 sample did not surface AskUserQuestion as a tool call in the
+`response_item` stream. Gstack skills running on Codex emitted AskUserQuestion-shaped
 Decision Briefs as plain prose inside `agent_message` events (the
 `AskUserQuestion Format` from preamble). The user's answer comes back in
 the next `user_message`.
 
-This means importing AUQ events from Codex sessions is structurally
-different from importing them from Claude Code (where they ARE
-tool calls):
+Current Codex-native `request_user_input` calls are represented as paired
+`function_call` / `function_call_output` `response_item` records. The
+importer treats that structured pair as authoritative when present and keeps
+the prose recovery below as a historical fallback.
+
+Importing older prose AUQ events from Codex sessions remains structurally
+different from importing them from Claude Code (where they ARE tool calls):
 
 - **Claude Code:** hook captures structured `tool_input`/`tool_output`
   for `AskUserQuestion`. Question + options + answer all separated.
@@ -76,7 +80,18 @@ tool calls):
 
 ## Recovery strategy for `gstack-codex-session-import`
 
-**Two-tier extraction:**
+**Three-case extraction:**
+
+0. **Native request_user_input (current path).** Pair a
+   `function_call` named `request_user_input` with the matching
+   `function_call_output` by native `call_id`. Preserve each question's
+   native `id`, options count, exact answer values, and
+   `source: "codex-import-native"`; never infer a recommendation from option
+   order or answer prose. `user_choice` is a bounded legacy scalar; the
+   validated `native_answers` array carries long or multi-answer values
+   without truncation. Dedup uses a bounded stable hash while
+   `codex_call_id` and `native_question_id` preserve native provenance.
+   Questions marked `isSecret: true` are skipped and never persisted.
 
 1. **Marker-first (D18 mechanism).** Search `agent_message` text for the
    `<gstack-qid:foo-bar>` marker. If present, we have an exact question_id
@@ -92,14 +107,18 @@ tool calls):
 
    Use this only to populate hash-based question_id (the same
    `hook-<sha1(skill+text+sorted_options)[:10]>` shape Layer 1 uses on
-   Claude). Tagged `source: "codex-pattern-fallback"`, never used as
+   Claude). Tagged `source: "codex-import-pattern"`, never used as
    preference key (per D18 hash drift guidance).
 
 ## Schema we'll write to question-log.jsonl from Codex import
 
 Per existing `bin/gstack-question-log` schema, augmented with:
+- `source: "codex-import-native"` (native `request_user_input` pair)
 - `source: "codex-import-marker"` (when qid marker found)
 - `source: "codex-import-pattern"` (when fallback regex used)
+- `native_question_id` and `codex_call_id` (native provenance)
+- `native_answers` (validated exact native answer array; `user_choice` remains
+  a bounded compatibility scalar)
 - `codex_session_id` (UUID from session_meta)
 - `codex_cwd` (working dir from session_meta — disambiguates project)
 - `codex_ts` (timestamp from event)

@@ -7,6 +7,7 @@ import { type TemplateContext } from './types';
 import { generateInvokeSkill } from './composition';
 import { CC_BACKGROUND_DEFAULT_SINCE } from './constants';
 import { DESIGN_DOC_DISCOVERY_BLOCK } from './design-doc-discovery';
+import { generateCodexNativeReview } from './codex-native-review';
 
 export function generateAntiShortcutClause(_ctx: TemplateContext): string {
   if (_ctx.skillName === 'plan-ceo-review') return `**Anti-shortcut clause:** Analyze → resolve → apply for each section before advancing. The plan file records the interactive review; it cannot replace it. Do not prewrite the remaining sections or their implementation tasks and then walk through a fixed question list. Proposed findings are not accepted plan changes: mark them pending until their actual decisions are made. Ask once per unresolved or reopened issue, wait for the answer, and apply only the exact accepted choice and scope to the working plan. An earlier approach selection does not authorize unrelated choices. Keep established contracts, accepted decisions, and their evidence available to later sections; new material risks or changed remedies still need approval. Cross-referencing settled decisions never replaces the full review and terminal report. Follow the working review decisions below; never invent a question merely because a new section starts.`;
@@ -124,8 +125,58 @@ reviewer-confirmed resolutions. An unavailable score is null, never invented.`;
 }
 
 export function generateSpecReviewLoop(_ctx: TemplateContext): string {
-  if (_ctx.skillName === 'office-hours') return generateOfficeHoursSpecReviewLoop();
+  if (_ctx.skillName === 'office-hours') {
+    const officeHours = generateOfficeHoursSpecReviewLoop();
+    if (_ctx.host !== 'codex') return officeHours;
+    const legacyDispatch = `Use the Agent tool with \`run_in_background: false\` and its returned \`dispatch\`
+string unchanged as the prompt. The reviewer must Read the entire prepared prompt
+file before reviewing the design. Do not recreate the prompt, copy selected fields,
+or summarize prior findings. A parent Read does not deliver the file to the reviewer.
+The reviewer has fresh context and cannot see the brainstorming conversation.
+Its prepared contract requires a complete JSON Write and an identical JSON response.
+It protects the required coaching and Assignment sections, distinguishes unknown
+customer facts from committed behavior, and requires evidence for every prior status.`;
+    if (!officeHours.includes(legacyDispatch)) throw new Error('Codex office-hours review dispatch anchor drift');
+    return officeHours.replace(legacyDispatch, `Dispatch the complete helper-produced \`dispatch\` string as a fresh task through
+the native worker API advertised by this Codex session; do not reconstruct its
+prompt or drop the saved evidence paths. If the API is \`collaboration.spawn_agent\`,
+use \`fork_turns: "none"\`, preserve the selected main model and effort, and omit
+unselected overrides. The worker reads the entire prepared prompt file and design,
+including the complete findings schema, all five review dimensions, coaching contract
+and preceding JSON. It writes a complete verdict JSON and returns the identical JSON.
+Preserve the required coaching and Assignment sections, distinguish unknown customer
+facts from committed behavior, and require evidence for every prior status. Retain
+the actual handle and await terminal completion before checking files, fixing findings,
+or dispatching another round. A new context does not prove a different model.`)
+      .replace('If the subagent fails, times out, or is unavailable — stop the loop and present the',
+        'If the native worker fails, times out, or is unavailable — stop the loop and present the');
+  }
   const ceo = _ctx.skillName === 'plan-ceo-review';
+  if (_ctx.host === 'codex') return `${ceo ? '####' : '##'} Spec Review Loop
+
+Run the optional independent review before presenting the final document. Follow
+the calling workflow's existing approval and artifact rules; reviewer findings do
+not approve edits or replace the operator's decisions.
+
+**Dispatch a fresh native reviewer:**
+
+${generateCodexNativeReview(_ctx, 'spec document review')}
+Review all five dimensions: completeness, consistency, clarity, scope and feasibility.
+For each, return PASS or specific issues with suggested fixes, and a quality score
+from 1–10. The reviewer receives the saved document or complete labelled content,
+not this conversation. For CEO review, include both the current scope summary and
+amended working plan; failure to inspect either is an unavailable review.
+
+**Outcome:** A completed PASS stops. For issues, make only approved document edits
+and re-dispatch after each revision, up to three launches; stop earlier on repeated
+unresolved issues. An unavailable or failed optional review is reported as
+review_not_run and does not become a clean verdict. Preserve unresolved concerns
+in the document when the calling workflow allows, and report actual iterations,
+findings, confirmed fixes, remaining concerns and score. Do not invent counts.
+
+Append best-effort metrics to ~/.gstack/analytics/spec-review.jsonl using the
+actual values; do not let optional telemetry override the calling workflow's
+artifact or approval gates.`;
   return `${ceo ? '####' : '##'} Spec Review Loop
 
 Run an adversarial review before presenting the final document to the user.

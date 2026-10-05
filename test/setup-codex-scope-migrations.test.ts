@@ -30,7 +30,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     install(f);
     expect(tree(f.global)).toEqual(before);
     expect(readFileSync(join(f.global, 'gstack-claude/SKILL.md'), 'utf8')).toBe(oldBytes);
-    expect(realpathSync(join(local, 'gstack-claude-code/SKILL.md'))).toBe(join(f.source, '.agents/skills/gstack-claude-code/SKILL.md'));
+    expect(realpathSync(join(local, 'gstack-claude-code/SKILL.md'))).toBe(realpathSync(join(f.source, '.agents/skills/gstack-claude-code/SKILL.md')));
     expect(lstatSync(join(local, 'gstack-claude'), { throwIfNoEntry: false })).toBeUndefined();
   }, 90_000);
 
@@ -176,7 +176,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     install(f);
     expect(existsSync(join(runtime, 'prior-asset'))).toBe(false);
     expect(readFileSync(join(runtime, 'SKILL.md'), 'utf8')).toContain('<!-- AUTO-GENERATED from');
-    expect(realpathSync(join(runtime, 'bin'))).toBe(join(f.source, 'bin'));
+    expect(realpathSync(join(runtime, 'bin'))).toBe(realpathSync(join(f.source, 'bin')));
   }, 90_000);
 
   test('Claude-only setup leaves a global handwritten runtime untouched', () => {

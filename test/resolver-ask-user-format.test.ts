@@ -32,6 +32,30 @@ function makeCtx(): TemplateContext {
   };
 }
 
+describe('native decision briefs preserve the original decision contract', () => {
+  const out = generateAskUserFormat({ ...makeCtx(), host: 'codex', paths: HOST_PATHS.codex });
+  test('retains full format, coverage/kind scoring, tradeoffs, effort and self-check', () => {
+    for (const requirement of [
+      'Project/branch/task:', 'ELI10:', 'Stakes if we pick wrong:', 'Recommendation: <choice> because',
+      '10 = complete, 7 = happy path, 3 = shortcut', 'options differ in kind, not coverage',
+      'Minimum 2 pros and 1 con per option', '40 characters per bullet',
+      'No cons — this is a hard-stop choice', 'taste call', 'Net:', 'human-team',
+      'Self-check before emitting', 'Non-ASCII characters',
+    ]) expect(out).toContain(requirement);
+    expect(out).toContain('FULL decision brief');
+    expect(out).toContain('short tool fields do not replace');
+  });
+  test('retains user-chosen durable shortcut logs and decision-linked code markers', () => {
+    for (const requirement of ['Completeness ≤ 7', 'durable-scope', 'gstack-decision-log', 'ceiling', 'upgrade trigger', 'gstack-shortcut(dec-<id>)', "user's explicit choice", 'same edit']) expect(out).toContain(requirement);
+  });
+  test('three-option native limit preserves every Include/Defer/Cut/Hold outcome', () => {
+    for (const requirement of ['NEVER drop, merge, or silently defer', 'A) Include', 'B) Choose another disposition', 'C) Hold', 'A) Defer', 'B) Cut', 'D<N>.final', 'D<N>.0', 'D<N>.revise-<k>', 'never AUTO_DECIDE-eligible', 'dependencies', 'stop the chain immediately']) expect(out).toContain(requirement);
+    expect(out).not.toContain('caps every call at **4 options**');
+    expect(out).toContain('Never use it for permission');
+    expect(out).not.toContain('Auto-choose the **recommended** option at every decision point');
+  });
+});
+
 describe('generateAskUserFormat — v1.7.0.0 Pros/Cons format', () => {
   const out = generateAskUserFormat(makeCtx());
 

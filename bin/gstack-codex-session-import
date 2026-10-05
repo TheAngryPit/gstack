@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # gstack-codex-session-import — backfill question-log.jsonl from Codex sessions.
 #
-# Codex has no AskUserQuestion tool (per docs/spikes/codex-session-format.md).
-# gstack skills running on Codex emit Decision Briefs as plain agent_message
-# text, and the user's response shows up in the next user_message. This
-# importer reconstructs those question/answer pairs from the structured
-# JSONL session files at ~/.codex/sessions/<date>/.
+# Codex-native `request_user_input` calls are the authoritative question path.
+# The importer preserves their native question id, call id, options count, and
+# exact answer value. Older gstack runs may only contain prose Decision Briefs
+# (`agent_message` followed by `user_message`), so the bounded pattern
+# recovery below remains a separate, explicitly tagged fallback.
 #
 # Usage:
 #   gstack-codex-session-import                   # latest session under ~/.codex/sessions/
 #   gstack-codex-session-import <path/to.jsonl>   # explicit session file
 #   gstack-codex-session-import --since <iso>     # all sessions newer than <iso>
 #
-# Recovery strategy (two-tier per D5/T4 spike):
-#   1. Marker-first: extract <gstack-qid:foo-bar> from agent_message → stable id.
-#   2. Pattern fallback: detect D<N> header + numbered options → hash id
+# Recovery strategy (three cases, in descending authority):
+#   1. Native request_user_input function_call/output → native id/source.
+#   2. Marker-first prose: extract <gstack-qid:foo-bar> → stable id.
+#   3. Pattern fallback prose: detect D<N> + numbered options → hash id
 #      (source=codex-import-pattern, never used as preference key per D18).
 #
 # Writes via bin/gstack-question-log so source tagging, dedup, and async
@@ -25,6 +26,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 gstack_state_root_select
 GSTACK_HOME="$_gstack_sr_root"
 CODEX_SESSIONS_ROOT="${CODEX_SESSIONS_ROOT:-$HOME/.codex/sessions}"
+MAX_SESSION_BYTES=8388608
+QLOG_BIN="${GSTACK_CODEX_SESSION_IMPORT_QLOG_BIN:-$SCRIPT_DIR/gstack-question-log}"
+QLOG_TIMEOUT_MS="${GSTACK_CODEX_SESSION_IMPORT_QLOG_TIMEOUT_MS:-5000}"
+case "$QLOG_TIMEOUT_MS" in
+  ''|*[!0-9]*) QLOG_TIMEOUT_MS=5000 ;;
+esac
+if [ "$QLOG_TIMEOUT_MS" -lt 1 ]; then QLOG_TIMEOUT_MS=1; fi
+if [ "$QLOG_TIMEOUT_MS" -gt 5000 ]; then QLOG_TIMEOUT_MS=5000; fi
 
 MODE="latest"
 EXPLICIT_PATH=""
@@ -99,9 +108,27 @@ fi
 # live captures.
 IMPORTED=0
 SKIPPED_NO_ANSWER=0
+DEGRADED=0
+DEGRADED_REASONS=""
 
 for SESSION_FILE in "${SESSION_FILES[@]}"; do
-  COUNT_LINE=$(SESSION_FILE_PATH="$SESSION_FILE" QLOG_BIN="$SCRIPT_DIR/gstack-question-log" bun -e '
+  SESSION_BYTES=$(wc -c < "$SESSION_FILE" 2>/dev/null | awk '{print $1}' || true)
+  case "$SESSION_BYTES" in
+    ''|*[!0-9]*)
+      echo "DEGRADED: transcript-stat-failed"
+      DEGRADED=$((DEGRADED + 1))
+      DEGRADED_REASONS="${DEGRADED_REASONS}${DEGRADED_REASONS:+,}transcript-stat-failed"
+      continue
+      ;;
+  esac
+  if [ "$SESSION_BYTES" -gt "$MAX_SESSION_BYTES" ]; then
+    echo "DEGRADED: transcript-too-large"
+    DEGRADED=$((DEGRADED + 1))
+    DEGRADED_REASONS="${DEGRADED_REASONS}${DEGRADED_REASONS:+,}transcript-too-large"
+    continue
+  fi
+
+  COUNT_LINE=$(SESSION_FILE_PATH="$SESSION_FILE" QLOG_BIN="$QLOG_BIN" QLOG_TIMEOUT_MS="$QLOG_TIMEOUT_MS" MAX_SESSION_BYTES="$MAX_SESSION_BYTES" bun -e '
     const fs = require("fs");
     const path = require("path");
     const { spawnSync } = require("child_process");
@@ -109,6 +136,24 @@ for SESSION_FILE in "${SESSION_FILES[@]}"; do
 
     const sessionPath = process.env.SESSION_FILE_PATH;
     const qlogBin = process.env.QLOG_BIN;
+    const maxSessionBytes = Number(process.env.MAX_SESSION_BYTES || 8388608);
+    const qlogTimeoutMs = Number(process.env.QLOG_TIMEOUT_MS || 5000);
+    let stat;
+    try {
+      stat = fs.statSync(sessionPath);
+    } catch {
+      console.log("IMPORT_RESULT 0 0 1 transcript-stat-failed");
+      process.exit(0);
+    }
+    if (!stat.isFile()) {
+      console.log("IMPORT_RESULT 0 0 1 transcript-not-regular-file");
+      process.exit(0);
+    }
+    if (stat.size > maxSessionBytes) {
+      console.log("IMPORT_RESULT 0 0 1 transcript-too-large");
+      process.exit(0);
+    }
+
     const lines = fs.readFileSync(sessionPath, "utf-8").trim().split("\n").filter(Boolean);
 
     let meta = null;
@@ -122,14 +167,161 @@ for SESSION_FILE in "${SESSION_FILES[@]}"; do
     }
     if (!meta) {
       console.error("WARN: no session_meta in " + sessionPath);
-      console.log("0 0");
+      console.log("IMPORT_RESULT 0 0 1 transcript-missing-session-meta");
       process.exit(0);
     }
 
     const cwd = meta.cwd || "";
-    const sessionId = (meta.id || path.basename(sessionPath)).slice(0, 64);
+    const metaId = meta.id;
+    const legacyMetaId = meta.session_id;
+    if (metaId !== undefined && legacyMetaId !== undefined && metaId !== legacyMetaId) {
+      console.log("IMPORT_RESULT 0 0 1 transcript-session-id-conflict");
+      process.exit(0);
+    }
+    const headerSessionId = metaId ?? legacyMetaId;
+    if (headerSessionId !== undefined && typeof headerSessionId !== "string") {
+      console.log("IMPORT_RESULT 0 0 1 transcript-session-id-invalid");
+      process.exit(0);
+    }
+    const sessionId = (headerSessionId || path.basename(sessionPath)).slice(0, 64);
 
-    // Walk for agent_message → next user_message pairs.
+    // Codex-native request_user_input calls are response_item records. Keep
+    // call/output pairing structural: never infer an answer from prose or
+    // from an option position when the native output is available.
+    const nativeCalls = new Map();
+    const nativeOutputs = new Map();
+    const nativeDegraded = new Set();
+    const nativeSkipped = { count: 0 };
+    const maxNativeAnswers = 32;
+    const maxNativeAnswerChars = 16384;
+    const maxNativeAnswersChars = 65536;
+    const responsePayload = (e) => (e && e.payload && typeof e.payload === "object") ? e.payload : e;
+    const isResponseItem = (e) => e?.type === "response_item" || e?.payload?.type === "function_call" || e?.payload?.type === "function_call_output";
+    const parseObject = (value) => {
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
+      if (typeof value !== "string") return null;
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    };
+
+    // First identify only synchronous request_user_input calls. Ordinary
+    // shell/MCP/tool calls are intentionally invisible to this importer.
+    for (const e of stream) {
+      if (!isResponseItem(e)) continue;
+      const p = responsePayload(e);
+      if (p?.type === "function_call" && (p.name || p.function_name) === "request_user_input") {
+        const callId = String(p.call_id || p.callId || "").trim();
+        const args = parseObject(p.arguments ?? p.args ?? p.input);
+        if (!callId) { nativeDegraded.add("native-call-missing-id"); continue; }
+        if (!args || !Array.isArray(args.questions)) { nativeDegraded.add("native-call-invalid-arguments"); continue; }
+        const calls = nativeCalls.get(callId) || [];
+        calls.push({ callId, args, timestamp: e.timestamp || p.timestamp || undefined });
+        nativeCalls.set(callId, calls);
+      } else if (p?.type === "function_call" && (p.name || p.function_name) === "request_user_input_async") {
+        // The async variant output is an acknowledgement, not a
+        // native answers map. It is explicitly unsupported until its answer
+        // semantics are proven; never treat it as a malformed sync call.
+        nativeDegraded.add("native-async-unsupported");
+      }
+    }
+
+    // Pair outputs only for recognized synchronous request_user_input call
+    // ids. Unrelated shell/MCP/async outputs are normal transcript records and
+    // must not degrade the import or be interpreted as user answers.
+    for (const e of stream) {
+      if (!isResponseItem(e)) continue;
+      const p = responsePayload(e);
+      if (p?.type === "function_call_output") {
+        const callId = String(p.call_id || p.callId || "").trim();
+        if (!nativeCalls.has(callId)) continue;
+        const output = parseObject(p.output ?? p.result ?? p.value);
+        if (!output) { nativeDegraded.add("native-output-invalid"); continue; }
+        const outputs = nativeOutputs.get(callId) || [];
+        outputs.push({ callId, output, timestamp: e.timestamp || p.timestamp || undefined });
+        nativeOutputs.set(callId, outputs);
+      }
+    }
+
+    const nativeEvents = [];
+    for (const [callId, calls] of nativeCalls.entries()) {
+      const outputs = nativeOutputs.get(callId) || [];
+      for (const call of calls) {
+        const response = outputs.shift();
+        if (!response) {
+          nativeSkipped.count += call.args.questions.length;
+          continue;
+        }
+        const answersById = response.output?.answers;
+        if (!answersById || typeof answersById !== "object" || Array.isArray(answersById)) {
+          nativeDegraded.add("native-output-missing-answers");
+          nativeSkipped.count += call.args.questions.length;
+          continue;
+        }
+        for (const question of call.args.questions) {
+          const questionId = typeof question?.id === "string" ? question.id : "";
+          const summary = typeof question?.question === "string" ? question.question.trim() : "";
+          const options = Array.isArray(question?.options) ? question.options : [];
+          // Secret answers never enter question-log.jsonl. Keep the question
+          // in the bounded skipped count and continue the batch so ordinary
+          // questions in the same native call remain importable.
+          if (question?.isSecret === true) {
+            nativeDegraded.add("native-secret-skipped");
+            nativeSkipped.count++;
+            continue;
+          }
+          const answerEntry = questionId ? answersById[questionId] : null;
+          const answers = Array.isArray(answerEntry)
+            ? answerEntry
+            : answerEntry && Array.isArray(answerEntry.answers) ? answerEntry.answers : null;
+          const nativeAnswersChars = Array.isArray(answers)
+            ? answers.reduce((total, answer) => total + (typeof answer === "string" ? answer.length : 0), 0)
+            : 0;
+          if (!questionId || !questionId.trim() || questionId.length > 128 || /[\u0000\r\n]/.test(questionId)
+            || !summary || !answers || answers.length === 0 || answers.length > maxNativeAnswers
+            || answers.some((answer) => typeof answer !== "string" || !answer.length || answer.length > maxNativeAnswerChars)
+            || nativeAnswersChars > maxNativeAnswersChars) {
+            nativeDegraded.add("native-question-or-answer-invalid");
+            nativeSkipped.count++;
+            continue;
+          }
+          const userChoice = answers.join(" | ");
+          // Keep the legacy scalar field for existing readers (gstack-question-log
+          // bounds it to 64 characters), but carry the native answer array beside
+          // it so a long free-form answer or a multi-select response is not lost.
+          // The qlog validator enforces the native answer bounds without changing
+          // these values.
+          const nativeToolUseId = "codex-native-" + crypto.createHash("sha256")
+            .update(JSON.stringify(["codex-native", callId, questionId]))
+            .digest("hex");
+          nativeEvents.push({
+            skill: "codex",
+            question_id: questionId,
+            native_question_id: questionId,
+            question_summary: summary,
+            ...(options.length > 0 ? { options_count: options.length } : {}),
+            user_choice: userChoice,
+            source: "codex-import-native",
+            session_id: sessionId,
+            codex_session_id: sessionId,
+            codex_cwd: cwd,
+            codex_call_id: callId,
+            // qlog dedup IDs are opaque and bounded; the native call and
+            // question IDs remain separately preserved above.
+            tool_use_id: nativeToolUseId,
+            native_answers: [...answers],
+            ts: call.timestamp || response.timestamp || undefined,
+            codex_ts: call.timestamp || response.timestamp || undefined,
+          });
+        }
+      }
+      if (outputs.length > 0) nativeDegraded.add("native-output-unmatched");
+    }
+
+    // Walk for legacy agent_message → next user_message pairs.
     const briefs = [];
     for (let i = 0; i < stream.length; i++) {
       const e = stream[i];
@@ -206,7 +398,8 @@ for SESSION_FILE in "${SESSION_FILES[@]}"; do
     }
 
     let imported = 0;
-    for (const b of briefs) {
+    const degraded = new Set(nativeDegraded);
+    for (const b of [...nativeEvents, ...briefs]) {
       const res = spawnSync(qlogBin, [JSON.stringify(b)], {
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "pipe"],
@@ -214,15 +407,43 @@ for SESSION_FILE in "${SESSION_FILES[@]}"; do
         // right project. Falls back to the importer cwd if the session cwd
         // no longer exists.
         cwd: cwd && fs.existsSync(cwd) ? cwd : undefined,
-        timeout: 5000,
+        timeout: qlogTimeoutMs,
       });
-      if (res.status === 0) imported++;
+      if (res.error) {
+        degraded.add(res.error.code === "ETIMEDOUT" ? "qlog-timeout" : "qlog-spawn-error");
+      } else if (res.signal) {
+        degraded.add("qlog-signaled");
+      } else if (res.status !== 0) {
+        degraded.add("qlog-nonzero");
+      } else {
+        imported++;
+      }
     }
-    console.log(imported + " 0");
+    const skipped = nativeSkipped.count;
+    console.log("IMPORT_RESULT " + imported + " " + skipped + " " + degraded.size + " " + [...degraded].join(","));
   ' 2>&1)
 
-  IMP=$(echo "$COUNT_LINE" | awk "{print \$1}")
+  RESULT_LINE=$(echo "$COUNT_LINE" | awk '/^IMPORT_RESULT / { line=$0 } END { print line }')
+  if [ -z "$RESULT_LINE" ]; then
+    echo "DEGRADED: parser-failed"
+    DEGRADED=$((DEGRADED + 1))
+    DEGRADED_REASONS="${DEGRADED_REASONS}${DEGRADED_REASONS:+,}parser-failed"
+    continue
+  fi
+
+  IMP=$(echo "$RESULT_LINE" | awk "{print \$2}")
+  SKIP=$(echo "$RESULT_LINE" | awk "{print \$3}")
+  DEG=$(echo "$RESULT_LINE" | awk "{print \$4}")
+  REASONS=$(echo "$RESULT_LINE" | cut -d' ' -f5-)
   IMPORTED=$((IMPORTED + IMP))
+  SKIPPED_NO_ANSWER=$((SKIPPED_NO_ANSWER + SKIP))
+  DEGRADED=$((DEGRADED + DEG))
+  if [ -n "$REASONS" ]; then
+    DEGRADED_REASONS="${DEGRADED_REASONS}${DEGRADED_REASONS:+,}${REASONS}"
+  fi
 done
 
+if [ "$DEGRADED" -gt 0 ]; then
+  echo "DEGRADED: ${DEGRADED_REASONS:-unknown}"
+fi
 echo "IMPORTED: $IMPORTED events from ${#SESSION_FILES[@]} session(s)"

@@ -246,11 +246,7 @@ already ran (via `gbrain init --pglite`); jump straight to Step 5a. When B
 was picked, Steps 3/4/5 are no-ops; also skip Step 7.5 (transcript ingest)
 since memory-stage routes through the artifacts pipeline in remote-http mode.
 
-The bearer token (`GBRAIN_MCP_TOKEN`) stays in process env until Step 5a's
-`claude mcp add --header` consumes it; then `unset GBRAIN_MCP_TOKEN`
-immediately. Token security trade-off documented in
-`setup-gbrain/memory.md`: brief argv exposure during `claude mcp add`,
-resting state in `~/.claude.json` mode 0600.
+{{GBRAIN_TOKEN_LIFETIME}}
 
 ### Switch (from detect's existing-engine state)
 

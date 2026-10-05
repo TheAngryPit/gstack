@@ -695,6 +695,9 @@ bun run gen:skill-docs --host all --dry-run
 
 # Health dashboard covers all hosts
 bun run skill:check
+
+# For a Codex install generated with a selected model (canonical defaults otherwise):
+bun run skill:check --codex-model gpt-6-astra
 ```
 
 ### Adding a new host

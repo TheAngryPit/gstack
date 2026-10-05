@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "upstream_repository": "https://github.com/garrytan/gstack.git",
+  "upstream_commit": "f97aefe654fbe265a3c978d34865b5aa493e7453",
+  "upstream_version": "1.91.22.0",
+  "host": "codex",
+  "installation": "manual",
+  "tests": [
+    "test/codex-native-parity.test.ts",
+    "test/codex-native-source-parity.test.ts",
+    "test/codex-native-complete-output.test.ts",
+    "test/codex-section-loading.test.ts"
+  ]
+}

@@ -88,6 +88,10 @@ function makeFixture(): Fixture {
   return { home, stubDir, codexHome, gstackHome, stubLog, stubArgsLog };
 }
 
+function setUname(f: Fixture, system: 'Linux' | 'Darwin') {
+  fs.writeFileSync(path.join(f.stubDir, 'uname'), `#!/usr/bin/env bash\necho ${system}\n`, { mode: 0o755 });
+}
+
 function runProbe(f: Fixture, stubMode: string, extraEnv: Record<string, string> = {}, call = '_gstack_codex_model_probe'): { stdout: string; stderr: string; status: number } {
   const result = spawnSync(
     'bash',
@@ -370,6 +374,7 @@ describe('B1: codex sandbox preflight and unverified readiness', () => {
     test(`captured ${mode} failure -> sandbox unavailable (exit 3), named like the gate outcome`, () => {
       const f = makeFixture();
       try {
+        setUname(f, 'Linux');
         const r = runProbe(f, 'ok', { STUB_SANDBOX: mode }, '_gstack_codex_sandbox_preflight; echo "rc=$?"');
         expect(r.stdout).toBe('CODEX_SANDBOX: unavailable\nrc=3\n');
         expect(r.stderr.trim()).toBe(unavailable(detail));
@@ -382,6 +387,7 @@ describe('B1: codex sandbox preflight and unverified readiness', () => {
   test('a healthy sandbox, an older CLI without the subcommand, or a timeout defers to the post-run check', () => {
     const f = makeFixture();
     try {
+      setUname(f, 'Linux');
       for (const mode of ['ok', 'unknown']) {
         const r = runProbe(f, 'ok', { STUB_SANDBOX: mode }, '_gstack_codex_sandbox_preflight; echo "rc=$?"');
         expect(r.stdout).toBe('rc=0\n');
@@ -410,10 +416,10 @@ describe('B1: codex sandbox preflight and unverified readiness', () => {
     } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
   });
 
-  test('the preflight runs only on Linux', () => {
+  test('the preflight skips a simulated Darwin host', () => {
     const f = makeFixture();
     try {
-      fs.writeFileSync(path.join(f.stubDir, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+      setUname(f, 'Darwin');
       const r = runProbe(f, 'ok', { STUB_SANDBOX: 'userns' }, '_gstack_codex_sandbox_preflight; echo "rc=$?"');
       expect(r.stdout).toBe('rc=0\n');
       expect(fs.existsSync(`${f.stubLog}.sandbox`)).toBe(false);
@@ -441,6 +447,7 @@ describe('B1: codex sandbox preflight and unverified readiness', () => {
     ] as const) {
       const f = makeFixture();
       try {
+        setUname(f, 'Linux');
         fs.mkdirSync(path.join(f.home, '.claude', 'skills'), { recursive: true });
         fs.symlinkSync(ROOT, path.join(f.home, '.claude', 'skills', 'gstack'));
         const r = spawnSync('bash', ['-c', block], { encoding: 'utf8', timeout: 20000, env: {

@@ -1,0 +1,150 @@
+#!/usr/bin/env -S bun run
+/** Task-scoped enrichment caller; explicit saved binding, no automatic writes. */
+import { spawnSync } from 'child_process';
+import { loadCodexBrain, codexBrainEnv } from '../lib/gbrain-codex-binding';
+import { sha256Hex, writeReceipt, EGRESS_RECEIPT_FAILED } from '../lib/egress-receipt';
+import { preparePrivateRequest, claimPrivateRequest, finishPrivateRequest, type ClaimedRequest } from '../lib/codex-request-file';
+
+const MAX_REQUEST_BYTES = 1_048_576;
+
+async function readBoundedRequest(): Promise<string> {
+  const reader = Bun.stdin.stream().getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let bytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > MAX_REQUEST_BYTES) {
+        await reader.cancel();
+        throw new Error('Request JSON exceeds the 1 MiB limit.');
+      }
+      text += decoder.decode(chunk.value, {stream:true});
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+let ownedRequest: ClaimedRequest | undefined;
+function finishRequest(succeeded: boolean): void {
+  if (!ownedRequest) return;
+  const result = finishPrivateRequest(ownedRequest, succeeded);
+  console.error('GSTACK_REQUEST_ARTIFACT: ' + JSON.stringify(result));
+  ownedRequest = undefined;
+}
+
+try {
+  const args = process.argv.slice(2);
+  if (args[0] === '--prepare-request') {
+    if (args.length !== 1) throw new Error('--prepare-request takes no additional arguments.');
+    console.log(JSON.stringify(preparePrivateRequest()));
+    process.exit(0);
+  }
+  const authorized = args[0] === '--authorized-write';
+  if (authorized) args.shift();
+  const requestStdin = args[0] === '--request-stdin';
+  if (requestStdin) args.shift();
+  const requestFile = args[0] === '--request-file';
+  if (requestFile) {
+    if (requestStdin) throw new Error('Choose only one request transport.');
+    if (args.length !== 2) throw new Error('--request-file requires exactly one allocated path.');
+    ownedRequest = claimPrivateRequest(args[1]);
+    args.splice(0, 2);
+  }
+  const binding = loadCodexBrain();
+  let op = args[0];
+  let stdinInput: string | undefined;
+  const checkSlug = (slug: string) => {
+    if (slug.includes(':')) throw new Error('Source-qualified slugs are not supported; use the selected source.');
+  };
+
+  if (requestStdin || requestFile) {
+    if (args.length !== 0) throw new Error('--request-stdin cannot be combined with operation arguments.');
+    const raw = ownedRequest?.raw ?? await readBoundedRequest();
+    let request: unknown;
+    try { request = JSON.parse(raw); } catch { throw new Error('Request stdin must contain valid JSON.'); }
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Request JSON must be an object.');
+    const fields = request as Record<string, unknown>;
+    const keys = Object.keys(fields).sort();
+    const requireString = (opName: string, key: string, expectedKeys: string[]): string => {
+      if (fields.op !== opName || keys.join(',') !== expectedKeys.slice().sort().join(',')) {
+        throw new Error(`Request JSON for ${opName} must contain exactly ${expectedKeys.join(', ')}.`);
+      }
+      if (typeof fields[key] !== 'string' || fields[key].length === 0) throw new Error(`Request JSON ${key} must be a non-empty string.`);
+      return fields[key] as string;
+    };
+    if (fields.op === 'search') {
+      args.push('search', requireString('search', 'query', ['op', 'query']));
+    } else if (fields.op === 'get') {
+      const slug = requireString('get', 'slug', ['op', 'slug']);
+      checkSlug(slug);
+      args.push('call', 'get_page', JSON.stringify({slug, include_content:true, source_id:binding.source}));
+    } else if (fields.op === 'put') {
+      if (!authorized) throw new Error('Writes require task authorization and --authorized-write.');
+      const slug = requireString('put', 'slug', ['op', 'slug', 'content']);
+      if (typeof fields.content !== 'string') throw new Error('Request JSON content must be a string.');
+      checkSlug(slug);
+      args.push('put', slug);
+      stdinInput = fields.content;
+    } else {
+      throw new Error('Request JSON op must be search, get, or put.');
+    }
+  }
+
+  op = args[0];
+  if (!args[1] || args[1].startsWith('-')) throw new Error('A query or page slug is required.');
+  if (op === 'call') {
+    if (args[1] !== 'get_page' || args.length !== 3) throw new Error('Only call get_page is supported.');
+    const input = JSON.parse(args[2]);
+    if (!input || typeof input.slug !== 'string' || Object.keys(input).some(k => !['slug','source_id','include_content'].includes(k))) throw new Error('Invalid get_page input.');
+    checkSlug(input.slug);
+    if (input.source_id && input.source_id !== binding.source) throw new Error('Source does not match binding.');
+    args[2] = JSON.stringify({...input, source_id: binding.source});
+  } else if (op === 'put') {
+    checkSlug(args[1]);
+    if (!authorized) throw new Error('Writes require task authorization and --authorized-write.');
+    if (!(args.length === 2 || (args.length === 4 && args[2] === '--content'))) throw new Error('Only a slug and optional --content are supported for put.');
+  } else if (!['search', 'get'].includes(op)) {
+    throw new Error('Supported operations: search, get, call get_page; explicitly authorized put.');
+  } else if (args.length !== 2) {
+    throw new Error('Routing overrides are not allowed. Supply only a query or slug.');
+  }
+  if (op === 'get') checkSlug(args[1]);
+  // The selected CLI can federate to a remote DB. Do not expose its URL or
+  // credentials, and do not treat observability as consent. Validation and the
+  // actual write flag precede this fail-closed, content-free attempted-send log.
+  if (op === 'put' && stdinInput === undefined && args.length === 2) {
+    stdinInput = await readBoundedRequest();
+  }
+  const body = op === 'put' ? (stdinInput ?? args[3]) : args.at(-1)!;
+  try {
+    writeReceipt({
+      env: process.env,
+      sink: 'gbrain-codex',
+      host: 'gbrain-db (explicit selected Codex binding)',
+      payloadClass: op === 'put' ? 'document-body (sent by gbrain subprocess)' : 'brain-read-request (sent by gbrain subprocess)',
+      bytes: Buffer.byteLength(body),
+      sha256: sha256Hex(body),
+      consent: op === 'put'
+        ? 'caller supplied --authorized-write; task-scoped authorization attested by caller, not granted by receipt'
+        : 'explicit selected Codex binding; caller must hold task-scoped read authority, not granted by receipt',
+    });
+  } catch {
+    throw new Error(EGRESS_RECEIPT_FAILED + ': no GBrain request dispatched.');
+  }
+  const result = stdinInput === undefined
+    ? spawnSync(binding.command, args, {env: codexBrainEnv(binding), cwd:binding.home, stdio:'inherit'})
+    : spawnSync(binding.command, args, {env: codexBrainEnv(binding), cwd:binding.home, input:stdinInput, stdio:['pipe','inherit','inherit']});
+  finishRequest(result.status === 0);
+  process.exit(result.status ?? 1);
+} catch (error) {
+  finishRequest(false);
+  // No config content, command stderr, or credentials in diagnostics.
+  console.error(`GBrain enrichment unavailable: ${error instanceof Error ? error.message : 'binding error'}`);
+  process.exit(1);
+}

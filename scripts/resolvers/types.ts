@@ -85,6 +85,7 @@ import type { Model } from '../models';
 export type { Model } from '../models';
 
 export interface TemplateContext {
+  sectionBase?: string; // Generated host-specific section directory.
   skillName: string;
   tmplPath: string;
   benefitsFrom?: string[];

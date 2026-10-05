@@ -32,7 +32,7 @@ jobs:
     # (EV6, fork port wave 2). Skip the build for dependabot; the evals job's
     # explicit actor guard mirrors it because no eval test selects on a lockfile-only
     # diff — a maintainer's next push rebuilds the image with real perms.
-    if: github.actor != 'dependabot[bot]'
+    if: github.repository == 'garrytan/gstack' && github.actor != 'dependabot[bot]'
     runs-on: ubicloud-standard-8
     timeout-minutes: 15
     permissions:
@@ -121,7 +121,7 @@ jobs:
   # branch (see CLAUDE.md's garrytan-agents workflow).
   plan-slices:
     runs-on: ubicloud-standard-8
-    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.repository == 'garrytan/gstack' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 10
     permissions:
       contents: read

@@ -9,6 +9,7 @@
  * When `QUESTION_TUNING: false`, agents skip the entire section.
  */
 import type { TemplateContext } from './types';
+import { replaceBlock } from './native-template-utils';
 
 function binDir(ctx: TemplateContext): string {
   return ctx.paths.binDir; // env-var hosts already resolve to $GSTACK_BIN via types.ts
@@ -25,7 +26,7 @@ export function generateQuestionTuning(ctx: TemplateContext): string {
   // `scripts/question-registry.ts` never resolves — the lookup silently fails
   // and every question_id gets fabricated via the {skill}-{slug} fallback.
   const registry = `${ctx.paths.skillRoot}/scripts/question-registry.ts`;
-  return `## Question Tuning (skip entirely if \`QUESTION_TUNING: false\`)
+  const output = `## Question Tuning (skip entirely if \`QUESTION_TUNING: false\`)
 
 Before each decision brief (AskUserQuestion or Conductor/fallback prose), choose \`question_id\` from \`${registry}\` or \`{skill}-{slug}\`, then run \`printf '%s' "<question summary>" | ${bin}/gstack-question-preference --check "<id>" --summary-stdin\` (so the one-way-door keyword check sees the text). \`AUTO_DECIDE\` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." \`ASK_NORMALLY\` means ask.
 
@@ -48,4 +49,12 @@ ${bin}/gstack-question-preference --write '{"question_id":"<id>","preference":"<
 \`\`\`
 
 Exit code 2 = rejected as not user-originated; do not retry. On success: "Set \`<id>\` → \`<preference>\`. Active immediately."`;
+  if (ctx.host !== 'codex') return output;
+  return replaceBlock(output, 'Before each decision brief', 'Substitute `SESSION_ID`', `Before an optional preference question, choose \`question_id\` from \`${registry}\` or \`{skill}-{slug}\`, then run \`printf '%s' "<question summary>" | ${bin}/gstack-question-preference --check "<id>" --summary-stdin\`. \`AUTO_DECIDE\` means choose the recommended optional preference and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." \`ASK_NORMALLY\` means ask. A preference never authorises access, publication, credentials, spend, destructive actions, or any new consequence. Native approvals and refusals stay authoritative; ask an actual permission question directly and pause at that gate.
+
+Use the advertised native question schema for optional choices. If it is unavailable, ask plainly. Put a stable question_id in the supported identifier field when available and append \`<gstack-qid:{question_id}>\` to the prompt for compatibility; do not promise this marker is invisible or interpreted by a native hook. Label exactly one recommendation with the native schema's supported suffix. Ambiguous recommendations require asking.
+
+After an actual answer, log best-effort using the command below. Do not claim automatic hook capture or deterministic dedup unless it was verified on this exact native runtime; manual records are not proof of hook delivery.
+
+`);
 }

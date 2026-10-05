@@ -32,7 +32,11 @@ Host and system plan-mode restrictions and the user's current scope take precede
 
 ## Skill Invocation During Plan Mode
 
-${invocation}`;
+${ctx.host === 'codex' ? `System and developer instructions determine the active mode and permitted
+operations. The invoked skill takes precedence over generic plan mode behavior
+only within those constraints.
+
+` : ''}${invocation}`;
 }
 
 export function generateCompletionStatus(ctx: TemplateContext): string {

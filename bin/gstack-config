@@ -10,6 +10,8 @@
 #   gstack-config unset <key>        — remove a key from the config file
 #   gstack-config list               — show all config (values + defaults)
 #   gstack-config defaults           — show just the defaults table
+#   gstack-config gbrain-refresh --host codex [--server NAME] [--model MODEL]
+#                                    — refresh an explicitly selected native brain
 #
 # State root: GSTACK_STATE_ROOT → GSTACK_HOME → GSTACK_STATE_DIR →
 # CLAUDE_PLUGIN_DATA (only when CLAUDE_PLUGIN_ROOT contains "gstack") →
@@ -865,6 +867,9 @@ case "${1:-}" in
     resolve_user_slug
     ;;
   gbrain-refresh)
+    if [ "${2:-}" = "--host" ] && [ "${3:-}" = "codex" ]; then
+      GSTACK_HOME="$STATE_DIR" exec bun "$(dirname "$0")/../scripts/refresh-codex-gbrain.ts" "${@:4}"
+    fi
     # Brain integration helper: re-detect gbrain installation state and
     # persist to ~/.gstack/gbrain-detection.json. gen-skill-docs reads this
     # file (when invoked with --respect-detection) to decide whether to

@@ -48,6 +48,7 @@ const POLARITY: Record<string, 'fail-closed' | 'fail-open'> = {
   'brain-sync': 'fail-closed',
   'memory-ingest': 'fail-closed',
   'gbrain-sync': 'fail-closed',
+  'gbrain-codex': 'fail-closed',
   'telemetry-sync': 'fail-closed',
   'browse-tunnel (ngrok)': 'fail-closed',
   'gbrain-mcp-verify': 'fail-closed',
@@ -72,6 +73,7 @@ const POLARITY: Record<string, 'fail-closed' | 'fail-open'> = {
 
 /** TS sinks: must import the canonical helper and call writeReceipt(). */
 const MODULE_SINKS = [
+  'bin/gstack-gbrain-codex',
   'bin/gstack-gbrain-sync.ts',
   'bin/gstack-memory-ingest.ts',
   'browse/src/server.ts',
@@ -342,6 +344,7 @@ describe('egress receipt wiring tripwire', () => {
       'brain-sync',
       'browse-tunnel (ngrok)',
       'design-detect-engine-download',
+      'gbrain-codex',
       'gbrain-mcp-verify',
       'gbrain-sync',
       'memorable-recall',

@@ -114,9 +114,9 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       install(f);
       expect(tree(f.global)).toEqual(before);
       expect(existsSync(join(renderedRoot, 'SKILL.md'))).toBe(true);
-      expect(realpathSync(join(local, 'gstack/SKILL.md'))).toBe(join(renderedRoot, 'SKILL.md'));
+      expect(realpathSync(join(local, 'gstack/SKILL.md'))).toBe(realpathSync(join(renderedRoot, 'SKILL.md')));
       expect(readFileSync(globalRoot)).toEqual(readFileSync(join(renderedRoot, 'SKILL.md')));
-      expect(realpathSync(join(local, 'gstack/bin'))).toBe(join(f.source, 'bin'));
+      expect(realpathSync(join(local, 'gstack/bin'))).toBe(realpathSync(join(f.source, 'bin')));
     }
   }, 90_000);
 

@@ -28,6 +28,9 @@ Options:
                     An explicit --host never changes another host's install.
   --global          Allow this checkout to replace an existing global install
                     (or register Codex globally from a project-vendored source).
+  --model <id>      Codex model profile override. Otherwise reads Codex config.
+  --codex-hooks     Register Codex lifecycle hooks; native /hooks trust remains required.
+  --codex-hooks-status  Inspect Codex lifecycle registration only (default; no writes).
   --prefix          Install skills with the gstack- prefix (e.g. /gstack-review).
   --no-prefix       Install skills with short names (e.g. /review). Default.
   --team            Switch to team mode (per-repo gstack with auto-update).
@@ -159,6 +162,7 @@ PLAN_TUNE_HOOKS_MODE=""   # "" = resolve from env/config/prompt; "yes"/"no" = ex
 TIMELINE_STOP_HOOK_MODE=""  # "" = resolve from env/config; "yes"/"no" = explicit (#2677)
 MODEL_OVERRIDE=""
 MODEL_OVERRIDE_SET=0
+CODEX_HOOKS_ACTION="status" # Registration is explicit; inspection is the default.
 CLAUDE_MODEL_ARG=""
 CLAUDE_MODEL_SET=0
 REFRESH_REGISTERED=0
@@ -194,6 +198,8 @@ while [ $# -gt 0 ]; do
     --host=*) HOST="${1#--host=}"; HOST_FLAG_SET=1; shift ;;
     --model) [ -z "$2" ] && echo "Missing value for --model" >&2 && exit 1; MODEL_OVERRIDE="$2"; MODEL_OVERRIDE_SET=1; shift 2 ;;
     --model=*) MODEL_OVERRIDE="${1#--model=}"; MODEL_OVERRIDE_SET=1; shift ;;
+    --codex-hooks) CODEX_HOOKS_ACTION="install"; shift ;;
+    --codex-hooks-status) CODEX_HOOKS_ACTION="status"; shift ;;
     --claude-model) [ -z "$2" ] && echo "Missing value for --claude-model (a Claude model ID such as claude-opus-4-8, or claude)" >&2 && exit 1; CLAUDE_MODEL_ARG="$2"; CLAUDE_MODEL_SET=1; shift 2 ;;
     --claude-model=*) CLAUDE_MODEL_ARG="${1#--claude-model=}"; [ -z "$CLAUDE_MODEL_ARG" ] && echo "Missing value for --claude-model (a Claude model ID such as claude-opus-4-8, or claude)" >&2 && exit 1; CLAUDE_MODEL_SET=1; shift ;;
     --local) LOCAL_INSTALL=1; shift ;;
@@ -2658,6 +2664,10 @@ create_codex_runtime_root() {
   if [ -d "$gstack_dir/browse/bin" ]; then
     _link_or_copy "$gstack_dir/browse/bin" "$codex_gstack/browse/bin"
   fi
+  if [ -d "$gstack_dir/hosts/codex" ]; then
+    mkdir -p "$codex_gstack/hosts"
+    _link_or_copy "$gstack_dir/hosts/codex" "$codex_gstack/hosts/codex"
+  fi
   _link_runtime_dists "$gstack_dir" "$codex_gstack"
   if [ -f "$agents_dir/gstack-upgrade/SKILL.md" ]; then
     _copy_skill_md "$agents_dir/gstack-upgrade/SKILL.md" "$codex_gstack/gstack-upgrade/SKILL.md"
@@ -3367,6 +3377,22 @@ if [ "$INSTALL_CODEX" -eq 1 ]; then
     log "  note: --model applies to this run only. To persist across upgrades,"
     log "  set model = \"$MODEL_OVERRIDE\" in \${CODEX_HOME:-~/.codex}/config.toml."
   fi
+  # Native lifecycle inspection only unless the operator selected --codex-hooks.
+  # Register the stable runtime root, never a temporary generator output path.
+  if [ -f "$SOURCE_GSTACK_DIR/bin/gstack-codex-hooks.ts" ] \
+     && [ -x "$CODEX_GSTACK/hosts/codex/hooks/codex-lifecycle-hook" ]; then
+    if bun_cmd "$SOURCE_GSTACK_DIR/bin/gstack-codex-hooks.ts" "$CODEX_HOOKS_ACTION" --root "$CODEX_GSTACK"; then
+      if [ "$CODEX_HOOKS_ACTION" = "install" ]; then
+        log "  Codex lifecycle definitions registered. Review/trust the exact command in native /hooks; registration is not runtime proof."
+      else
+        log "  Codex lifecycle inspection only. Use --codex-hooks to register; transcript import remains separately opt-in."
+      fi
+    else
+      log "  warning: Codex lifecycle $CODEX_HOOKS_ACTION failed; registration/trust are not proven."
+    fi
+  else
+    log "  Codex lifecycle bridge unavailable at the installed runtime root; no hook registration performed."
+  fi
 fi
 
 # 6. Install for Kiro CLI from its own host render
@@ -3647,6 +3673,7 @@ fi
 rm -f /tmp/gstack-latest-version
 
 # 10. Team mode: register/unregister SessionStart hook
+if [ "$INSTALL_CLAUDE" -eq 1 ]; then
 SETTINGS_HOOK="$SOURCE_GSTACK_DIR/bin/gstack-settings-hook"
 # Claude Code hooks belong to the Claude install. A setup that did not select
 # Claude (--host codex, kiro, …) never heals, registers or removes them (#2347).
@@ -3778,7 +3805,12 @@ if [ "$NO_TEAM_MODE" -eq 1 ]; then
   log "Team mode disabled: auto-update hook removed."
 fi
 
+fi # INSTALL_CLAUDE: canonical hook healing and team hooks
+
 # ─── GBrain detection + conditional SKILL.md render ─────────────────────
+# This is the Claude Code render path. Codex uses its explicit native binding
+# refresh helper and must not probe or write GBrain state during a Codex-only
+# setup run.
 #
 # Detect whether gbrain is installed and persist the result to
 # ~/.gstack/gbrain-detection.json so gen-skill-docs can decide whether to
@@ -3800,6 +3832,7 @@ fi
 #
 # Users who install gbrain after running ./setup should re-run setup OR
 # call `gstack-config gbrain-refresh`.
+if [ "$INSTALL_CLAUDE" -eq 1 ]; then
 DETECT_BIN="$SOURCE_GSTACK_DIR/bin/gstack-gbrain-detect"
 GBRAIN_STATE_DIR="$GSTACK_STATE_ROOT"
 DETECTION_FILE="$GBRAIN_STATE_DIR/gbrain-detection.json"
@@ -3915,6 +3948,8 @@ if [ "$INSTALL_CLAUDE" -eq 1 ] && [ -z "$_CLAUDE_INSTALL_RENDER" ] && [ -z "${GS
   fi
 fi
 
+fi # INSTALL_CLAUDE: legacy GBrain detection and render
+
 # Hook path resolution is CANONICAL-ONLY via the resolver defined near
 # CANONICAL_GSTACK_ROOT above (_hook_command_path): a hook command registered into
 # ~/.claude/settings.json must survive deletion of the directory setup ran
@@ -3923,6 +3958,7 @@ fi
 # $SOURCE_GSTACK_DIR here. A missing canonical hook means "skip registration
 # with a log line", never "bake the running tree's path".
 
+if [ "$INSTALL_CLAUDE" -eq 1 ]; then
 # 11. Plan-tune cathedral hook install (T8).
 #
 # Registers PostToolUse (deterministic AUQ capture) + PreToolUse (preference
@@ -4257,6 +4293,8 @@ if [ "$NO_TEAM_MODE" -eq 1 ] && [ -x "$SETTINGS_HOOK" ]; then
   # sweeps both, correctly, because there the binaries themselves are removed).
   GSTACK_SWEEP_EXCLUDE_SOURCES="verify-gate,gstack-memorable" "$SETTINGS_HOOK" prune-stale --all >/dev/null || true
 fi
+
+fi # INSTALL_CLAUDE: question and timeline hooks
 
 # ─── Redact pre-push guard consent (#1946) ───────────────────────────────────
 # The credential pre-push hook is per-REPO state — setup runs in the gstack

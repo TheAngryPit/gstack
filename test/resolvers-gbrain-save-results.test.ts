@@ -22,12 +22,12 @@ import {
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import type { TemplateContext } from '../scripts/resolvers/types';
 
-function buildCtx(skillName: string): TemplateContext {
+function buildCtx(skillName: string, host: 'claude' | 'codex' = 'claude'): TemplateContext {
   return {
     skillName,
     tmplPath: `/tmp/${skillName}/SKILL.md.tmpl`,
-    host: 'claude',
-    paths: HOST_PATHS.claude,
+    host,
+    paths: HOST_PATHS[host],
   };
 }
 
@@ -135,5 +135,19 @@ describe('generateGBrainContextLoad — compression pin', () => {
       const out = generateGBrainContextLoad(buildCtx(skill));
       expect(out).not.toContain('data-research');
     }
+  });
+});
+
+describe('generateGBrainSaveResults — native Codex writeback contract', () => {
+  test('uses the guarded caller and requires source-bound readback after put', () => {
+    const out = generateGBrainSaveResults(buildCtx('plan-ceo-review', 'codex'));
+
+    expect(out).toContain('gstack-gbrain-codex" --authorized-write --request-stdin');
+    expect(out).toContain('{"op":"put","slug":"ceo-plans/<feature-slug>"');
+    expect(out).toContain('{"op":"get","slug":"<same slug>"}');
+    expect(out).toContain('allocate a fresh read request');
+    expect(out).toContain('source-bound readback');
+    expect(out).not.toContain('gbrain put');
+    expect(out).not.toContain('call get_page');
   });
 });
