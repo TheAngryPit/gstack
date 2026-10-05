@@ -14,20 +14,62 @@
 
 import { describe, test, expect } from 'bun:test';
 import { spawnSync } from 'child_process';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-const codexPath = spawnSync('which', ['codex'], { encoding: 'utf-8', timeout: 30_000 }).stdout.trim();
-const codexAvailable = codexPath.length > 0;
+const codexPath = Bun.which('codex');
+const codexAvailable = Boolean(codexPath);
+
+function runResumeHelp() {
+  const root = mkdtempSync(join(tmpdir(), 'gstack-codex-resume-help-'));
+  const home = join(root, 'home');
+  const codexHome = join(root, 'codex-home');
+  const temp = join(root, 'tmp');
+  const appData = join(root, 'appdata');
+  const localAppData = join(root, 'local-appdata');
+  for (const directory of [home, codexHome, temp, appData, localAppData]) {
+    mkdirSync(directory, { recursive: true });
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    CODEX_HOME: codexHome,
+    TMPDIR: temp,
+    TMP: temp,
+    TEMP: temp,
+    APPDATA: appData,
+    LOCALAPPDATA: localAppData,
+  };
+  // Never pass ambient model-provider credentials to this help-only probe.
+  // The fresh CODEX_HOME is intentionally empty; no auth/config files are copied.
+  const credentialName = /^(?:CODEX|OPENAI|ANTHROPIC|CLAUDE|GEMINI|GOOGLE|AZURE_OPENAI)_.*(?:API_KEY|API_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|SESSION_TOKEN|CREDENTIALS?)$/i;
+  for (const name of Object.keys(env)) {
+    if (credentialName.test(name)) delete env[name];
+  }
+
+  try {
+    return spawnSync(codexPath!, ['exec', 'resume', '--help'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+      env,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 describe.skipIf(!codexAvailable)(
   'codex exec resume — flag semantics (live CLI smoke; closes #1270 regex-only gap)',
   () => {
     test('codex exec resume --help mentions sandbox_mode as a -c config key', () => {
-      const result = spawnSync('codex', ['exec', 'resume', '--help'], {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 10_000,
-      });
+      const result = runResumeHelp();
       const helpText = (result.stdout || '') + '\n' + (result.stderr || '');
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
       // The /codex skill builds resume invocations with `-c 'sandbox_mode="read-only"'`.
       // If codex stops accepting `-c sandbox_mode=...` for the resume subcommand,
       // every resume invocation through gstack starts failing.
@@ -35,12 +77,10 @@ describe.skipIf(!codexAvailable)(
     });
 
     test('codex exec resume --help does NOT advertise -C as a top-level flag', () => {
-      const result = spawnSync('codex', ['exec', 'resume', '--help'], {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 10_000,
-      });
+      const result = runResumeHelp();
       const helpText = (result.stdout || '') + '\n' + (result.stderr || '');
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
       // The whole point of #1270 was that `codex exec resume` rejects `-C <dir>`.
       // If the help text starts listing `-C` again, the SKILL.md guidance to
       // drop `-C` is wrong and the surrounding `cd "$_REPO_ROOT"` workaround is
