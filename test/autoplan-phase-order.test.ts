@@ -387,7 +387,8 @@ describe('phase-close control ownership across installed hosts', () => {
       expect(rendered).toContain(`${ctx.paths.skillRoot}/autoplan/sections/phase-close.md`);
       expect(rendered).toContain('and execute it');
     } else if (host.name === 'codex') {
-      expect(rendered).toContain(`${ctx.paths.skillRoot}/.agents/skills/gstack-autoplan/sections/phase-close.md`);
+      expect(rendered).toContain('`sections/phase-close.md` relative to the installed `gstack-autoplan` SKILL.md directory');
+      expect(rendered).toContain('that section is the source of truth');
       expect(rendered).toContain('and execute it');
     } else {
       expect(rendered).toBe(template);

@@ -555,9 +555,8 @@ describe('host config correctness', () => {
     expect(factory.frontmatter.conditionalFields![0].add).toEqual({ 'disable-model-invocation': true });
   });
 
-  test('codex restores outside-review resolvers while retaining the Review Army restriction', () => {
-    expect(codex.suppressedResolvers).toContain('REVIEW_ARMY');
-    for (const resolver of ['CODEX_SECOND_OPINION', 'ADVERSARIAL_STEP', 'CODEX_PLAN_REVIEW', 'CODEX_DOC_REVIEW', 'DESIGN_OUTSIDE_VOICES']) {
+  test('codex restores native outside-review and Review Army resolvers', () => {
+    for (const resolver of ['CODEX_SECOND_OPINION', 'ADVERSARIAL_STEP', 'CODEX_PLAN_REVIEW', 'CODEX_DOC_REVIEW', 'DESIGN_OUTSIDE_VOICES', 'REVIEW_ARMY']) {
       expect(codex.suppressedResolvers).not.toContain(resolver);
     }
   });

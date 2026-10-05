@@ -108,8 +108,14 @@ describe('generated automatic review coverage', () => {
     const host = ALL_HOST_CONFIGS.find(h => h.name === 'codex')!;
     for (const skill of ['review', 'ship']) {
       const text = readUnion(skillDir(host, skill));
+      const normalized = text.replace(/\s+/g, ' ');
       expect(text).toContain('Codex independent review: specialist review army');
       expect(text).toContain('review_not_run');
+      expect(normalized).toContain('A timeout alone does not prove termination.');
+      expect(normalized).toContain('follow the parent\'s Fix-First stop path without edits');
+      expect(normalized).toContain('Keep completion pending while selected coverage remains unresolved.');
+      expect(normalized).toContain('evidence_paths, helper_target');
+      expect(normalized).toContain('never label a demonstrated defect advisory merely because sharing a helper could fix it');
       expect(text).not.toContain('gstack-claude-code');
       expect(shellLines(text).filter(line => /\bcodex\s+(?:exec|review)\b|\bgstack-claude-code\s+--/.test(line))).toEqual([]);
     }

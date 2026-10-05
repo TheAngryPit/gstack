@@ -1,7 +1,7 @@
 /**
  * Review Army resolver — parallel specialist reviewers for /review
  *
- * Generates template prose that instructs Claude to:
+ * Generates template prose for each supported host to:
  * 1. Detect stack and scope (via gstack-diff-scope)
  * 2. Select and dispatch specialist subagents in parallel
  * 3. Collect, parse, merge, and deduplicate JSON findings
@@ -92,7 +92,8 @@ function generateSpecialistDispatch(ctx: TemplateContext): string {
 ${generateCodexNativeReview(ctx, 'specialist review army')}
 Use the selection and adaptive gating above unchanged. These specialists supplement
 the main review; a failed specialist does not block it but must be reported as missing
-coverage. Dispatch selected independent specialists in parallel only within the actual
+coverage. Missing selected coverage prevents claiming the Review Army complete or
+clean. Dispatch selected independent specialists in parallel only within the actual
 native capacity and task authority; otherwise use bounded batches, not invented slots.
 
 The parent prepares each packet: the FULL selected specialist checklist, stack context,
@@ -107,15 +108,25 @@ contains that full evidence. Missing paths remain unverified, never clean.
 **Output contract:** One JSON finding per line, no preamble or commentary:
 {"severity":"CRITICAL|INFORMATIONAL","confidence":8,"path":"file","line":1,"category":"category","summary":"description","fix":"recommended fix","fingerprint":"path:line:category","specialist":"name"}
 Required: severity, confidence, path, category, summary, specialist.
-Optional: line, fix, fingerprint, evidence, test_stub, advisory, lines_removable.
+Optional: line, fix, fingerprint, evidence, evidence_paths, helper_target, test_stub,
+advisory, lines_removable.
 For a testable defect, include a minimal test_stub in the detected TEST_FW with clear
 describe/it/test intent. Skip stubs for architectural/design-only findings. Preserve
-the simplification checklist's advisory fields. If no findings, return NO FINDINGS.
+the simplification checklist's advisory fields. Optional extraction advice belongs to
+the core shared-code check; do not duplicate its proposals. Report real defects in
+duplicated code independently. Preserve advisory metadata for structural advice; never
+label a demonstrated defect advisory merely because sharing a helper could fix it. If
+no findings, return NO FINDINGS.
 
-Collect actual final outputs through advertised native waits before merging. Failed,
-timed-out or unavailable contexts are review_not_run, not NO FINDINGS. Record the
-specialist and reason, continue with successful results, and do not count failed
-dispatches as zero-finding samples in adaptive hit-rate statistics.
+Collect actual final outputs through advertised native waits before merging. Before
+editing, confirm every dispatched reviewer task has finished or stopped. A timeout
+alone does not prove termination. If a reader is live or its state is unknown, wait or
+inspect its native task status; if you cannot confirm termination, follow the parent's
+Fix-First stop path without edits. Failed, timed-out or unavailable contexts are
+review_not_run, not NO FINDINGS or completed/clean coverage. Record the specialist and
+reason, continue independent review work where safe, and do not count failed dispatches
+as zero-finding samples in adaptive hit-rate statistics. Keep completion pending while
+selected coverage remains unresolved.
 `;
   return `### Dispatch specialists in parallel
 

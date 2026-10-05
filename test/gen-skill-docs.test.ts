@@ -2892,7 +2892,7 @@ describe('Codex generation (--host codex)', () => {
     // form (.claude/skills/review/) only resolved inside gstack's own checkout.
     const content = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-review', 'SKILL.md'), 'utf-8');
     expect(content).toContain('$GSTACK_ROOT/review/checklist.md');
-    // design-checklist.md is now referenced via Review Army specialist (Claude only, stripped for Codex)
+    // design-checklist.md is referenced by both Claude and native Codex Review Army specialists.
     // Wrong: must NOT reference gstack-review/checklist.md (file doesn't exist there)
     expect(content).not.toContain('.agents/skills/gstack-review/checklist.md');
   });

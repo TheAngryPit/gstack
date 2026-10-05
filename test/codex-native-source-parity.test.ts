@@ -177,11 +177,15 @@ describe('original source to native obligations', () => {
   });
 
   test('source tracing and packet-only review have explicit different proof limits', () => {
-    const output = RESOLVERS.REVIEW_ARMY(ctx('review'));
+    const output = RESOLVERS.REVIEW_ARMY(ctx('review')).replace(/\s+/g, ' ');
     expect(output).toContain('FULL selected specialist checklist');
     expect(output).toContain('bounded read-only source inspection');
     expect(output).toContain('Missing paths remain unverified');
-    expect(output).toContain('timed-out or unavailable contexts are review_not_run');
+    expect(output).toContain('Failed, timed-out or unavailable contexts are review_not_run, not NO FINDINGS or completed/clean coverage.');
+    expect(output).toContain('A timeout alone does not prove termination.');
+    expect(output).toContain('Keep completion pending while selected coverage remains unresolved.');
+    expect(output).toContain('evidence_paths, helper_target');
+    expect(output).toContain('never label a demonstrated defect advisory merely because sharing a helper could fix it');
     expect(output).toContain('zero returned findings from a failed attempt is not a clean review');
     expect(output).toContain('ASK-only');
     expect(output).toContain('quality_score = max(0, 10 -');
