@@ -63,7 +63,10 @@ test('every operational line in adapted ship sections is conserved with host rew
     expect(generated.includes('{{')).toBe(false);
     const source = `ship/sections/${name}`;
     const ctx = {skillName:'ship',tmplPath:source,host:'codex' as const,paths:HOST_PATHS.codex};
-    let adapted = adaptNativeTemplate(readFileSync(join(root,source),'utf8'), ctx, source);
+    // Match processTemplate's LF normalization before adapting: Windows
+    // checkouts with core.autocrlf=true feed CRLF on disk, but generation
+    // deliberately normalizes the input before resolver and rewrite passes.
+    let adapted = adaptNativeTemplate(readFileSync(join(root,source),'utf8').replace(/\r\n/g,'\n'), ctx, source);
     for(const rewrite of changes) adapted=adapted.split(rewrite.from).join(rewrite.to);
     adapted=rewriteCarvedSectionRefs(adapted,ctx);
     for(const line of adapted.split('\n')) {

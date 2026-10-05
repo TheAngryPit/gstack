@@ -88,10 +88,17 @@ test('late adversarial and comment fixes queue for the parent outside Step 9.4',
 
 test.each(ALL_HOST_CONFIGS.map(({ name }) => name))('%s: ship adversarial approvals queue and only ship carries the finish phase', host => {
   const ctx = { host, skillName: 'ship', tmplPath: '', paths: HOST_PATHS[host] };
-  expectMentions(compact(generateAdversarialStep(ctx)), [['queue', 'without editing'], ['outside coverage']], `${host} ship adversarial`);
+  const adversarial = compact(generateAdversarialStep(ctx));
+  if (host === 'codex') {
+    expectMentions(adversarial, [['queue', 'do not edit'], ['outside', 'coverage']], `${host} ship adversarial`);
+  } else {
+    expectMentions(adversarial, [['queue', 'without editing'], ['outside coverage']], `${host} ship adversarial`);
+  }
   const standalone = generateAdversarialStep({ ...ctx, skillName: 'review' });
   expectAbsent(standalone, ['Before Step 12:', '### Finish the adversarial phase'], `${host} review adversarial`);
-  expectTokens(standalone, [/Step 5's Fix-First/], `${host} review adversarial`);
+  expectTokens(standalone, [host === 'codex'
+    ? /Return all findings and structured-review decisions to Step 5 for its Fix-First handling/
+    : /Step 5's Fix-First/], `${host} review adversarial`);
 });
 
 test('outside challenge availability keeps the review gates and fix limit', () => {

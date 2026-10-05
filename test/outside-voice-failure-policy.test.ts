@@ -52,16 +52,24 @@ describe('outsideVoiceFailurePolicy', () => {
   });
 });
 
-// ─── MISSING COVERAGE retention ────────────────────────────────────
-// At 96764e80, exactly the adversarial step (review + ship, every host) told
-// the agent that a timed-out outside pass is MISSING COVERAGE. The prose
-// unification must not turn any of those into a silent timeout.
-describe('timeout MISSING COVERAGE wording is retained', () => {
+// ─── Incomplete coverage retention ─────────────────────────────────
+// Non-Codex hosts run an outside provider and must label its timeout MISSING
+// COVERAGE. Codex replaces that transport with a native reviewer, whose failed
+// or timed-out dispatch is review_not_run; its structured gate still fails
+// closed as MISSING COVERAGE.
+describe('incomplete review coverage stays explicit', () => {
   const timeoutLine = (text: string) => text.split('\n').find((l) => l.startsWith('- **Timeout:**')) ?? '';
 
   test.each(ALL_HOST_CONFIGS.flatMap((h) => ['review', 'ship'].map((s) => [h.name, s])))(
     'adversarial step on %s /%s', (host, skill) => {
-      expect(timeoutLine(generateAdversarialStep(ctxFor(host, skill)))).toContain('MISSING COVERAGE');
+      const step = generateAdversarialStep(ctxFor(host, skill));
+      if (host === 'codex') {
+        const flat = step.replace(/\s+/g, ' ');
+        expect(flat).toMatch(/timeout, failed dispatch, or unavailable fresh-context API is `review_not_run`, never a clean review/i);
+        expect(flat).toMatch(/failure, refusal, timeout or missing severity\/no-findings marker is MISSING COVERAGE, not a clean result/i);
+      } else {
+        expect(timeoutLine(step)).toContain('MISSING COVERAGE');
+      }
     });
 
   test.each(['review/sections/adversarial.md', 'ship/sections/adversarial.md'])('generated %s', (rel) => {

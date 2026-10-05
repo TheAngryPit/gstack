@@ -289,13 +289,21 @@ describe('QA caller authority in pure host renders', () => {
     test(`${host.name}: orchestration logs reviewer attempts before parent-owned edits`, () => {
       const body = RESOLVERS.ADVERSARIAL_STEP(context(host.name, 'review'));
       const flat = body.replace(/\s+/g, ' ');
-      expect(flat).toMatch(/Fix-First handling at Step 5; do not edit during Step 4\.8/i);
+      if (host.name === 'codex') {
+        expect(flat).toMatch(/Return all findings and structured-review decisions to Step 5 for its Fix-First handling/i);
+        expect(flat).toMatch(/never borrow the parent review token or reuse a consumed token/i);
+        expect(flat).toMatch(/the required native pass is part of review completion/i);
+        expect(flat).toMatch(/missing, failed or stopped passes are review_not_run, never zero findings or a clean result/i);
+        expect(flat).toMatch(/a result record for each attempted source, phase and attempt/i);
+      } else {
+        expect(flat).toMatch(/Fix-First handling at Step 5; do not edit during Step 4\.8/i);
+        expect(flat).toMatch(/do not overwrite the parent's REVIEW_START/i);
+        expect(flat).toMatch(/native pass is required for Step 5\.8 completion/i);
+        expect(flat).toMatch(/one record per source, phase and attempt/i);
+        expect(flat).toMatch(/each token is consumed once/i);
+      }
       expect(flat).toMatch(/do not start an inner repair loop/i);
-      expect(flat).toMatch(/do not overwrite the parent's REVIEW_START/i);
-      expect(flat).toMatch(/one record per source, phase and attempt/i);
-      expect(flat).toMatch(/each token is consumed once/i);
       expect(body).not.toContain('address the findings. Re-run the same shared structured invocation');
-      expect(flat).toMatch(/native pass is required for Step 5\.8 completion/i);
     });
 
     test(`${host.name}: orchestration skips only history matching without user skips`, () => {

@@ -81,6 +81,9 @@ Apply Step 9.3's matching procedure before testing the actionable fix queue. Onl
 unmatched or reopened findings remain queued; historical Skips stay unmatched until
 validated against the exact finding. Preserve scoped approvals.
 
+Queue all FIXABLE findings for Step 9.3's parent-owned Fix-First disposition; do not
+edit them during Step 11.
+
 Apply these decisions in order before leaving Step 11:
 
 1. **Required native review incomplete:** STOP and confirm the native task stopped.
@@ -166,8 +169,9 @@ review or silently override the setting. Start a separate PASS_START before disp
 Return prioritized findings with exact locations, confidence, concrete failure
 conditions and suggested checks. For each P1, ask whether to investigate and fix now
 or continue with that known risk. Do not silently waive a P1 or choose for the
-operator. A failure, refusal, timeout or missing severity/no-findings marker is
-MISSING COVERAGE, not a clean result.
+operator. If the operator continues, retain acknowledged findings and the failed
+gate; do not report a clean review. A failure, refusal, timeout or missing
+severity/no-findings marker is MISSING COVERAGE, not a clean result.
 
 Present each actual output and synthesize overlap, unique findings, FIXABLE versus
 INVESTIGATE dispositions, passes attempted/completed/skipped, reviewer identity as

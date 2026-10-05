@@ -44,8 +44,15 @@ describe.each(ALL_HOST_CONFIGS.map(({ name }) => name))('%s ship skip/requeue co
   test('fixed regressions and missing Skip proof are not suppressed', () => {
     expect(dedup).toContain('never `fixed`, `auto-fixed` or unanswered questions');
     expectMentions(dedup, [['not', 'comparisons', 'suppression']], 'dedup');
-    expect(finish).toContain('Keep scoped approvals');
-    expect(finish).toContain('never jump to 9.3 or mint a late REVIEW_START');
+    expect(finish).toMatch(/(?:Keep|Preserve) scoped approvals/);
+    if (host === 'codex') {
+      expect(finish.indexOf('1. **Required native review incomplete:** STOP'))
+        .toBeLessThan(finish.indexOf('2. **Fixes queued after native completion:**'));
+      expect(finish).toContain('Capture a fresh PASS_START and persist the new attempt separately.');
+      expect(finish).not.toContain('late REVIEW_START');
+    } else {
+      expect(finish).toContain('never jump to 9.3 or mint a late REVIEW_START');
+    }
   });
 
   test('shared-code and advisory collisions retain stricter identity checks', () => {

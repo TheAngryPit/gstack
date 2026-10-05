@@ -18,7 +18,12 @@ describe('Q3: open-question prose form', () => {
   for (const host of ['claude', 'codex']) {
     test(`${host}: office-hours defines the Q<N> form and routes free-text replies to it`, () => {
       const text = generateAskUserFormat(ctx(host, 'office-hours'));
-      expect(text).toContain('**Open-question prose form (`Q<N>`)**');
+      if (host === 'claude') {
+        expect(text).toContain('**Open-question prose form (`Q<N>`)**');
+      } else {
+        // The native Codex transform drops this heading but keeps the actual Q form.
+        expect(text).toContain('Q-numbering starts at `Q1` per invocation');
+      }
       expect(text).toContain("Q<N> — <question, verbatim>\nWhy I'm asking:");
       expect(text).toContain("Reply in your own words — I'll wait.");
       expect(text).toContain('a free-text reply answers the most recent unanswered `Q<N>`');
