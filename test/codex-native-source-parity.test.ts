@@ -6,6 +6,7 @@ import { adaptNativeTemplate } from '../scripts/resolvers/native-template';
 import { replaceBlock } from '../scripts/resolvers/native-template-utils';
 import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
 import { RESOLVERS } from '../scripts/resolvers';
+import { generateSpecReviewLoop } from '../scripts/resolvers/spec-review';
 import { generateQuestionTuning } from '../scripts/resolvers/question-tuning';
 import { runGeneration } from '../scripts/gen-skill-docs';
 
@@ -25,6 +26,23 @@ function ctx(skillName: string, host = 'codex'): TemplateContext {
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
 
 describe('original source to native obligations', () => {
+  test('CEO native review preserves required metrics, failure stops and state-root resolution', () => {
+    const source = git('show', `${ORIGINAL}:scripts/resolvers/spec-review.ts`);
+    const native = generateSpecReviewLoop(ctx('plan-ceo-review'));
+    for (const obligation of ['0H spec-review metrics', 'required when writing is permitted',
+      'even if the reviewer failed', 'failed mkdir', 'failed append', 'JSON null',
+      '## Reviewer Concerns', '0D', '0H approval', 'both inputs']) {
+      expect(native).toContain(obligation);
+    }
+    expect(source).toContain('failed mkdir or append stops the review');
+    expect(native).toContain('gstack-paths --get GSTACK_STATE_ROOT');
+    expect(native).toContain('GSTACK_STATE_ROOT/analytics/spec-review.jsonl');
+    expect(native).not.toContain('~/.gstack/analytics');
+    expect(native).not.toContain('Append best-effort metrics');
+    expect(generateSpecReviewLoop(ctx('plan-eng-review'))).toContain('best-effort');
+    expect(generateSpecReviewLoop(ctx('plan-ceo-review', 'claude'))).toContain('failed mkdir or append stops the review');
+  });
+
   test('all pinned upstream inputs remain present and every other-host adapter is identity', () => {
     expect(ORIGINAL).toMatch(/^[0-9a-f]{40}$/);
     git('merge-base', '--is-ancestor', ORIGINAL, 'HEAD');

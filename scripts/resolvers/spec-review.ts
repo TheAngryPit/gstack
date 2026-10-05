@@ -154,9 +154,10 @@ or dispatching another round. A new context does not prove a different model.`)
   const ceo = _ctx.skillName === 'plan-ceo-review';
   if (_ctx.host === 'codex') return `${ceo ? '####' : '##'} Spec Review Loop
 
-Run the optional independent review before presenting the final document. Follow
+Run the independent review before presenting the final document. Follow
 the calling workflow's existing approval and artifact rules; reviewer findings do
 not approve edits or replace the operator's decisions.
+${ceo ? 'Attempt the CEO review; a failed or unavailable reviewer may continue only after recording its actual outcome under the mandatory 0H persistence contract below. This workflow does not require a successful reviewer result.' : 'The review is optional; report an unavailable reviewer without treating it as a clean verdict.'}
 
 **Dispatch a fresh native reviewer:**
 
@@ -169,14 +170,31 @@ amended working plan; failure to inspect either is an unavailable review.
 
 **Outcome:** A completed PASS stops. For issues, make only approved document edits
 and re-dispatch after each revision, up to three launches; stop earlier on repeated
-unresolved issues. An unavailable or failed optional review is reported as
+unresolved issues. An unavailable or failed review is reported as
 review_not_run and does not become a clean verdict. Preserve unresolved concerns
 in the document when the calling workflow allows, and report actual iterations,
 findings, confirmed fixes, remaining concerns and score. Do not invent counts.
 
-Append best-effort metrics to ~/.gstack/analytics/spec-review.jsonl using the
-actual values; do not let optional telemetry override the calling workflow's
-artifact or approval gates.`;
+${ceo ? `Use 0D for any new or reopened amendment discovered by the reviewer. The later
+0H approval approves only the completed working plan and CEO summary, not unresolved
+amendments. Keep both inputs consistent after each approved revision.
+
+Recording the **0H spec-review metrics** is required when writing is permitted,
+even if the reviewer failed. Resolve GSTACK_STATE_ROOT through the installed
+\`${_ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT\`; a failed or empty
+resolution, failed mkdir or failed append stops the review before claiming completion.
+When writing is forbidden, show the actual fields as not persisted and continue
+without writing. Record skill, UTC ts, iterations, issues_found, issues_fixed,
+remaining and quality_score in GSTACK_STATE_ROOT/analytics/spec-review.jsonl.
+ITERATIONS counts actual reviewer launches. FOUND, FIXED and REMAINING count
+reported issues, reviewer-confirmed fixes and reported unresolved issues. Use the
+latest attempt's reported 1–10 grade after both complete inputs; missing, invalid
+or unavailable grades are JSON null. Label earlier grades prior review score.
+List unresolved issues under "## Reviewer Concerns" in the CEO summary, citing
+the owning input; show full reviewer output on request.` : `Resolve GSTACK_STATE_ROOT through the installed
+\`${_ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT\` and append best-effort
+metrics to GSTACK_STATE_ROOT/analytics/spec-review.jsonl using actual values.
+Optional telemetry does not override the calling workflow's artifact or approval gates.`}`;
   return `${ceo ? '####' : '##'} Spec Review Loop
 
 Run an adversarial review before presenting the final document to the user.
