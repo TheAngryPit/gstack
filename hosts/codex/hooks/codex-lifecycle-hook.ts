@@ -25,12 +25,12 @@ import {
   readSync,
   statSync,
 } from 'fs';
-import { homedir } from 'os';
 import { dirname, isAbsolute, normalize, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
 
 import { parseTranscriptJsonl } from '../../../bin/gstack-memory-ingest';
 import { runExternal } from '../../claude/hooks/spawn-bin.ts';
+import { resolveStateRoot } from '../../../lib/state-root';
 
 export const CODEX_LIFECYCLE_EVENTS = [
   'SessionStart',
@@ -197,7 +197,7 @@ export interface TranscriptCheck {
 }
 
 function stateRoot(): string {
-  return process.env.GSTACK_STATE_ROOT || process.env.GSTACK_HOME || join(homedir(), '.gstack');
+  return resolveStateRoot();
 }
 
 function repoRoot(): string {

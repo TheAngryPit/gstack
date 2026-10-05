@@ -202,7 +202,7 @@ ${finish}
 `;
 }
 
-export function nativePlanReview(ctx: TemplateContext): string {
+export function nativePlanReview(ctx: TemplateContext, findingsPolicy: string): string {
   const devexContext = ctx.skillName === 'plan-devex-review' ? `
 
 **DX working-list context:** Build this from the full working list before preparing
@@ -218,7 +218,7 @@ including any explicitly approved exception to those boundaries>
 Keep this context with the approved plan in the bounded packet. Missing implementation
 remains a verification gap. Reopen an accepted contract only for concrete new evidence
 or a changed assumption; a preferred new remedy is still a decision.` : '';
-  return `## Outside Voice — Independent Plan Challenge (default-on)
+  return `## Native Codex independent plan challenge (default-on)
 
 Run after all review sections, without an extra opt-in. Respect the operator's existing
 \`gstack-config set codex_reviews disabled\` off-switch: if disabled, record a skip.
@@ -229,12 +229,13 @@ ${nativeDisabledReviewGate(ctx, 'codex-plan-review', 'plan-review')}
 ${devexContext}
 
 ${generateCodexNativeReview(ctx, 'independent plan challenge')}
-This informational outside voice never gates shipping. If unavailable, record
-review_not_run and continue to the required outputs, unless this particular review
-was explicitly required. A fresh native context is not cross-model evidence.
+This same-harness native challenge never establishes outside-provider coverage or
+cross-model consensus. If unavailable, record review_not_run and continue to the
+required outputs, unless this particular review was explicitly required.
 
 Read the exact plan being reviewed and any earlier CEO scope decisions/vision.
-Supply the approved plan and relevant decisions in the bounded packet. If a size
+Supply the approved plan and relevant decisions in the bounded packet; include
+the CEO scope summary when reviewing the CEO plan. If a size
 limit requires excerpts (the legacy limit is 30KB), declare "Plan truncated for size",
 the omitted sections and resulting coverage gap; do not claim full-plan review.
 
@@ -245,12 +246,14 @@ Return concrete findings tied to plan passages, not a generic endorsement.
 
 Show the full review output verbatim. Present tension points neutrally: both sides,
 the evidence each uses and any missing context. The user decides. For substantive
-findings, ask a plain-text question to accept, keep the original, or investigate
-(persist the latter as an explicit TODO). Do not auto-apply the second opinion.
-Record accepted changes, rejected findings with reasoning, and unresolved decisions
-in the plan/report. Log \`codex-plan-review\` with actual native provenance, status,
-findings and disposition; disabled/unavailable/failed is skipped or review_not_run,
-not a completed clean review.
+findings, follow the decision procedure for this plan type below; do not auto-apply
+the second opinion. Record accepted changes, rejected findings with reasoning, and
+unresolved decisions in the plan/report.
+${findingsPolicy}
+
+Log \`codex-plan-review\` with actual native provenance, status, findings and
+disposition. Disabled, unavailable or failed is skipped or review_not_run, never a
+completed clean review.
 `;
 }
 

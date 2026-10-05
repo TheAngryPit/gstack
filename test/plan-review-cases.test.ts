@@ -138,7 +138,14 @@ describe('CI workflow clarity regressions', () => {
   test('CEO fallback names the current host mode and needs completed findings before the later report exists', () => {
     for (const host of ALL_HOST_CONFIGS) {
       const source = generateCodexPlanReview({ skillName: 'plan-ceo-review', host: host.name, paths: HOST_PATHS[host.name] } as TemplateContext);
-      const mode = host.name === 'codex' ? 'under_current_harness' : 'under_codex';
+      if (host.name === 'codex') {
+        expect(source).toContain('Native Codex independent plan challenge');
+        expect(source).toContain('same-harness native challenge never establishes outside-provider coverage');
+        expect(source).toContain('review_not_run');
+        expect(source).not.toContain('under_current_harness');
+        continue;
+      }
+      const mode = 'under_codex';
       expect([...new Set(source.match(/under_codex|under_current_harness/g))]).toEqual([mode]);
       expect(source).toMatch(/SOURCE=in-host, OUTSIDE_STATUS=unavailable, and STATUS=clean or issues_found/);
       expect(source).not.toContain('Sections 1-10/11 and current report');
@@ -645,7 +652,16 @@ describe('outside-voice commitment queue', () => {
   test('Eng selects the other provider and preserves explicit native fallback on every host', () => {
     for (const host of ALL_HOST_CONFIGS) {
       const eng = generateCodexPlanReview({ host: host.name, paths: HOST_PATHS[host.name]!, skillName: 'plan-eng-review' } as TemplateContext);
-      const provider = host.name === 'codex' ? 'Claude Code' : 'Codex';
+      if (host.name === 'codex') {
+        expect(eng).toContain('Native Codex independent plan challenge');
+        expect(eng).toContain('Native reviewer findings');
+        expect(eng).toContain('review_not_run');
+        expect(eng).toContain('unless this particular review was explicitly required');
+        expect(eng).not.toContain('gstack-claude-code');
+        expect(eng).not.toContain('codex exec');
+        continue;
+      }
+      const provider = 'Codex';
       const mismatch = host.name === 'codex' ? 'under_current_harness' : 'under_codex';
       // B1: the heading also admits `unverified`.
       expect(eng).toContain('**If `CODEX_MODE: ready`');
@@ -678,20 +694,35 @@ describe('outside-voice commitment queue', () => {
         expect(readFileSync(tmplPath, 'utf8')).toContain('{{CODEX_PLAN_REVIEW}}');
         const generated = generateCodexPlanReview({ skillName, tmplPath, host: host.name, paths: HOST_PATHS[host.name]! });
         const start = generated.indexOf(skillName === 'plan-ceo-review'
-          ? '**Integrate reviewer findings:**' : '**Cross-model tension:**');
-        const end = generated.indexOf('**Persist the result:**', start);
+          ? '**Integrate reviewer findings:**' : host.name === 'codex'
+            ? '**Native reviewer findings:**'
+            : '**Cross-model tension:**');
+        const end = generated.indexOf(host.name === 'codex' ? 'Log `codex-plan-review`' : '**Persist the result:**', start);
         expect(start).toBeGreaterThan(0);
         expect(end).toBeGreaterThan(start);
         const queue = generated.slice(start, end);
+        if (host.name === 'codex') {
+          expect(generated).toContain('at most three mutually exclusive options');
+          expect(generated).toContain('A routing answer is not a disposition or approval');
+          expect(generated).toContain('A) Apply this change; B) Keep the current value; C) More actions');
+          expect(generated).toContain('A) Investigate before choosing; B) Defer this proposed change only');
+          expect(generated).toContain('A) Include; B) More dispositions; C) Hold');
+          expect(generated).toContain('A) Defer; B) Cut; C) Hold');
+          expect(generated).toContain('ask plainly and wait for the actual answer');
+        }
         // Each review reuses its own gate; none falls back to a generic commitment table.
         expect(queue).not.toContain('reference | commitment | current value');
-        expect(queue).toContain('**Whole-candidate scope:** A) Include; B) Defer; C) Cut; D) Hold');
+        expect(queue).toContain(host.name === "codex"
+          ? "**Whole-candidate scope:** the four candidate dispositions: Include, Defer, Cut, and Hold"
+          : "**Whole-candidate scope:** A) Include; B) Defer; C) Cut; D) Hold");
         expectAll(compactProse(queue), [/revising two candidates takes two rows/i, /hold stops for discussion without changing the prior disposition/i,
           /assembled set's capacity and dependencies/i, /returns? to the affected candidate's Include\/Defer\/Cut\/Hold row/i,
           /report unresolved conflicts/i, /never silently trim or replace another candidate/i]);
         if (skillName !== 'plan-devex-review') {
-          expect(queue).toContain("A) Apply this change; B) Keep this row's current value; C) Investigate before choosing; D) Defer this proposed change only");
-          expectAll(queue, [/D leaves this proposal row unresolved/i, /ask separately before changing them/i]);
+          expect(queue).toContain(host.name === "codex"
+            ? "the four intended outcomes: Apply this change, Keep the current value, Investigate before choosing, or Defer this proposed change only"
+            : "A) Apply this change; B) Keep this row's current value; C) Investigate before choosing; D) Defer this proposed change only");
+          expectAll(queue, [/(?:D|Deferring) leaves this proposal row unresolved/i, /ask separately before changing them/i]);
         }
         if (skillName === 'plan-ceo-review') {
           expectAll(queue, [/same six-column ledger/i, /use 0D for new or reopened choices/i, /do not start a second procedure/i,
@@ -712,17 +743,22 @@ describe('outside-voice commitment queue', () => {
           continue;
         }
         if (skillName === 'plan-eng-review') {
-          expectAll(queue, [/run every outside finding through the same Decision procedure/i, /record the reviewer and evidence/i,
+          expectAll(queue, [/run every (?:outside finding|native reviewer finding) through the same Decision procedure/i, /record the reviewer and evidence/i,
             /agreement between reviewers is evidence, not approval/i, /new or reopened choices still need their own answers/i,
-            /four-option menus instead of the ordinary 2-3 options/i,
             /identify one independently answerable change before building its alternatives/i,
             /keep necessary code, tests and docs for one approved behavior together/i,
             /does not resolve the finding's other pending rows/i, /challenges wait for its final gate/i]);
+          if (host.name === 'codex') {
+            expect(queue).toMatch(/staged/i);
+            expect(queue).not.toContain('four-option menus instead of the ordinary 2-3 options');
+          } else {
+            expect(queue).toMatch(/four-option menus instead of the ordinary 2-3 options/i);
+          }
           continue;
         }
         ordered(queue, ['1. **Ground the evidence.**', '2. **Classify the finding.**',
           '3. **Check the scope.**', '4. **Draft and answer one decision.**',
-          'Use AskUserQuestion', /wait for the actual answer/i, /then use a scoped Edit for those amendments before taking the next row/i]);
+          host.name === 'codex' ? 'Use the advertised native input schema' : 'Use AskUserQuestion', /wait for the actual answer/i, /then use a scoped Edit for those amendments before taking the next row/i]);
         expect(queue).toContain('Defer this proposed change only');
         expectAll(queue, [/hold every other value fixed or pending in every option/i, /split independently selectable changes/i,
           /does not defer its entire candidate or approve a new schedule gate/i, /record its answer reference and exact accepted scope/i,

@@ -106,7 +106,8 @@ beforeAll(async () => {
     const upgradePath = config.name === 'claude' ? join(base, 'gstack-upgrade', 'SKILL.md') : join(base, 'gstack-upgrade', 'SKILL.md');
     const specPath = config.name === 'claude' ? join(base, 'spec', 'sections', 'gate-and-file.md') : join(base, 'gstack-spec', 'SKILL.md');
     const upgrade = bashFences(readFileSync(upgradePath, 'utf8'));
-    const spec = bashFences(readFileSync(specPath, 'utf8'));
+    const specBody = config.name === 'codex' ? readFileSync(join(base, 'gstack-spec', 'sections', 'gate-and-file.md'), 'utf8') : readFileSync(specPath, 'utf8');
+    const spec = bashFences(specBody);
     const team = fence(upgrade, 'git rm -r --cached');
     const localDir = team.match(/git rm -r --cached (\S+)\/ /)![1];
     hostRenders.push({ host: config.name, upgrade, spec, localDir });
@@ -195,7 +196,7 @@ describe.skipIf(IS_WINDOWS)('C9: destructive upgrade/spec fences refuse bad path
     const failures: string[] = [];
     const baseline = await snapshot(wd.project);
     for (const c of cases) {
-      const script = fence(c.doc === 'upgrade' ? h.upgrade : h.spec, c.marker);
+      const script = fence(c.doc === 'upgrade' ? h.upgrade : h.spec, h.host === 'codex' && c.name === 'spec spawn' ? 'Native dispatch preflight ready' : c.marker);
       for (const kind of c.kinds ?? BAD_VALUES) {
         const r = await run(wd, script, { ...c.others(wd, h), [c.target]: badValue(wd, kind) });
         const mutating = r.gitCalls.filter(call => !/^rev-parse\b/.test(call));
@@ -224,7 +225,11 @@ describe.skipIf(IS_WINDOWS)('C9: destructive upgrade/spec fences refuse bad path
     const team = await run(wd, fence(h.upgrade, 'git rm -r --cached'), { LOCAL_GSTACK: local });
     if (team.status !== 0 || existsSync(local)) problems.push(`${h.host}: team-mode removal did not run: ${team.stderr}`);
     mustSh(wd.project, `git worktree add -q "${join(wd.w, 'wt')}" -b spec/x-1 HEAD`);
-    const spawn = await run(wd, fence(h.spec, 'claude -p'), { SPAWN_PATH: join(wd.w, 'wt'), SPAWN_BRANCH: 'spec/x-1', ARCHIVE_PATH: join(wd.gstack, 'VERSION') });
+    const spawn = await run(wd, fence(h.spec, h.host === 'codex' ? 'Native dispatch preflight ready' : 'claude -p'), { SPAWN_PATH: join(wd.w, 'wt'), SPAWN_BRANCH: 'spec/x-1', ARCHIVE_PATH: join(wd.gstack, 'VERSION') });
+    if (h.host === 'codex') {
+      if (spawn.status !== 0 || !spawn.stdout.includes('Native dispatch preflight ready') || existsSync(join(wd.w, 'claude.log'))) problems.push(`${h.host}: native preflight did not validate without spawning an external CLI: ${spawn.stderr}`);
+      return problems;
+    }
     const deadline = Date.now() + 5_000;
     while (!existsSync(join(wd.w, 'claude.log')) && Date.now() < deadline) await Bun.sleep(50);
     if (spawn.status !== 0 || !existsSync(join(wd.w, 'claude.log'))) problems.push(`${h.host}: spec spawn did not start claude: ${spawn.stderr}`);

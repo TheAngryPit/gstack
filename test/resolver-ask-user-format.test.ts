@@ -39,7 +39,7 @@ describe('native decision briefs preserve the original decision contract', () =>
     for (const requirement of [
       'Project/branch/task:', 'ELI10:', 'Stakes if we pick wrong:', 'Recommendation: <choice> because',
       '10 = complete, 7 = happy path, 3 = shortcut', 'options differ in kind, not coverage',
-      'Minimum 2 pros and 1 con per option', '40 characters per bullet',
+      '≥2 pros and ≥1 con', '≥40 chars each',
       'No cons — this is a hard-stop choice', 'taste call', 'Net:', 'human-team',
       'Self-check before emitting', 'Non-ASCII characters',
     ]) expect(out).toContain(requirement);

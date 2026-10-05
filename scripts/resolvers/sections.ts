@@ -82,14 +82,12 @@ function findSection(skill: string, id: string): SectionEntry {
 /** Pointer to a carved section file for the host's installed skill. */
 export function sectionPath(ctx: TemplateContext, skill: string, id: string): string {
   const entry = findSection(skill, id);
-  if ((ctx.host !== 'claude' && ctx.host !== 'codex') || skill === 'qa' || skill === 'qa-only') {
+  if (ctx.host !== 'claude' || skill === 'qa' || skill === 'qa-only') {
     fs.accessSync(path.join(ROOT, skill, 'sections', `${entry.file}.tmpl`), fs.constants.R_OK);
     const installedName = ctx.host === 'claude' ? `\`${skill}\`/\`gstack-${skill}\`` : `\`${skill.startsWith('gstack-') ? skill : `gstack-${skill}`}\``;
     return `\`sections/${entry.file}\` relative to the installed ${installedName} SKILL.md directory`;
   }
-  const root = ctx.host === 'codex'
-    ? `${ctx.paths.skillRoot}/.agents/skills/gstack-${skill}`
-    : `${ctx.paths.skillRoot}/${skill}`;
+  const root = `${ctx.paths.skillRoot}/${skill}`;
   return `\`${root}/sections/${entry.file}\``;
 }
 

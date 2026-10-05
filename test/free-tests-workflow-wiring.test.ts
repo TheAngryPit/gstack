@@ -46,6 +46,8 @@ describe('free-tests workflow wiring', () => {
     const planner = workflow.jobs['free-plan'];
     const suite = workflow.jobs['free-suite'];
     const aggregate = workflow.jobs['free-tests'];
+    const macosRegressions = workflow.jobs['macos-named-regressions'];
+    expect(macosRegressions.steps.some((step: any) => step.run?.includes('test/ios-qa-regen.test.ts'))).toBe(true);
     expect(planner.steps.find((step: any) => step.id === 'plan').run).toContain('--ci-plan');
     expect(suite.needs).toBe('free-plan');
     expect(suite['runs-on']).toBe("${{ github.repository == 'garrytan/gstack' && 'ubicloud-standard-8' || 'ubuntu-24.04' }}");
@@ -54,6 +56,8 @@ describe('free-tests workflow wiring', () => {
     const windows = Bun.YAML.parse(fs.readFileSync(path.resolve(import.meta.dir, '..', '.github/workflows/windows-free-tests.yml'), 'utf8')) as any;
     const windowsCheckout = windows.jobs['windows-free-shard'].steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
     expect(windowsCheckout.with['fetch-depth']).toBe("${{ github.repository == 'garrytan/gstack' && 1 || 0 }}");
+    const windowsBun = windows.jobs['windows-free-shard'].steps.find((step: any) => step.uses?.startsWith('oven-sh/setup-bun@'));
+    expect(windowsBun.with['bun-version']).toBe("${{ github.repository == 'garrytan/gstack' && '1.4.0' || '1.4.2' }}");
     expect(suite.strategy.matrix).toBe('${{ fromJSON(needs.free-plan.outputs.matrix) }}');
     expect(suite.strategy['fail-fast']).toBe(false);
     expect(suite.strategy['max-parallel']).toBe(20);

@@ -18,7 +18,16 @@ echo "Follow with: cd $SPAWN_PATH && claude --resume"
 
 Update archive frontmatter with \`spec_worktree_path: $SPAWN_PATH\` and
 \`spec_executed: true\` (atomic re-write).`;
-  return `If the worktree was created, dispatch an authorised native Codex worker
+  return `Before native dispatch, restore ARCHIVE_PATH and SPAWN_PATH from the recorded task values and validate the actual archive and worktree:
+
+\`\`\`bash
+[ -r "\${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was dispatched." >&2; exit 1; }
+cd -- "\${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
+[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was dispatched." >&2; exit 1; }
+echo "Native dispatch preflight ready"
+\`\`\`
+
+If the worktree was created, dispatch an authorised native Codex worker
 using the tools actually advertised in this session. Use a fresh context
 (\`fork_turns: "none"\` where the native API supports it), the approved spec,
 exact worktree path/branch, bounded file ownership and verification criteria.

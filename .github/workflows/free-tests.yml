@@ -131,7 +131,7 @@ jobs:
           resolved="$(realpath "$tmp")"
           echo "temp root: $tmp -> $resolved"
           test "$resolved" != "${tmp%/}"
-          files=(test/gstack-design-detect.test.ts browse/test/chromium-profile-isolation.test.ts test/cso-git-hardening.test.ts test/plan-count-file-permission.test.ts test/spec-quality-gate-secret-sink.test.ts test/gstack-memory-ingest.test.ts)
+          files=(test/gstack-design-detect.test.ts browse/test/chromium-profile-isolation.test.ts test/cso-git-hardening.test.ts test/plan-count-file-permission.test.ts test/spec-quality-gate-secret-sink.test.ts test/gstack-memory-ingest.test.ts test/ios-qa-regen.test.ts)
           for file in "${files[@]}"; do test -f "$file"; done
           bun test "${files[@]}"
 

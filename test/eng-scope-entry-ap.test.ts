@@ -82,6 +82,15 @@ test('Eng alone defers canonical question rules until scope and keeps one counte
     const ctx: TemplateContext = {skillName: 'plan-eng-review', tmplPath: 'plan-eng-review/SKILL.md.tmpl',
       host: host.name, paths: HOST_PATHS[host.name]!};
     const format = generateAskUserFormat(ctx);
+    if (host.name === 'codex') {
+      const nativeException = 'For its initial Scope gate, follow the skill’s selector algorithm; this format applies only after target selection. Preserve all scope choices through the native two-stage flow.';
+      expect(format.split(nativeException)).toHaveLength(2);
+      expect(format.split(continuous)).toHaveLength(2);
+      expect(format).not.toContain(standard);
+      expect(format.replace(nativeException, '').replace(continuous, standard))
+        .toBe(generateAskUserFormat({...ctx, skillName: 'plan-ceo-review'}));
+      continue;
+    }
     expect(format.split(exception)).toHaveLength(2);
     expect(format.indexOf(exception)).toBeLessThan(format.indexOf('Branch on the skill-start STATUS lines'));
     expect(format.split(continuous)).toHaveLength(2);

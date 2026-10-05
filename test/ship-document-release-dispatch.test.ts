@@ -52,13 +52,21 @@ describe('pre-publication documentation lifecycle', () => {
     expect(claude.indexOf('ship/sections/documentation.md', claude.indexOf(marker))).toBeLessThan(claude.indexOf('## Step 15:'));
     expect(claude).not.toContain('Dispatch /document-release as a subagent');
     // C4: ship is carved on external hosts too; the pointer is relative to the installed skill.
-    for (const dir of ['.agents/skills/gstack-ship', '.factory/skills/gstack-ship']) {
+    for (const [dir, host] of [['.agents/skills/gstack-ship', 'codex'], ['.factory/skills/gstack-ship', 'factory']] as const) {
       const body = fs.readFileSync(path.join(generated, dir, 'SKILL.md'), 'utf8');
-      const pointer = body.indexOf('`sections/documentation.md` relative to the installed `gstack-ship` SKILL.md directory', body.indexOf(marker));
+      const expectedPointer = '`sections/documentation.md` relative to the installed `gstack-ship` SKILL.md directory';
+      const pointer = body.indexOf(expectedPointer, body.indexOf(marker));
       expect(pointer).toBeGreaterThan(body.indexOf(marker));
       expect(pointer).toBeLessThan(body.indexOf('## Step 15:'));
-      expect(body).not.toContain('Dispatch /document-release as a subagent');
-      expect(fs.readFileSync(path.join(generated, dir, 'sections/documentation.md'), 'utf8')).toContain('Dispatch /document-release as a subagent');
+      const documentation = fs.readFileSync(path.join(generated, dir, 'sections/documentation.md'), 'utf8');
+      if (host === 'codex') {
+        expect(body).not.toContain('Dispatch /document-release as a subagent');
+        expect(documentation).toContain('Dispatch /document-release as a native Codex worker');
+        expect(documentation.replace(/\s+/g, ' ')).toContain('Preserve this section\'s candidate, attempt budget, edit/read-only mode, file ownership, freshness checks, protected-file rules and parent validation gates.');
+      } else {
+        expect(body).not.toContain('Dispatch /document-release as a subagent');
+        expect(documentation).toContain('Dispatch /document-release as a subagent');
+      }
       expect(body.indexOf('## Step 16:')).toBeLessThan(body.indexOf('## Step 17:'));
     }
   });
@@ -84,11 +92,22 @@ describe('pre-publication documentation lifecycle', () => {
       const ship = fs.readFileSync(path.join(generated, host, 'skills/gstack-ship/sections/documentation.md'), 'utf8');
       const directory = path.join(generated, host, 'skills/gstack-document-release');
       const document = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8');
-      expect(document).toContain('# Documentation scope and discovery');
-      expect(document).toContain('## Step 2: Per-File Documentation Audit');
       expect(document).toContain('## Ship-owned documentation mode');
-      expect(fs.existsSync(path.join(directory, 'sections/audit-scope.md'))).toBe(false);
-      expect(fs.existsSync(path.join(directory, 'sections/release-body.md'))).toBe(false);
+      if (host === '.agents') {
+        const auditScope = path.join(directory, 'sections/audit-scope.md');
+        const releaseBody = path.join(directory, 'sections/release-body.md');
+        expect(document).toContain('`sections/audit-scope.md`');
+        expect(document).toContain('`sections/release-body.md`');
+        expect(fs.readFileSync(auditScope, 'utf8')).toContain('# Documentation scope and discovery');
+        expect(fs.readFileSync(releaseBody, 'utf8')).toContain('## Step 2: Per-File Documentation Audit');
+        expect(fs.readFileSync(auditScope, 'utf8')).toContain('## Ship-owned documentation mode');
+      } else {
+        expect(document).toContain('# Documentation scope and discovery');
+        expect(document).toContain('## Step 2: Per-File Documentation Audit');
+        expect(fs.existsSync(path.join(directory, 'sections/audit-scope.md'))).toBe(false);
+        expect(fs.existsSync(path.join(directory, 'sections/release-body.md'))).toBe(false);
+      }
+      expect(ship).toContain('full audit-scope/release-body');
     }
   });
 

@@ -347,6 +347,16 @@ test('CEO integrates completed native findings before its external-only comparis
   for (const host of ALL_HOST_CONFIGS) {
     const ctx = { skillName: 'plan-ceo-review', host: host.name, paths: HOST_PATHS[host.name]! } as TemplateContext;
     const review = compactProse(generateCodexPlanReview(ctx));
+    if (host.name === 'codex') {
+      expect(review).toContain('Native Codex independent plan challenge');
+      expect(review).toContain('same-harness native challenge never establishes outside-provider coverage');
+      expect(review).toContain('Show the full review output verbatim');
+      expect(review).toContain('do not auto-apply');
+      expect(review).toContain('review_not_run');
+      expect(review).toContain('**Integrate reviewer findings:**');
+      expect(review).toContain('actual native provenance, status, findings and disposition');
+      expect(review).not.toContain('**Cross-model tension:**');
+    } else {
     expect(review.match(/\*\*Outcome routing:\*\*/g)).toHaveLength(1);
     expectMentions(review, [['do not','invocation','restart']], 'review');
     const anchors = [/after a completed external review, go directly/i, '**Native fallback — provider unavailable or execution failed, with reviews enabled:**',
@@ -369,6 +379,7 @@ test('CEO integrates completed native findings before its external-only comparis
     expectMentions(comparison, [['only','completed','external']], 'comparison');
     expect(comparison).toContain('**Persist the result**');
     expect(comparison).toMatch(/do not write a CROSS-MODEL line/);
+    }
     const report = compactProse(generatePlanFileReviewReport(ctx));
     expect(report).toMatch(/\*\*CROSS-MODEL:\*\* only when native and completed external reviews exist/i);
     expect(report).toContain('N findings; R resolved; U unresolved');

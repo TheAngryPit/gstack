@@ -10,6 +10,11 @@ import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
 const owned: string[] = [];
 afterEach(() => { for (const root of owned.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
+// Resolve Git Bash while the runner's original PATH is intact. The generated
+// hook embeds `bash -c`, but the outer process must invoke the actual Windows
+// executable explicitly when the test gives the child an isolated HOME.
+const BASH = Bun.which('bash.exe') ?? Bun.which('bash');
+
 function context(host: TemplateContext['host']): TemplateContext {
   return { host, paths: HOST_PATHS[host], skillName: 'autoplan', tmplPath: 'autoplan/SKILL.md.tmpl', model: 'claude' };
 }
@@ -39,9 +44,11 @@ describe('Autoplan publication hook generation', () => {
   test('a missing installation returns an explicit native denial', () => {
     const fixtureHome = mkdtempSync(join(tmpdir(), 'autoplan-hook-missing-'));
     owned.push(fixtureHome);
-    const result = spawnSync('bash', ['-c', hookCommand()], {
+    expect(BASH, 'Git Bash must be available to exercise the generated Claude hook command').not.toBeNull();
+    const result = spawnSync(BASH!, ['-c', hookCommand()], {
       env: { ...process.env, HOME: fixtureHome }, input: '{}', encoding: 'utf8', timeout: 5000,
     });
+    expect(result.error, result.error?.message ?? result.stderr).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stderr).toBe('');
     const output = JSON.parse(result.stdout).hookSpecificOutput;
@@ -58,9 +65,11 @@ describe('Autoplan publication hook generation', () => {
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, 'phase-publication-hook'), '#!/usr/bin/env bash\ncat\n');
     const input = JSON.stringify({ session_id: 'fixture-session', tool_name: 'Read', tool_input: { file_path: '/fixture/phase.md' } });
-    const result = spawnSync('bash', ['-c', hookCommand()], {
+    expect(BASH, 'Git Bash must be available to exercise the generated Claude hook command').not.toBeNull();
+    const result = spawnSync(BASH!, ['-c', hookCommand()], {
       env: { ...process.env, HOME: fixtureHome }, input, encoding: 'utf8', timeout: 5000,
     });
+    expect(result.error, result.error?.message ?? result.stderr).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stderr).toBe('');
     expect(result.stdout).toBe(input);

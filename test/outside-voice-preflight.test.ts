@@ -19,10 +19,22 @@ test('adversarial outside failures retain the required native pass without dupli
   for (const host of ALL_HOST_CONFIGS) {
     for (const skillName of ['ship', 'review']) {
       const ctx: TemplateContext = { host: host.name, skillName, tmplPath: `${skillName}/SKILL.md.tmpl`, paths: HOST_PATHS[host.name] };
+      const output = generateAdversarialStep(ctx);
+      if (host.name === 'codex') {
+        // Codex's adapter runs the required primary pass in a native context;
+        // it does not use the legacy external-provider-plus-subagent route.
+        expect(output).toContain('Every diff gets the required native adversarial pass');
+        expect(output).toContain(skillName === 'ship'
+          ? 'required primary pass'
+          : 'The required native pass is part of review completion');
+        expect(output).toContain('Second native challenge');
+        expect(output).not.toContain('adversarial subagent (always runs)');
+        expect(output).not.toContain('gstack-claude-code');
+        continue;
+      }
       const preflight = outsideVoicePreflight(ctx, { disabledBehavior: 'codex-only' });
       expect(preflight).toMatch(/(?:do not dispatch a duplicate|without duplicating it)/);
       expect(preflight).not.toMatch(/fall(?:ing)? back to (?:a|the) .*subagent/i);
-      const output = generateAdversarialStep(ctx);
       expect(output).toContain('adversarial subagent (always runs)');
       expectMentions(output, [['do not', 'dispatch', 'retain']], 'output');
       expect(output.match(/Retain the required native pass without duplicating it; it cannot complete outside coverage\./g)).toHaveLength(2);
@@ -56,6 +68,16 @@ test('CEO and Eng describe the actual disabled route and completion validator', 
       const ctx: TemplateContext = { host: host.name, skillName, tmplPath: `${skillName}/SKILL.md.tmpl`, paths: HOST_PATHS[host.name] };
       const output = generateCodexPlanReview(ctx);
       expect(output).not.toContain('Skip this section entirely');
+      if (host.name === 'codex') {
+        // The Codex-native workflow gates its own reviewer directly. It has no
+        // outside-provider fallback or CODEX_MODE transport branch.
+        expect(output).toContain('CODEX_REVIEW_MODE: disabled');
+        expect(output).toContain('"outside_status":"disabled"');
+        expect(output).toContain('Only dispatch the native reviewer when the block reports');
+        expect(output).not.toContain('CODEX_MODE: disabled');
+        expect(output).not.toContain('gstack-claude-code');
+        continue;
+      }
       if (skillName === 'plan-ceo-review') {
         expectTokens(output.replace(/\s+/g, ' '), ['`disabled`'], 'output.replace(/\s+/g,  )');
         expect(output).toContain('"outside_status":"disabled"');
@@ -108,22 +130,32 @@ describe('own-harness review fallback instructions', () => {
       test(`${host.name}: ${name} fallback names only the mode its preflight emits`, () => {
         const ctx: TemplateContext = { host: host.name, skillName: 'review', tmplPath: 'review/SKILL.md.tmpl', paths: HOST_PATHS[host.name] };
         const text = render(ctx);
-        const mode = host.name === 'codex' ? 'under_current_harness' : 'under_codex';
-        const preflight = text.match(/```bash\n([\s\S]*?)\n```/)![1];
-        expect(preflight).toContain(mode);
-        expect([...new Set(text.match(/under_codex|under_current_harness/g))]).toEqual([mode]);
-        expect(text.includes("retain the section's native pass if defined")).toBe(false);
+        if (host.name === 'codex') {
+          const preflight = text.match(/```bash\n([\s\S]*?)\n```/)![1];
+          expect(preflight).toContain('_NATIVE_REVIEW_MODE');
+          expect(preflight).toContain('disabled)');
+          expect(text).toContain('CODEX_REVIEW_MODE: disabled');
+          expect(text).toContain('Only dispatch the native reviewer when the block reports');
+          expect(text).not.toMatch(/under_codex|under_current_harness/);
+          expect(text).not.toContain('gstack-claude-code');
+        } else {
+          const mode = 'under_codex';
+          const preflight = text.match(/```bash\n([\s\S]*?)\n```/)![1];
+          expect(preflight).toContain(mode);
+          expect([...new Set(text.match(/under_codex|under_current_harness/g))]).toEqual([mode]);
+          expect(text.includes("retain the section's native pass if defined")).toBe(false);
 
-        const fallback = text.slice(text.indexOf('**Native fallback'), text.indexOf('Dispatch via the Agent tool'));
-        const ownHarnessBranch = `On \`CODEX_MODE: ${mode}\``;
-        expect(text.split(ownHarnessBranch)).toHaveLength(2);
-        expect(fallback).toContain(ownHarnessBranch);
-        expect(fallback).toContain('`outside_status: unavailable`');
-        expect(fallback).toContain('run no outside CLI');
-        expect(fallback).toContain('use the native subagent below');
-        expectMentions(fallback, [['never', 'supplies', 'coverage']], 'fallback');
-        expectMentions(fallback, [['never', 'disabled', 'fallback']], 'fallback');
-        expect(fallback).toContain('`CODEX_MODE: disabled`, finish this section with `outside_status: disabled`;');
+          const fallback = text.slice(text.indexOf('**Native fallback'), text.indexOf('Dispatch via the Agent tool'));
+          const ownHarnessBranch = `On \`CODEX_MODE: ${mode}\``;
+          expect(text.split(ownHarnessBranch)).toHaveLength(2);
+          expect(fallback).toContain(ownHarnessBranch);
+          expect(fallback).toContain('`outside_status: unavailable`');
+          expect(fallback).toContain('run no outside CLI');
+          expect(fallback).toContain('use the native subagent below');
+          expectMentions(fallback, [['never', 'supplies', 'coverage']], 'fallback');
+          expectMentions(fallback, [['never', 'disabled', 'fallback']], 'fallback');
+          expect(fallback).toContain('`CODEX_MODE: disabled`, finish this section with `outside_status: disabled`;');
+        }
       });
     }
   }

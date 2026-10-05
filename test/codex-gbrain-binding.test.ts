@@ -5,6 +5,8 @@ import { join, resolve } from 'path';
 import { spawnSync, spawn } from 'child_process';
 import { createHash } from 'crypto';
 
+import { bindingPath } from '../lib/gbrain-codex-binding';
+
 const root=resolve(import.meta.dir,'..');
 let temp:string, env:NodeJS.ProcessEnv, native:any, command:string;
 function saveNative() {
@@ -501,4 +503,10 @@ process.exit(0);
     expect(readlinkSync(join(skills,old.name))).toBe(old.target);
     expect(readFileSync(join(skills,old.name,'SKILL.md'),'utf8')).toBe(old.body);
   }
+});
+
+// Explicit root selection must agree with every other gstack state owner.
+test('binding discovery honors the shared explicit state-root chain',()=>{
+  expect(bindingPath({GSTACK_STATE_ROOT:'/explicit',GSTACK_HOME:'/legacy',HOME:'/user'})).toBe(join('/explicit','gbrain-codex-binding.json'));
+  expect(bindingPath({GSTACK_STATE_DIR:'/selected',HOME:'/user'})).toBe(join('/selected','gbrain-codex-binding.json'));
 });

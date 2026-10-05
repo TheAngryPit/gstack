@@ -163,7 +163,11 @@ describe('QA-only cross-host lazy rendering', () => {
       const outside = generated.artifacts.filter(artifact => artifact.host === host.name && artifact.kind === 'section'
         && !/^(?:qa|qa-only|ship|plan-ceo-review)\//.test(artifact.relativePath)
         && !/\/gstack-(?:qa(?:-only)?|ship|plan-ceo-review)\//.test(artifact.relativePath));
-      expect(outside.length > 0).toBe(host.name === 'claude');
+      if (host.name === 'codex') {
+        expect(outside.some(artifact => artifact.relativePath === `${host.hostSubdir}/skills/gstack-review/sections/adversarial.md`)).toBe(true);
+      } else {
+        expect(outside.length > 0).toBe(host.name === 'claude');
+      }
       // C4: ship is carved on every host; external pointers are relative to the installed skill.
       const ctx = context(host.name, 'ship');
       const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'ship/sections/manifest.json'), 'utf8'));
@@ -173,11 +177,15 @@ describe('QA-only cross-host lazy rendering', () => {
         ? `\`~/.claude/skills/gstack/ship/sections/${entry.file}\``
         : `\`sections/${entry.file}\` relative to the installed \`gstack-ship\` SKILL.md directory`;
       expect(SECTION(ctx, [entry.id])).toBe(`> **STOP.** Before ${entry.trigger}, Read ${pointer} and execute it\n> in full. Do not work from memory — that section is the source of truth for this step.`);
-      // Skills carved only on Claude still inline their sections elsewhere.
+      // Codex and Claude carve every skill; other hosts inline ordinary sections.
       const reviewCtx = context(host.name, 'review');
       const reviewEntry = JSON.parse(fs.readFileSync(path.join(ROOT, 'review/sections/manifest.json'), 'utf8')).sections[0];
-      expect(usesLazySections(host.name, 'review')).toBe(host.name === 'claude');
-      if (host.name !== 'claude') {
+      const lazyReview = usesLazySections(host.name, 'review');
+      expect(lazyReview).toBe(host.name === 'claude' || host.name === 'codex');
+      if (lazyReview) {
+        expect(SECTION(reviewCtx, [reviewEntry.id])).toContain(`sections/${reviewEntry.file}`);
+        expect(SECTION_INDEX(reviewCtx)).toContain(reviewEntry.file);
+      } else {
         expect(SECTION(reviewCtx, [reviewEntry.id])).toBe(fs.readFileSync(path.join(ROOT, 'review/sections', `${reviewEntry.file}.tmpl`), 'utf8').trimEnd());
         expect(SECTION_INDEX(reviewCtx)).toBe('');
       }

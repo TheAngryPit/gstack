@@ -124,7 +124,9 @@ describe.skipIf(process.platform === 'win32')('full setup repairs the installed 
         expect(fs.readFileSync(next, 'utf8')).toContain('name: claude-code');
         expect(fs.existsSync(path.join(f.skills, 'gstack-claude/SKILL.md'))).toBe(false);
         expect(fs.existsSync(f.oldRender)).toBe(false);
-        expect(fs.readFileSync(path.join(f.skills, 'gstack-review/SKILL.md'), 'utf8')).toContain('gstack-claude-code');
+        const codexReview = fs.readFileSync(path.join(f.skills, 'gstack-review/SKILL.md'), 'utf8');
+        expect(codexReview).toContain('Native second-opinion modes');
+        expect(codexReview).not.toContain('gstack-claude-code');
         expect(fs.readFileSync(path.join(f.skills, 'gstack-review/notes.md'), 'utf8')).toBe('user notes\n');
         expect(fs.readFileSync(path.join(f.root, '.agents/skills/gstack-review/SKILL.md'), 'utf8')).toContain('Model-Specific Behavioral Patch (gpt-5.6-sol)');
         expect(fs.existsSync(path.join(f.skills, 'gstack/bin/gstack-claude-code'))).toBe(true);

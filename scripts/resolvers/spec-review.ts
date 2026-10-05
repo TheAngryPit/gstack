@@ -144,7 +144,9 @@ Review all five dimensions:
 For each, return PASS or specific issues with suggested fixes, and a quality score
 from 1–10. The reviewer receives the saved document or complete labelled content,
 not this conversation.
-${ceo ? `Read both inputs in full: the current CEO scope summary and amended working plan.
+${ceo ? `A failed or unavailable reviewer is not a successful review. When writing is permitted, stop document completion if the required metrics record cannot be persisted.
+Supply both saved absolute paths, or both complete labeled texts when either is not persisted: the CEO scope summary and amended working plan.
+Read both inputs in full: the current CEO scope summary and amended working plan.
 Evaluate them together on all five dimensions. Flag contradictions, unsupported
 accepted expansions and required behavior missing from both. Cite input and
 requirement for each finding. If either input is unavailable or incomplete, report

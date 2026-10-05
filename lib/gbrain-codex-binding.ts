@@ -4,6 +4,7 @@ import { homedir } from 'os';
 import { basename, dirname, isAbsolute, join } from 'path';
 import { createHash } from 'crypto';
 import { buildGbrainEnv } from './gbrain-exec';
+import { resolveStateRoot } from './state-root';
 
 export interface CodexBrainBinding {
   schema: 1;
@@ -15,7 +16,7 @@ export interface CodexBrainBinding {
   fingerprint: string;
 }
 export function bindingPath(env = process.env): string {
-  return join(env.GSTACK_HOME || join(env.HOME || homedir(), '.gstack'), 'gbrain-codex-binding.json');
+  return join(resolveStateRoot(env), 'gbrain-codex-binding.json');
 }
 function readSelection(server: string, codexHome: string): {binding: CodexBrainBinding; env: Record<string,string>} {
   if (!server || !isAbsolute(codexHome)) throw new Error('Select an explicit Codex MCP server and absolute Codex home.');
