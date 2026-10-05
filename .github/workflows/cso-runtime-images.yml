@@ -55,7 +55,7 @@ jobs:
 
   validate-native:
     needs: reviewed-inputs
-    if: github.event_name == 'pull_request'
+    if: github.repository == 'garrytan/gstack' && github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.reviewed-inputs.outputs.matrix) }}

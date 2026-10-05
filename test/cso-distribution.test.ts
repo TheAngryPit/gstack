@@ -432,6 +432,7 @@ describe('CSO runtime staging gates', () => {
     const workflow = Bun.YAML.parse(raw) as any;
     expect(Object.keys(workflow.on)).toEqual(['pull_request', 'workflow_dispatch']);
     expect(workflow.jobs['validate-native'].if).toContain("github.event_name == 'pull_request'");
+    expect(workflow.jobs['validate-native'].if).toContain("github.repository == 'garrytan/gstack'");
     expect(workflow.jobs['validate-native'].permissions).toEqual({ contents: 'read' });
     expect(workflow.jobs['validate-native'].steps.some((s: any) => s.run?.includes('cso-verify-runtime-base.ts'))).toBe(true);
     expect(workflow.jobs['validate-native'].steps.some((s: any) => s.with?.push === false && s.with?.load === true)).toBe(true);
