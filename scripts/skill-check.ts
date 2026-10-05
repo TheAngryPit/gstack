@@ -12,6 +12,7 @@ import {
   runGeneration,
   type GeneratedArtifact,
 } from './gen-skill-docs';
+import { resolveModel, type Model } from './models';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 
@@ -161,11 +162,24 @@ export function checkGeneratedFreshness(repoRoot: string, renderRoot: string, ar
   return { checked, diagnostics };
 }
 
-export async function main(): Promise<number> {
+function readCodexModelArgument(args: string[]): Model | undefined {
+  const index = args.findIndex((arg) => arg === '--codex-model' || arg.startsWith('--codex-model='));
+  if (index < 0) return undefined;
+  const arg = args[index];
+  const raw = arg.startsWith('--codex-model=') ? arg.slice('--codex-model='.length) : args[index + 1];
+  const model = raw && !raw.startsWith('--') ? resolveModel(raw) : null;
+  if (!model) throw new Error('--codex-model requires a supported generation model');
+  return model;
+}
+
+export async function main(args = process.argv.slice(2)): Promise<number> {
+  // Reject invalid explicit model choices before creating scratch output or
+  // starting any generators. This check is independent of host selection.
+  const codexModel = readCodexModelArgument(args);
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-skill-check-'));
   try {
     console.log('Generating all hosts into scratch with canonical settings...');
-    const result = await runGeneration({ host: 'all', outputRoot: scratch, contentLinkRoot: null });
+    const result = await runGeneration({ host: 'all', outputRoot: scratch, contentLinkRoot: null, codexModel });
     for (const diagnostic of result.diagnostics) {
       console.log(`${diagnostic.kind.toUpperCase()}: ${diagnostic.host ? `${diagnostic.host}: ` : ''}${diagnostic.message}`);
     }

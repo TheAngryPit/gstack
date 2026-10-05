@@ -56,7 +56,12 @@ describe('question-tuning registry path is absolute (#2489)', () => {
       const out = generateQuestionTuning(makeCtx(host));
       expect(out).toContain('skip entirely if `QUESTION_TUNING: false`');
       expectMentions(out, [['before', 'conductor/fallback', 'askuserquestion']], 'out');
-      expect(out).toContain('`<gstack-qid:{question_id}>` once in the question text itself');
+      if (host === 'claude') {
+        expect(out).toContain('`<gstack-qid:{question_id}>` once in the question text itself');
+      } else {
+        expect(out).toContain('append `<gstack-qid:{question_id}>` to the prompt for compatibility');
+        expect(out).toContain('Put a stable question_id in the supported identifier field when available');
+      }
     }
   });
 

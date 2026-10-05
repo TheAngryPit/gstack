@@ -47,6 +47,8 @@ export interface GenerationOptions {
   /** Skills this install leaves unregistered (gstack-config disabled_skills); the router omits them. */
   disabledSkills?: string[];
   model?: Model | null;
+  /** Optional model overlay for Codex alone when rendering multiple hosts. */
+  codexModel?: Model | null;
   catalogMode?: 'trim' | 'full';
   explainLevel?: 'default' | 'terse';
   respectDetection?: boolean;
@@ -59,6 +61,7 @@ interface RenderOptions {
   installRoot: string | null;
   disabledSkills: string[];
   model: Model | null;
+  codexModel: Model | null;
   catalogMode: 'trim' | 'full';
   explainLevel: 'default' | 'terse';
   gbrainDetected: boolean;
@@ -741,7 +744,9 @@ function buildContext(
   const interactive = interactiveMatch ? interactiveMatch[1] === 'true' : undefined;
   return {
     skillName, tmplPath, benefitsFrom, host, paths: HOST_PATHS[host],
-    preambleTier, model: options.model ?? getHostConfig(host).defaultModel, interactive, explainLevel: options.explainLevel, installRoot: options.installRoot,
+    preambleTier,
+    model: (host === 'codex' ? options.codexModel : null) ?? options.model ?? getHostConfig(host).defaultModel,
+    interactive, explainLevel: options.explainLevel, installRoot: options.installRoot,
   };
 }
 
@@ -964,6 +969,7 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
     installRoot: settings.installRoot ?? null,
     disabledSkills: settings.disabledSkills ?? [],
     model: settings.model ?? null,
+    codexModel: settings.codexModel ?? null,
     catalogMode: settings.catalogMode ?? 'trim',
     explainLevel: settings.explainLevel ?? 'default',
     gbrainDetected: false,

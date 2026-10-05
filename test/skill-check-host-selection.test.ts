@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'path';
 import { discoverTemplates } from '../scripts/discover-skills';
+import { runGeneration } from '../scripts/gen-skill-docs';
 import { getHostConfig } from '../hosts';
 import { spawnSync } from 'child_process';
 
@@ -27,8 +30,8 @@ describe('health-check template selection matches generation', () => {
 
   test('unfiltered discovery still includes every source template', () => {
     const templates = discoverTemplates(ROOT);
-    expect(templates.some(t => t.output === 'claude/SKILL.md')).toBe(true);
-    expect(templates.some(t => t.output === 'codex/SKILL.md')).toBe(true);
+    expect(templates).toContainEqual({ tmpl: 'SKILL.md.tmpl', output: 'SKILL.md' });
+    expect(templates).toContainEqual({ tmpl: 'codex/SKILL.md.tmpl', output: 'codex/SKILL.md' });
   });
 
   test('invalid and missing explicit models fail before any generator runs', () => {
@@ -38,7 +41,23 @@ describe('health-check template selection matches generation', () => {
       });
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain('--codex-model requires a supported generation model');
+      expect(result.stdout).not.toContain('Generating all hosts');
       expect(result.stdout).not.toContain('Freshness');
+    }
+  });
+
+  test('an explicit Codex model override only changes the Codex render', async () => {
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-codex-model-check-'));
+    try {
+      const result = await runGeneration({ host: 'all', outputRoot: output, contentLinkRoot: null, codexModel: 'gpt-6-astra' });
+      expect(result.exitCode).toBe(0);
+      const codex = fs.readFileSync(path.join(output, '.agents', 'skills', 'gstack-review', 'SKILL.md'), 'utf8');
+      const claude = fs.readFileSync(path.join(output, 'review', 'SKILL.md'), 'utf8');
+      expect(codex).toContain('--skill "review" --model "gpt-6-astra"');
+      expect(claude).toContain('--skill "review" --model "claude"');
+      expect(claude).not.toContain('Model-Specific Behavioral Patch (gpt-6-astra)');
+    } finally {
+      fs.rmSync(output, { recursive: true, force: true });
     }
   });
 });
