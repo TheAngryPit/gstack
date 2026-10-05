@@ -224,7 +224,7 @@ describe('disabled outside-plan live oracle', () => {
     const unexpectedWrite = join(repo, 'unexpected-review-write');
     writeFileSync(join(brokenRuntime, 'bin/gstack-review-log'), '#!/bin/sh\nprintf invoked > "$UNEXPECTED_REVIEW_WRITE"\n', { mode: 0o755 });
     const cases = [
-      { skill: 'gstack-plan-eng-review', file: '.agents/skills/gstack-plan-eng-review/sections/review-sections.md', heading: '## Outside Voice — Independent Plan Challenge (default-on)', id: 'codex-plan-review', phase: 'plan-review' },
+      { skill: 'gstack-plan-eng-review', file: '.agents/skills/gstack-plan-eng-review/sections/review-sections.md', heading: '## Native Codex independent plan challenge (default-on)', id: 'codex-plan-review', phase: 'plan-review' },
       { skill: 'gstack-document-release', file: '.agents/skills/gstack-document-release/sections/release-body.md', heading: '## Native Codex Documentation Review (default-on)', id: 'codex-doc-review', phase: 'documentation' },
     ];
     for (const cli of ['codex', 'claude']) {

@@ -294,7 +294,7 @@ describe('outside-voice dispatch contract', () => {
         expect(output).toContain('CODEX_REVIEW_MODE: enabled');
         expect(output).toContain('Only dispatch the native reviewer when the block reports `CODEX_REVIEW_MODE: enabled`');
         expect(output).toContain('review_not_run');
-        expect(output).toContain('A fresh native context is not cross-model evidence.');
+        expect(output).toContain('not cross-model evidence');
       } else {
         expectMentions(output, [['without', 'unavailable', 'launching']], 'output');
         expectMentions(output, [['do not', 'completed', 'reviewer']], 'output');

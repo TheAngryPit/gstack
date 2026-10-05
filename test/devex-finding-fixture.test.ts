@@ -119,38 +119,37 @@ test('every host exposes the DX per-call rule before the pre-review audit and St
         expect(allContent).toContain("Apply the Decision gate's distinction between routine review work and a new choice.");
       }
       if (!suppressesPlanReview) {
-        const outsideStart = allContent.indexOf('## Outside Voice — Independent Plan Challenge');
-        expect(outsideStart).toBeGreaterThanOrEqual(0);
-        const outside = allContent.slice(outsideStart);
+        const reviewStart = allContent.indexOf(artifact.host === 'codex'
+          ? '## Native Codex independent plan challenge (default-on)'
+          : '## Outside Voice — Independent Plan Challenge');
+        expect(reviewStart).toBeGreaterThanOrEqual(0);
+        const review = allContent.slice(reviewStart);
         if (artifact.host === 'codex') {
-          // Codex builds a bounded native packet instead of embedding the
-          // legacy external-CLI prompt body; keep the full DX decision context.
-          const contextStart = allContent.indexOf('When this host runs an outside voice, build its review context from the working list');
+          // Codex carries the full DX working-list context in its native packet
+          // instead of embedding the legacy external-CLI review body.
+          const contextStart = review.indexOf('**DX working-list context:**');
           expect(contextStart).toBeGreaterThanOrEqual(0);
-          expect(contextStart).toBeLessThan(outsideStart);
-          const sharedContext = allContent.slice(contextStart, outsideStart);
-          expect(sharedContext).toContain('Preserve the exact approved exceptions to the selected');
-          const dispatchStart = outside.indexOf('## Codex independent review:');
+          const dispatchStart = review.indexOf('## Codex independent review:');
           expect(dispatchStart).toBeGreaterThan(0);
-          const context = outside.slice(0, dispatchStart);
+          const context = review.slice(contextStart, dispatchStart);
           expect(context).toContain('DX working-list context');
           expect(context).toContain('from the full working list before preparing');
           expect(context).toContain('selected option, answer reference and exact scope');
           expect(context).toContain('including any explicitly approved exception');
           expect(context).toMatch(/Missing implementation\s+remains a verification gap/);
           expect(context).toMatch(/concrete new evidence\s+or a changed assumption/);
-          expect(outside).toContain('Prepare a bounded review packet');
-          expect(outside).toContain('approved document or minimum relevant excerpts');
-          expect(outside).toContain('Plan truncated for size');
+          expect(review).toContain('Prepare a bounded review packet');
+          expect(review).toContain('approved document or minimum relevant excerpts');
+          expect(review).toContain('Plan truncated for size');
         } else {
-          const context = outside.indexOf('REVIEW CONTEXT (from the full working list, outside the truncated plan body)');
-          const planBody = outside.indexOf('THE PLAN:\n<plan content>');
+          const context = review.indexOf('REVIEW CONTEXT (from the full working list, outside the truncated plan body)');
+          const planBody = review.indexOf('THE PLAN:\n<plan content>');
           expect(context).toBeGreaterThan(0);
           expect(planBody).toBeGreaterThan(context);
-          expect(outside.slice(context, planBody)).toContain('selected option, answer reference and exact scope');
-          expect(outside.slice(context, planBody)).toContain('including any explicitly approved exception');
-          expect(outside.slice(context, planBody)).toContain('Missing implementation remains a verification');
-          expect(outside.slice(context, planBody)).toContain('concrete new evidence or a changed assumption');
+          expect(review.slice(context, planBody)).toContain('selected option, answer reference and exact scope');
+          expect(review.slice(context, planBody)).toContain('including any explicitly approved exception');
+          expect(review.slice(context, planBody)).toContain('Missing implementation remains a verification');
+          expect(review.slice(context, planBody)).toContain('concrete new evidence or a changed assumption');
         }
       } else {
         expect(allContent).not.toContain('REVIEW CONTEXT (from the full working list, outside the truncated plan body)');

@@ -229,7 +229,8 @@ ${nativeDisabledReviewGate(ctx, 'codex-plan-review', 'plan-review')}
 ${devexContext}
 
 ${generateCodexNativeReview(ctx, 'independent plan challenge')}
-This same-harness native challenge never establishes outside-provider coverage or
+This same-harness native challenge never establishes outside-provider coverage.
+It is a separate native context, not cross-model evidence; it establishes no
 cross-model consensus. If unavailable, record review_not_run and continue to the
 required outputs, unless this particular review was explicitly required.
 
