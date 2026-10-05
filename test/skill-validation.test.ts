@@ -1627,14 +1627,24 @@ describe('Codex skill', () => {
     }
   });
 
-  test('codex-host ship/review preserve adversarial review with a Claude outside voice', () => {
+  test('codex-host ship/review keep native adversarial review and its review record', () => {
+    // Automatic review is native on Codex. The shared routing test separately
+    // pins explicit /claude-code selection and prevents provider substitution.
     for (const skill of ['ship', 'review']) {
       const content = readCodexSkillUnion(skill);
       expect(content).not.toMatch(/codex\s+(?:exec|review)\s/);
-      expect(content).toContain('gstack-claude-code');
+      expect(content).not.toContain('gstack-claude-code');
+      expect(content).toContain('required native adversarial pass');
       expect(content).toContain('codex_reviews');
       expect(content).toContain('adversarial-review');
-      expect(content).toContain('Investigate and fix');
+      expect(content).toContain('source":"codex-native"');
+      if (skill === 'review') {
+        expect(content).toContain('Return all findings and structured-review decisions to Step 5 for its Fix-First handling');
+        expect(content).toMatch(/The parent owns\s+fixes and the complete re-review\./);
+      } else {
+        expect(content).toContain('Apply Step 9.3\'s matching procedure before testing the actionable fix queue.');
+        expect(content).toContain('completes full review before fixes');
+      }
     }
   });
 
@@ -1673,12 +1683,14 @@ describe('Codex skill', () => {
     expect(content).toContain('codex-doc-review');
   });
 
-  test('codex-host document-release runs Claude Code and keeps the historical log identifier', () => {
+  test('codex-host document-release uses native review and keeps the historical log identifier', () => {
     const content = readCodexSkillUnion('document-release');
-    expect(content).toContain('Claude Code');
-    expect(content).toContain('gstack-claude-code');
-    expect(content).toContain('codex-doc-review');
     expect(content).not.toMatch(/codex\s+(?:exec|review)\s/);
+    expect(content).not.toContain('gstack-claude-code');
+    expect(content).toContain('Use a fresh native reviewer for document-release');
+    expect(content).toContain('Only dispatch the native reviewer when the block reports `CODEX_REVIEW_MODE: enabled`');
+    expect(content).toContain('codex-doc-review');
+    expect(content).toContain('review_not_run');
   });
 
   test('codex review invocations avoid the prompt plus --base argument shape', () => {

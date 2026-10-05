@@ -283,10 +283,19 @@ describe('outside-voice dispatch contract', () => {
     }
   });
 
-  test('all host resolver outputs require Plan availability for native fallback', () => {
+  test('host resolver outputs declare their bounded reviewer availability path', () => {
     for (const host of ALL_HOST_CONFIGS) {
       const output = generateCodexPlanReview(reviewContext(host.name));
-      {
+      if (host.name === 'codex') {
+        // Codex uses the native fresh-context review as its primary automatic
+        // path. Plan/TaskOutput/TaskStop belong to other hosts' fallback path.
+        expect(output).toContain('Use a fresh native reviewer for fixture-plan-review');
+        expect(output).toContain('CODEX_REVIEW_MODE: disabled');
+        expect(output).toContain('CODEX_REVIEW_MODE: enabled');
+        expect(output).toContain('Only dispatch the native reviewer when the block reports `CODEX_REVIEW_MODE: enabled`');
+        expect(output).toContain('review_not_run');
+        expect(output).toContain('A fresh native context is not cross-model evidence.');
+      } else {
         expectMentions(output, [['without', 'unavailable', 'launching']], 'output');
         expectMentions(output, [['do not', 'completed', 'reviewer']], 'output');
         expect(output, host.name).toContain('Do not set a model\noverride');
