@@ -102,6 +102,7 @@ beforeAll(async () => {
   let currentHtml = html;
 
   server = Bun.serve({
+    hostname: '127.0.0.1',
     port: 0,
     fetch(req) {
       const url = new URL(req.url);
@@ -155,7 +156,7 @@ beforeAll(async () => {
     },
   });
 
-  baseUrl = `http://localhost:${server.port}`;
+  baseUrl = `http://127.0.0.1:${server.port}`;
 
   bm = new BrowserManager();
   await bm.launch();
