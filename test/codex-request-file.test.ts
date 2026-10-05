@@ -91,9 +91,16 @@ test('generic private inputs retain literal untrusted bytes and require the exac
   fs.writeFileSync(second.path, raw);
   const digest = new Bun.CryptoHasher('sha256').update(raw).digest('hex');
   const success = Bun.spawnSync([process.execPath, join(import.meta.dir, '../bin/gstack-private-input'), '--retire', second.path, '--sha256', digest], { env: { ...process.env, TMPDIR: root, HOME: root }, timeout: 30_000 });
-  expect(success.exitCode).toBe(0);
   const retired = JSON.parse(success.stdout.toString());
-  expect(retired.status).toBe('retired');
+  if (process.platform === 'darwin') {
+    expect(success.exitCode).toBe(0);
+    expect(retired.status).toBe('retired');
+  } else {
+    expect(success.exitCode).toBe(1);
+    expect(retired.status).toBe('retained_private');
+    expect(retired.reason).toBe('trash_unavailable');
+    expect(retired.path).toBe(second.directory);
+  }
   expect(fs.readFileSync(join(retired.path, 'input.txt'), 'utf8')).toBe(raw);
 });
 
