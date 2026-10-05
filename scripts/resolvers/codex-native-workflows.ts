@@ -257,6 +257,55 @@ completed clean review.
 `;
 }
 
+/** Adapt the shared plan policy to Codex's same-harness review and choice schema. */
+export function adaptCodexPlanDecisionPolicy(ctx: TemplateContext, sharedPolicy: string): string {
+  let policy = sharedPolicy;
+
+  if (ctx.skillName === 'plan-ceo-review') {
+    const comparisonStart = policy.indexOf('\n**Cross-model tension:**');
+    if (comparisonStart !== -1) policy = policy.slice(0, comparisonStart);
+    policy = policy
+      .replace(
+        'Enter after either an external reviewer or the bounded native fallback completed\nwith a valid report. Apply Outside Voice Integration Rule to every finding from that\nreport. Native fallback findings count as findings from the current harness, but never\nas outside coverage. Disabled or unavailable reviews skip this block.',
+        'Enter after the native reviewer completed with a valid report. Apply the finding\nintegration rules below to every native finding. Disabled or unavailable reviews skip\nthis block.',
+      )
+      .replace('**Outside evidence:**', '**Evidence:**')
+      .replace('For an outside finding, substitute', 'For a native finding, substitute');
+  } else if (ctx.skillName === 'plan-eng-review' || ctx.skillName === 'plan-devex-review') {
+    policy = policy
+      .replace('**Cross-model tension:**', '**Native reviewer findings:**')
+      .replaceAll('outside finding', 'native reviewer finding')
+      .replaceAll('outside findings', 'native reviewer findings');
+  } else {
+    policy = policy.replace('**Cross-model tension:**', '**Native finding decisions:**');
+  }
+
+  policy = policy
+    .replaceAll('four-option menus instead of the ordinary 2-3 options', 'four intended outcomes through native 2-3 option stages')
+    .replaceAll('Use AskUserQuestion, recommend + WHY', 'Use the advertised native input schema, recommend + WHY')
+    .replaceAll('Use AskUserQuestion.', 'Use the advertised native input schema.');
+
+  const policyChoices = /A\) Apply this change; B\) Keep this (?:row|commitment)'s\s+current value; C\) Investigate before choosing; D\) Defer this proposed change only\.?/g;
+  policy = policy.replace(policyChoices,
+    'the four intended outcomes: Apply this change, Keep the current value, Investigate before choosing, or Defer this proposed change only.');
+  policy = policy
+    .replaceAll('A) Include; B) Defer; C) Cut; D) Hold', 'the four candidate dispositions: Include, Defer, Cut, and Hold')
+    .replaceAll('D leaves this proposal row unresolved.', 'Deferring leaves this proposal row unresolved.');
+
+  const nativeChoiceTransport = `**Native choice transport:** Before asking, present the full decision brief with its evidence, current commitment or candidate, proposed change, recommendation, and every permitted outcome. Save the staged options under the same decision row and record each actual answer before moving on. A routing answer is not a disposition or approval; do not edit until the final outcome is answered. Use the advertised native input schema with at most three mutually exclusive options. If it is unavailable, ask plainly and wait for the actual answer.
+
+For policy or implementation choices, preserve all four outcomes (Apply, Keep, Investigate, and Defer this proposed change only) in the brief. Ask first: A) Apply this change; B) Keep the current value; C) More actions. If C, ask a second question: A) Investigate before choosing; B) Defer this proposed change only.
+
+For candidate scope, preserve Include, Defer, Cut, and Hold in the brief. Ask first: A) Include; B) More dispositions; C) Hold. If B, ask a second question: A) Defer; B) Cut; C) Hold. Name one candidate per row. Hold stops for discussion without changing the prior disposition; the routing choice only opens the next question. A deferred policy change remains unresolved and does not change candidate scope or scheduling.
+
+`;
+  const firstDecision = policy.indexOf('\n- **Policy or implementation:**');
+  if (firstDecision !== -1) {
+    return `${policy.slice(0, firstDecision)}\n\n${nativeChoiceTransport}${policy.slice(firstDecision)}`;
+  }
+  return `${nativeChoiceTransport}${policy}`;
+}
+
 export function nativeDocReview(ctx: TemplateContext): string {
   return `## Native Codex Documentation Review (default-on)
 
