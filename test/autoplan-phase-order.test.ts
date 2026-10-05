@@ -386,6 +386,9 @@ describe('phase-close control ownership across installed hosts', () => {
     if (host.name === 'claude') {
       expect(rendered).toContain(`${ctx.paths.skillRoot}/autoplan/sections/phase-close.md`);
       expect(rendered).toContain('and execute it');
+    } else if (host.name === 'codex') {
+      expect(rendered).toContain(`${ctx.paths.skillRoot}/.agents/skills/gstack-autoplan/sections/phase-close.md`);
+      expect(rendered).toContain('and execute it');
     } else {
       expect(rendered).toBe(template);
       ordered(rendered, ['4. **Read the complete current packet.**', '5. **Verify the current implementation.**',

@@ -1235,8 +1235,17 @@ describe('PLAN_FILE_REVIEW_REPORT resolver', () => {
       for (const field of ['status', 'unresolved', 'critical_gaps', 'issues_found', 'mode', 'commit']) {
         expect(report).toContain('`' + field + '`');
       }
-      expect(outside).toContain(host.name === 'codex' ? 'claude auth login' : 'codex login');
-      expectMentions(outside, [['never','supplies','coverage']], 'outside');
+      if (host.name === 'codex') {
+        expect(outside).toContain('codex_reviews');
+        expect(outside).toContain('CODEX_REVIEW_MODE: enabled');
+        expect(outside).not.toContain('claude auth login');
+        expect(outside).toContain('not cross-model evidence');
+        expect(outside).toContain('review_not_run');
+        expect(outside).toContain('never a clean review');
+      } else {
+        expect(outside).toContain('codex login');
+        expectMentions(outside, [['never','supplies','coverage']], 'outside');
+      }
     }
   });
 
@@ -1749,10 +1758,11 @@ describe('CODEX_SECOND_OPINION resolver', () => {
     expect(content).toMatch(/[Ee]mpty response/);
   });
 
-  test('Codex host runs Phase 3.5 through Claude Code', () => {
-    expect(codexContent).toContain('Phase 3.5: Cross-Model Second Opinion');
-    expect(codexContent).toContain('gstack-claude-code');
-    expect(codexContent).toContain('Claude Code');
+  test('Codex host runs Phase 3.5 through the native reviewer context', () => {
+    expect(codexContent).toContain('Phase 3.5: Independent Second Opinion');
+    expect(codexContent).toContain('Codex independent review: optional second opinion');
+    expect(codexContent).toContain('context, not cross-model evidence');
+    expect(codexContent).not.toContain('gstack-claude-code');
     expect(codexContent).not.toMatch(/codex\s+(?:exec|review)\s/);
   });
 });
@@ -2770,11 +2780,13 @@ describe('Codex generation (--host codex)', () => {
     expect(fs.existsSync(path.join(AGENTS_DIR, 'gstack-claude'))).toBe(false);
   });
 
-  test('Codex ship and review preserve outside review through Claude Code', () => {
+  test('Codex ship and review preserve native outside-review coverage', () => {
     for (const skill of ['ship', 'review']) {
       const content = readExternalSkillUnion(EXTERNAL_OUT, '.agents', skill);
       expect(content).not.toMatch(/codex\s+(?:exec|review)\s/);
-      expect(content).toContain('gstack-claude-code');
+      expect(content).toContain('Codex independent review');
+      expect(content).toContain('native reviewer');
+      expect(content).not.toContain('gstack-claude-code');
       expect(content).toContain('codex_reviews');
       expect(content).toContain('adversarial-review');
     }
@@ -3003,10 +3015,11 @@ describe('Codex generation (--host codex)', () => {
 
   // ─── Design outside voices: Codex host guard ─────────────────
 
-  test('codex host retains design outside voices through Claude Code', () => {
+  test('codex host retains design outside voices through native reviewer contexts', () => {
     const codexContent = readExternalSkillUnion(EXTERNAL_OUT, '.agents', 'design-review');
     expect(codexContent).toContain('Design Outside Voices');
-    expect(codexContent).toContain('gstack-claude-code');
+    expect(codexContent).toContain('Codex independent review: independent design critique');
+    expect(codexContent).not.toContain('gstack-claude-code');
   });
 
   test('codex host does not include Codex design block in ship', () => {

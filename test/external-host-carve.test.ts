@@ -51,12 +51,17 @@ afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 describe('C4: external section pointers', () => {
   for (const config of EXTERNAL) {
-    test(`${config.name}: ship and plan-ceo-review point relative to the installed skill directory`, () => {
-      expect(sectionPath(context(config.name, 'ship'), 'ship', 'tests'))
-        .toBe('`sections/tests.md` relative to the installed `gstack-ship` SKILL.md directory');
-      expect(sectionPath(context(config.name, 'plan-ceo-review'), 'plan-ceo-review', 'review-sections'))
-        .toBe('`sections/review-sections.md` relative to the installed `gstack-plan-ceo-review` SKILL.md directory');
-      expect(sectionPath(context(config.name, 'ship'), 'ship', 'tests')).not.toContain('$GSTACK_ROOT');
+    test(`${config.name}: ship and plan-ceo-review point to sections in the installed layout`, () => {
+      const ship = sectionPath(context(config.name, 'ship'), 'ship', 'tests');
+      const plan = sectionPath(context(config.name, 'plan-ceo-review'), 'plan-ceo-review', 'review-sections');
+      if (config.name === 'codex') {
+        expect(ship).toBe('`$GSTACK_ROOT/.agents/skills/gstack-ship/sections/tests.md`');
+        expect(plan).toBe('`$GSTACK_ROOT/.agents/skills/gstack-plan-ceo-review/sections/review-sections.md`');
+      } else {
+        expect(ship).toBe('`sections/tests.md` relative to the installed `gstack-ship` SKILL.md directory');
+        expect(plan).toBe('`sections/review-sections.md` relative to the installed `gstack-plan-ceo-review` SKILL.md directory');
+        expect(ship).not.toContain('$GSTACK_ROOT');
+      }
     });
   }
 
@@ -75,17 +80,23 @@ describe('C4: ship and plan-ceo-review are carved on every external host', () =>
         const text = [fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'),
           ...manifest.sections.map(s => fs.readFileSync(path.join(dir, 'sections', s.file), 'utf8'))].join('\n');
         expect(text).not.toMatch(new RegExp(`\\$GSTACK_ROOT/${skill}/sections/`));
-        const pointers = [...text.matchAll(new RegExp(`\`sections/([\\w.-]+)\` relative to the installed \`gstack-${skill}\` SKILL\\.md directory`, 'g'))].map(m => m[1]);
+        const relativePointers = [...text.matchAll(new RegExp(`\`sections/([\\w.-]+)\` relative to the installed \`gstack-${skill}\` SKILL\\.md directory`, 'g'))].map(m => m[1]);
+        const rootedPointers = config.name === 'codex'
+          ? [...text.matchAll(new RegExp(`\\$GSTACK_ROOT/\\.agents/skills/gstack-${skill}/sections/([\\w.-]+)`, 'g'))].map(m => m[1])
+          : [];
+        const pointers = [...new Set([...relativePointers, ...rootedPointers])];
         expect(pointers.length).toBeGreaterThan(0);
-        for (const file of pointers) expect(fs.existsSync(path.join(dir, 'sections', file)), `${skill}/sections/${file}`).toBe(true);
+        for (const file of relativePointers) expect(fs.existsSync(path.join(dir, 'sections', file)), `${skill}/sections/${file}`).toBe(true);
+        for (const file of rootedPointers) expect(fs.existsSync(path.join(renders.all, '.agents', 'skills', `gstack-${skill}`, 'sections', file)), `${skill}/sections/${file}`).toBe(true);
         expect(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8')).toContain('## Section index');
       }
     });
   }
 
-  test('no external render points at <root>/<skill>/sections/ (runtime roots have no section trees)', () => {
+  test('non-Codex external renders do not point at <root>/<skill>/sections/ (runtime roots have no section trees)', () => {
     const offenders: string[] = [];
     for (const config of EXTERNAL) {
+      if (config.name === 'codex') continue;
       for (const file of skillFiles(path.join(renders.all, config.hostSubdir))) {
         const hits = fs.readFileSync(file, 'utf8').match(/(?:\$GSTACK_ROOT|~\/[\w./-]*skills\/gstack)\/[a-z0-9-]+\/sections\/[\w.-]+/g) ?? [];
         offenders.push(...hits.map(hit => `${path.relative(renders.all, file)}: ${hit}`));
@@ -93,11 +104,16 @@ describe('C4: ship and plan-ceo-review are carved on every external host', () =>
     }
     expect(offenders).toEqual([]);
     const codex = ALL_HOST_CONFIGS.find(c => c.name === 'codex')!;
-    expect(fs.readFileSync(path.join(skillDir(codex, renders.all, 'plan-eng-review'), 'SKILL.md'), 'utf8'))
-      .toContain('Read the `review-sections` section inlined in this SKILL.md');
-    const html = fs.readFileSync(path.join(skillDir(codex, renders.all, 'design-html'), 'SKILL.md'), 'utf8');
-    expect(html).not.toContain('detector-install-offer.md');
-    expect(html).toContain('the user has never answered this. Ask now');
+    const engDir = skillDir(codex, renders.all, 'plan-eng-review');
+    expect(fs.readFileSync(path.join(engDir, 'SKILL.md'), 'utf8'))
+      .toContain('`sections/review-sections.md` relative to the installed `gstack-plan-eng-review` SKILL.md directory');
+    expect(fs.existsSync(path.join(engDir, 'sections', 'review-sections.md'))).toBe(true);
+    const htmlDir = skillDir(codex, renders.all, 'design-html');
+    const html = fs.readFileSync(path.join(htmlDir, 'SKILL.md'), 'utf8');
+    expect(html).toContain('`sections/detector-install-offer.md` relative to the installed `gstack-design-html` SKILL.md directory');
+    expect(fs.existsSync(path.join(htmlDir, 'sections', 'detector-install-offer.md'))).toBe(true);
+    expect(fs.readFileSync(path.join(htmlDir, 'sections', 'detector-install-offer.md'), 'utf8'))
+      .toContain('the user has never answered this. Ask now');
   });
 
   test('codex: the autoplan methodology loader accepts the carved plan-ceo-review install', () => {
@@ -108,6 +124,28 @@ describe('C4: ship and plan-ceo-review are carved on every external host', () =>
     const methodology = fs.readFileSync(prepared.methodologyPath, 'utf8');
     expect(methodology).toContain('sections/review-sections.md');
     expect(methodology).toContain('## Review Sections');
+
+    const autoplanDir = skillDir(codex, renders.all, 'autoplan');
+    const ceoPhase = fs.readFileSync(path.join(autoplanDir, 'sections', 'ceo-phase.md'), 'utf8');
+    expect(ceoPhase).toContain('$GSTACK_ROOT/.agents/skills/gstack-autoplan/sections/phase-close.md');
+    const closePath = path.join(autoplanDir, 'sections', 'phase-close.md');
+    expect(fs.existsSync(closePath)).toBe(true);
+    const close = fs.readFileSync(closePath, 'utf8').replace(/\s+/g, ' ');
+    const closeStages = [
+      '1. **Finish and save the review.**', '2. **Reconcile accepted requirements.**',
+      "3. **Prepare this phase's close packet.**", '4. **Read the complete current packet.**',
+      '5. **Verify the current implementation.**', '6. **Publish the parent report.**',
+      '7. **Return to the driver.**',
+    ];
+    const positions = closeStages.map(stage => close.indexOf(stage));
+    expect(positions.every(position => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(close).toContain('exact `offset` and `limit`');
+    expect(close).toContain('through EOF');
+    expect(close).toContain('Recheck step 1');
+    expect(close).toContain('keep this phase open');
+    expect(close).toContain('SEND the filled report below now');
+    expect(close).toContain('in the same turn');
   });
 });
 

@@ -162,11 +162,21 @@ ${ceo ? 'Attempt the CEO review; a failed or unavailable reviewer may continue o
 **Dispatch a fresh native reviewer:**
 
 ${generateCodexNativeReview(_ctx, 'spec document review')}
-Review all five dimensions: completeness, consistency, clarity, scope and feasibility.
+Review all five dimensions:
+1. **Completeness** — requirements and edge cases.
+2. **Consistency** — no contradictions.
+3. **Clarity** — implementable without follow-up questions.
+4. **Scope** — no unapproved creep or YAGNI.
+5. **Feasibility** — buildable with the stated approach.
 For each, return PASS or specific issues with suggested fixes, and a quality score
 from 1–10. The reviewer receives the saved document or complete labelled content,
-not this conversation. For CEO review, include both the current scope summary and
-amended working plan; failure to inspect either is an unavailable review.
+not this conversation.
+${ceo ? `Read both inputs in full: the current CEO scope summary and amended working plan.
+Evaluate them together on all five dimensions. Flag contradictions, unsupported
+accepted expansions and required behavior missing from both. Cite input and
+requirement for each finding. If either input is unavailable or incomplete, report
+that failure instead of grading partial input. Overall PASS only if all dimensions
+pass; return PASS or numbered issues with dimension, description and suggested fix.` : ''}
 
 **Outcome:** A completed PASS stops. For issues, make only approved document edits
 and re-dispatch after each revision, up to three launches; stop earlier on repeated

@@ -31,7 +31,9 @@ describe('original source to native obligations', () => {
     const native = generateSpecReviewLoop(ctx('plan-ceo-review'));
     for (const obligation of ['0H spec-review metrics', 'required when writing is permitted',
       'even if the reviewer failed', 'failed mkdir', 'failed append', 'JSON null',
-      '## Reviewer Concerns', '0D', '0H approval', 'both inputs']) {
+      '## Reviewer Concerns', '0D', '0H approval', 'both inputs', 'Flag contradictions',
+      'accepted expansions', 'required behavior missing from both', 'Cite input and',
+      'Overall PASS only if all dimensions', 'no unapproved creep or YAGNI']) {
       expect(native).toContain(obligation);
     }
     expect(source).toContain('failed mkdir or append stops the review');
