@@ -77,22 +77,41 @@ describe('outside-review host and model matrix', () => {
 });
 
 describe('generated automatic review coverage', () => {
-  const skills = ['office-hours', 'plan-ceo-review', 'plan-eng-review', 'plan-devex-review', 'plan-design-review', 'design-review', 'design-consultation', 'review', 'ship', 'document-release', 'autoplan', 'spec'];
-  for (const skill of skills) {
-    test(`Codex /${skill} invokes Claude Code, including lazy sections`, () => {
+  const skills: Record<string, string> = {
+    'office-hours': '## Codex independent review: optional second opinion',
+    'plan-ceo-review': '## Codex independent review: spec document review',
+    'plan-eng-review': '## Codex independent review: independent plan challenge',
+    'plan-devex-review': '## Codex independent review: independent plan challenge',
+    'plan-design-review': '## Codex independent review: optional independent design critique',
+    'design-review': '## Codex independent review: independent design critique',
+    'design-consultation': '## Codex independent review: optional independent design critique',
+    review: '## Codex independent review: required adversarial review',
+    ship: '## Codex independent review: required adversarial review',
+    'document-release': '## Native Codex Documentation Review (default-on)',
+    autoplan: '## Codex independent review: autoplan phase review',
+    spec: '**Dispatch (when redaction passes):**',
+  };
+  for (const [skill, dispatchMarker] of Object.entries(skills)) {
+    test(`Codex /${skill} uses its native automatic review, including lazy sections`, () => {
       const host = ALL_HOST_CONFIGS.find(h => h.name === 'codex')!;
       const text = readUnion(skillDir(host, skill));
-      expect(text).toContain('gstack-claude-code');
-      // Prose about the CLI is permitted; executable codex review commands are not.
-      expect(shellLines(text).filter(line => /\bcodex\s+(?:exec|review)\b/.test(line))).toEqual([]);
-      expect(text).toContain('Claude Code');
+      expect(text).toContain(dispatchMarker);
+      expect(text).toContain('review_not_run');
+      expect(text).not.toContain('gstack-claude-code');
+      // Explicit cross-provider routing remains separately available; these
+      // automatic reviews use native contexts and never dispatch an external CLI.
+      expect(shellLines(text).filter(line => /\bcodex\s+(?:exec|review)\b|\bgstack-claude-code\s+--/.test(line))).toEqual([]);
     });
   }
 
-  test('Codex still omits Review Army specialist dispatch', () => {
+  test('Codex review and ship retain native Review Army specialist dispatch', () => {
     const host = ALL_HOST_CONFIGS.find(h => h.name === 'codex')!;
     for (const skill of ['review', 'ship']) {
-      expect(readUnion(skillDir(host, skill))).not.toContain('Step 4.5: Review Army — Specialist Dispatch');
+      const text = readUnion(skillDir(host, skill));
+      expect(text).toContain('Codex independent review: specialist review army');
+      expect(text).toContain('review_not_run');
+      expect(text).not.toContain('gstack-claude-code');
+      expect(shellLines(text).filter(line => /\bcodex\s+(?:exec|review)\b|\bgstack-claude-code\s+--/.test(line))).toEqual([]);
     }
   });
 });
@@ -133,15 +152,23 @@ test('automatic workflow templates delegate reviewer commands to shared resolver
 });
 
 for (const host of ['claude', 'codex'] as const) {
-  test(`${host}: live E2E installs an executable extracted workflow from the actual host render`, () => {
+  test(`${host}: E2E installs the extracted review workflow from the actual host render`, () => {
     const repo = mkdtempSync(join(tmpdir(), 'gstack-outside-fixture-'));
     try {
       const dir = installOutsideReviewFixture(output, host, repo, ROOT);
       const text = readFileSync(join(dir, 'SKILL.md'), 'utf8');
       expect(text).toContain('Step 0: Detect platform and base branch');
       expect(text).toContain('Step 3: Get the diff');
-      expect(text).toContain('Step 4.8: Adversarial review (always-on)');
-      expect(text).toContain(host === 'codex' ? 'gstack-claude-code' : 'codex exec');
+      expect(text).toContain(host === 'codex'
+        ? 'Step 5.7: Adversarial review (always-on)'
+        : 'Step 4.8: Adversarial review (always-on)');
+      if (host === 'codex') {
+        expect(text).toContain('Codex independent review: required adversarial review');
+        expect(text).not.toContain('gstack-claude-code');
+        expect(shellLines(text).filter(line => /\bcodex\s+(?:exec|review)\b|\bgstack-claude-code\s+--/.test(line))).toEqual([]);
+      } else {
+        expect(text).toContain('codex exec');
+      }
       expect(text).not.toContain('## Preamble (run first)');
       expect(text.match(/^name:/gm)).toHaveLength(1);
     } finally { rmSync(repo, { recursive: true, force: true }); }
