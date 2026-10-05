@@ -24,15 +24,16 @@
 
 import { describe } from 'bun:test';
 
-export type E2ETier = 'gate' | 'periodic';
+export type E2ETier = 'gate' | 'periodic' | 'marathon';
 
 /**
  * True when this process should run whole-file-gated paid tests of `tier`:
- * EVALS=1 AND EVALS_TIER exactly equals the tier.
+ * EVALS=1 AND EVALS_TIER exactly equals the tier. 'marathon' cases (full
+ * end-to-end flows) therefore never run in the gate/PR or periodic lanes.
  *
  * Deliberate consequence: EVALS=1 with EVALS_TIER unset is false for BOTH
- * tiers. Tierless runs (`test:evals` / `eval:bg` / `eval:bg:all`) skip every
- * tier-gated file and rely on diff-based per-test selection instead — that is
+ * tiers. Tierless runs (a bare `EVALS=1 bun test`; the retired `test:evals`
+ * family was one) skip every tier-gated file and rely on diff-based per-test selection instead — that is
  * the long-standing behavior of the copy-pasted predicates, pinned by
  * test/helpers/e2e-gate.unit.test.ts.
  */

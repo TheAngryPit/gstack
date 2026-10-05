@@ -174,7 +174,10 @@ describeIfSelected(
 case "$1" in
   --version) echo "gbrain test-0.41.0"; exit 0 ;;
   search) echo "[]"; exit 0 ;;
-  get_page) echo ""; exit 0 ;;
+  # Real gbrain: \`get <slug>\` reads a page back; \`get_page\` is an MCP tool
+  # name, not a CLI verb.
+  get) cat "${payloadDir}/$2.md" 2>/dev/null; exit 0 ;;
+  get_page) echo "Unknown command: get_page" >&2; exit 1 ;;
   put)
     SLUG="$2"
     shift 2
@@ -232,7 +235,7 @@ exit 0
           model: resolveEvalModel('capture'),
           run: (signal) => runSkillTest({
             signal,
-            prompt: `Read office-hours/SKILL.md for the workflow.
+            prompt: `Read office-hours/SKILL.md for the workflow with the Read tool (it is long; Bash output truncates it). Skip its preamble bash block, onboarding, telemetry and contributor sections — go straight to the workflow.
 
 Read pitch.md — that's a founder pitch coming to office hours. Select Startup Mode. Skip any AskUserQuestion — this is non-interactive; auto-decide the recommended option for any question.
 

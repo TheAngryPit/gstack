@@ -133,8 +133,9 @@ check unavailable: <command>. The finding stays INFORMATIONAL and nothing is pro
 deletion; run the search by hand to complete the evidence. (see
 ~/.claude/skills/gstack/docs/test-value-bar.md#caller-check-unavailable)
 
-Skip a test carrying `gstack:test-value keep reason="<why>"` (any comment syntax). Report
-the count and reasons of skipped tests as one INFORMATIONAL line.
+Skip a test carrying `gstack:test-value keep reason="<why>"` (any comment syntax). If any
+were skipped, report their count and reasons as one INFORMATIONAL line. Emit no finding
+for a test you reviewed and kept.
 
 Rejection vocabulary, when a finding names why a new test fails the gate:
 `duplicate_protects`, `needs_seam`, `incomplete_card`, `no_credible_regression`,

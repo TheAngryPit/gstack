@@ -1,6 +1,7 @@
 /** Preserve source-file boundaries when a workflow judge reads carved skills. */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { markerIndex } from './workflow-excerpt';
 
 export interface WorkflowJudgeFile {
   path: string;
@@ -25,6 +26,8 @@ export const QA_DISCOVERY_REFERENCES = [
 ];
 
 export const WORKFLOW_JUDGE_REASONING_WORD_LIMIT = 150;
+/** The instructed length sits below the enforced limit: judges asked for <150 landed at 130-156 words. */
+export const WORKFLOW_JUDGE_REASONING_WORD_TARGET = 120;
 
 export const WORKFLOW_JUDGE_RESPONSE_SCHEMA = {
   type: 'object',
@@ -33,7 +36,7 @@ export const WORKFLOW_JUDGE_RESPONSE_SCHEMA = {
     completeness: { type: 'integer', enum: [1, 2, 3, 4, 5] },
     actionability: { type: 'integer', enum: [1, 2, 3, 4, 5] },
     reasoning: { type: 'string',
-      description: `Under ${WORKFLOW_JUDGE_REASONING_WORD_LIMIT} words with at most two decisive examples, evaluating the complete supplied workflow.` },
+      description: `Under ${WORKFLOW_JUDGE_REASONING_WORD_TARGET} words with at most two decisive examples, evaluating the complete supplied workflow.` },
   },
   required: ['clarity', 'completeness', 'actionability', 'reasoning'],
   additionalProperties: false,
@@ -61,7 +64,7 @@ Clarity 4 means the target agent can determine the next permitted action on each
 5 additionally means those paths are easy to locate and understand.
 Score clarity 3 or lower when execution still requires guessing because of
 conflicting order, undefined decisions, unclear authority or missing input/output handling.
-Evaluate the whole workflow, but keep the JSON reasoning under 150 words with at most two decisive examples.
+Evaluate the whole workflow, but keep the JSON reasoning under ${WORKFLOW_JUDGE_REASONING_WORD_TARGET} words with at most two decisive examples.
 For a clarity defect, cite the specific file/step and explain the competing actions or missing decision.
 Keep completeness and actionability independent: reader capability does not supply missing requirements.` : ''}
 
@@ -82,7 +85,7 @@ export function readWorkflowJudgeInput(opts: {
   root: string;
   skillPath: string;
   startMarker: string;
-  endMarker: string | null;
+  endMarker: string | RegExp | null;
   references?: readonly string[];
 }): WorkflowJudgeInput {
   const sources = [{
@@ -113,7 +116,7 @@ export function readWorkflowJudgeInput(opts: {
   const union = allSources.map(file => file.content).join('\n');
   const start = union.indexOf(opts.startMarker);
   if (start < 0) throw new Error(`Start marker not found in ${opts.skillPath}: "${opts.startMarker}"`);
-  const end = opts.endMarker === null ? union.length : union.indexOf(opts.endMarker, start);
+  const end = opts.endMarker === null ? union.length : markerIndex(union, opts.endMarker, start);
   if (end < 0) throw new Error(`End marker not found in ${opts.skillPath}: "${opts.endMarker}"`);
 
   const files: WorkflowJudgeFile[] = [];

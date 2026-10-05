@@ -13,15 +13,93 @@ This doc serves two audiences:
 
 | Host + detection state | What renders in the planning-skill SKILL.md |
 |---|---|
-| Any host + `gstack-config gbrain-refresh` reports `gbrain_local_status: "ok"` | Compressed brain-aware blocks render. Agent reads this doc on-demand when it actually saves. ~250 token overhead per planning skill. |
+| Claude + `gstack-config gbrain-refresh` reports `gbrain_local_status: "ok"` | Compressed brain-aware blocks render. Agent reads this doc on-demand when it actually saves. ~250 token overhead per planning skill. |
+| Codex + `gstack-config gbrain-refresh --host codex --server NAME` | Explicitly bound context reads and task-authorized saves render into the local Codex skill tree. |
 | Any host + gbrain not detected | Blocks suppressed at gen-time. Zero token overhead. Calibration takes still render (separate resolver, host-agnostic). |
 | GBrain or Hermes host | Blocks always render regardless of detection — these hosts ship gbrain integration as a first-class concern. |
 
-`.gbrain-source` pins **reads** only — writes go to the default engine
-configured in `~/.gbrain/config.json`. Documented at
-`bin/gstack-gbrain-sync.ts` for code-lookup resolvers; gstack treats the
-same contract as load-bearing for artifact `put` semantics. If a user
-reports writes landing in the wrong source, look here first.
+### Codex: select an existing brain explicitly
+
+Run `gstack-config gbrain-refresh --host codex --server NAME`, where NAME is
+the intended enabled local stdio server in the current Codex `config.toml`.
+It must invoke GBrain with `serve` and provide explicit `GBRAIN_HOME` and
+`GBRAIN_SOURCE`. A machine with several brains never selects one by ordering.
+The resolved executable must be named `gbrain`; inherited `env_vars` registrations
+and non-host mounted-brain bindings are unsupported and fail before probing.
+The brain must explicitly configure the Postgres engine: PGLite is unsupported
+because its native stdio server owns the embedded database. Use that owning MCP
+surface for PGLite instead of launching a competing CLI. Registrations with tool
+allowlists, disabled tools, per-tool approvals or unknown configuration fields
+are rejected; a CLI call must not bypass native MCP restrictions.
+No server is installed and no brain is created. The command performs a read-only
+health probe, then uses the existing `gen-skill-docs` generator to install Codex
+enrichment. The selected Codex model is retained (`--model MODEL` is optional).
+
+The local `~/.gstack/gbrain-codex-binding.json` stores the selected name, paths,
+source, and a fingerprint. It does not copy database credentials or provider
+environment values. Each call revalidates the existing native registration and
+brain configuration, then uses that registration's environment and explicit
+source. Missing, disabled, or changed bindings fail closed; a deliberate
+`--server NAME` refresh accepts a reviewed change. A repeat refresh can omit
+`--server` while the existing binding remains unchanged.
+
+Use `gstack-gbrain-detect --host codex` (or add `--is-ok`) to probe that binding.
+The explicit host keeps this selection separate from other hosts' defaults.
+Codex refresh marks its detection snapshot as Codex-only; it cannot enable
+other hosts' enrichment. Its MCP mode label comes from the selected native
+registration, not a new MCP transport health check.
+
+The rendered skills use `bun "$GSTACK_BIN/gstack-gbrain-codex"` for enrichment.
+Supported reads are `search QUERY`, `get SLUG`, and
+`call get_page '{"slug":"SLUG","include_content":true}'`. The caller pins
+`source_id` and rejects routing overrides. `put SLUG [--content CONTENT]` also
+requires `--authorized-write` and the user's task-scoped authorization. Enabling
+enrichment grants no automatic output or entity-stub writing authority. The
+save templates below describe other hosts; Codex uses its guarded caller.
+After a Codex `put`, allocate a fresh `{"op":"get","slug":"<same slug>"}`
+request and compare the returned page body before reporting the artifact as
+persisted. A successful subprocess exit proves dispatch only, not durable
+writeback.
+For task-generated Markdown, write a literal local file with the editing tool,
+then use `put SLUG < "/absolute/path/to/result.md"`. Never interpolate Markdown
+into a shell argument or unquoted heredoc; stdin preserves backticks, dollar
+expansions, quotes and backslashes without shell evaluation. `--content` is only
+appropriate for an already shell-safe structured argv call.
+Source-qualified page slugs are rejected; colons in search text remain literal.
+Calls clear ambient GBrain/database routing overrides, pin the configured host
+brain, and run from the selected home so an unrelated project's mount or dotenv
+cannot choose a different brain. Explicit native environment values are retained,
+including a native `DATABASE_URL` that differs from the home configuration.
+Detector probes prepend the selected executable directory to that same native
+PATH, retaining configured interpreters and provider helpers.
+
+The refresh writes its detection snapshot, binding, and generated files under
+the existing gstack state directory and updates only symlinks belonging to this
+installation. Previous render/state/link targets are retained in the printed
+recovery directory. No global shell profile, native MCP configuration, GBrain
+runtime, provider, authentication, or privacy configuration is changed.
+If rollback itself fails, the command reports incomplete restoration and its
+recovery directory; it does not claim the previous installation was restored.
+Refresh publishes an owner-identified v2 lock atomically and recovers a verified
+dead same-host owner, retaining its record. Live or unknown owners are never
+stolen. An old anonymous lock requires confirming the old refresh has stopped
+and moving that exact lock aside; it cannot safely be inferred stale. Lock
+recovery is not a claim of crash-atomic installation across every file swap.
+
+### Source selection
+
+For ordinary GBrain CLI calls, `.gbrain-source` selects the source for reads
+and writes from that directory, including `gbrain put`; it does not select
+the storage engine configured in `~/.gbrain/config.json`. GBrain resolves an
+explicit `--source` first, then `GBRAIN_SOURCE`, then the nearest trusted
+`.gbrain-source`, followed by registered path and default-source rules.
+
+Native Codex enrichment follows a separate explicit binding: its guarded caller
+pins the selected server's `source_id`, clears ambient routing overrides and
+runs from the selected home. It does not infer the source from the project
+directory's `.gbrain-source`. If a page lands in an unexpected source, inspect
+the effective source selection before treating a successful `put` as proof it
+reached the intended corpus.
 
 Trust policy (`personal` vs `shared`, per endpoint hash) gates auto-push
 and writeback. Set via `gstack-config set
@@ -41,7 +119,7 @@ Before starting, search the brain for relevant context:
    `[slug] Title (score: 0.85) - first line of content...`.
 3. **If few results** (under 3): broaden to the single most specific
    keyword and search again. If still few, proceed without brain context.
-4. **Read top 3 results**: `gbrain get_page "<slug>"` for each. Stop
+4. **Read top 3 results**: `gbrain get "<slug>"` for each. Stop
    after 3 — diminishing returns past that.
 5. **Use the context** to inform your analysis. Cite specific slugs in
    your output when a brain page changed your thinking.
@@ -66,6 +144,18 @@ tags: [<tag>, <feature-slug>]
 EOF
 )"
 ```
+
+Read the page back from the **same working directory and account** before
+reporting it as saved:
+
+```bash
+gbrain get "<slug-prefix>/<feature-slug>"
+```
+
+Confirm that the returned page contains the intended title and substantive
+output. If the read fails or returns another page, report the save as
+unverified and retain the output for retry; do not claim a durable result.
+The same rule applies to entity stubs.
 
 **Slug guidance**: `<feature-slug>` should be kebab-case, lowercase, and
 unique within the prefix. Prefer concrete project/feature names over
@@ -137,7 +227,8 @@ rendered page. Add backlinks only when the relationship is concrete
 ### Completion summary
 
 In your final skill output, note brain utilization in one line:
-"Brain: read 3 pages, saved 1 page, enriched 2 entity stubs, 0 throttles."
+"Brain: read 3 pages, saved and read back 1 page, enriched 2 entity stubs,
+0 throttles." Count a page as saved only after its readback succeeds.
 This helps the user see brain coverage growing over time.
 
 ## Persistence verification (automated)

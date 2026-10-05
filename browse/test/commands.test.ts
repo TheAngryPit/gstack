@@ -17,6 +17,7 @@ import { WRITE_COMMANDS, READ_COMMANDS, META_COMMANDS, PAGE_CONTENT_COMMANDS, wr
 import { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, CircularBuffer } from '../src/buffers';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
+import { isProcessAlive } from '../src/error-handling';
 import * as path from 'path';
 import * as os from 'os';
 
@@ -558,6 +559,49 @@ describe('Interaction', () => {
     const val = await handleReadCommand('js', ['document.querySelector("#name").value'], bm);
     expect(val).toBe('John Doe');
   });
+
+  test('type --selector types into that element, not the focused one (#2936)', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/forms.html'], bm);
+    await handleWriteCommand('click', ['#email'], bm);
+    const result = await handleWriteCommand('type', ['--selector', '#name', 'Jane', 'Roe'], bm);
+    expect(result).toBe('Typed 8 characters into #name');
+    expect(await handleReadCommand('js', ['document.querySelector("#name").value'], bm)).toBe('Jane Roe');
+    expect(await handleReadCommand('js', ['document.querySelector("#email").value'], bm)).toBe('');
+  });
+
+  test('bare type keeps typing selector-looking text literally, with a hint and no refusal', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/forms.html'], bm);
+    await handleWriteCommand('click', ['#bio'], bm);
+    const result = await handleWriteCommand('type', ['#name', 'secret-value'], bm);
+    expect(result).toContain('Typed 18 characters into the focused element');
+    expect(result).toContain("hint: \"#name\" looks like a CSS selector. To type into that element: browse type --selector '#name' <text>");
+    expect(result).not.toContain('secret-value');
+    expect(await handleReadCommand('js', ['document.querySelector("#bio").value'], bm)).toBe('#name secret-value');
+    expect(await handleReadCommand('js', ['document.querySelector("#name").value'], bm)).toBe('');
+  });
+
+  test('prettyscreenshot --hide keeps a trailing image path as the output path (#1419)', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    const out = path.join(os.tmpdir(), `pretty-hide-${process.pid}.png`);
+    fs.rmSync(out, { force: true });
+    try {
+      const result = await handleWriteCommand('prettyscreenshot', ['--hide', '#title', '#content', out], bm);
+      expect(result).toContain(out);
+      expect(fs.existsSync(out)).toBe(true);
+      expect(await handleReadCommand('js', ['getComputedStyle(document.querySelector("#content")).display'], bm)).toBe('none');
+    } finally {
+      fs.rmSync(out, { force: true });
+    }
+  });
+
+  test('type -- types text that starts with -- literally; plain text gets no hint', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/forms.html'], bm);
+    await handleWriteCommand('click', ['#bio'], bm);
+    expect(await handleWriteCommand('type', ['--', '--selector', 'x'], bm)).toBe('Typed 12 characters');
+    expect(await handleReadCommand('js', ['document.querySelector("#bio").value'], bm)).toBe('--selector x');
+    await expect(handleWriteCommand('type', ['--selector'], bm)).rejects.toThrow('Usage: browse type [--selector <sel>] [--] <text>');
+    await expect(handleWriteCommand('type', ['--selector', '#name'], bm)).rejects.toThrow('Usage');
+  });
 });
 
 // ─── SPA / Console / Network ───────────────────────────────────
@@ -961,13 +1005,20 @@ describe('CLI lifecycle', () => {
       restartedPid = JSON.parse(fs.readFileSync(stateFile, 'utf-8')).pid;
       fs.unlinkSync(stateFile);
     }
+    let daemonSurvivedStop = false;
     if (restartedPid) {
-      try { process.kill(restartedPid, 'SIGTERM'); } catch {}
+      try { process.kill(restartedPid, 'SIGINT'); } catch {}
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && isProcessAlive(restartedPid)) await Bun.sleep(50);
+      daemonSurvivedStop = isProcessAlive(restartedPid);
+      if (daemonSurvivedStop) try { process.kill(restartedPid, 'SIGKILL'); } catch {}
     }
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('Status: healthy');
     expect(result.stderr).toContain('Starting server');
+    expect(restartedPid).toBeGreaterThan(0);
+    expect(daemonSurvivedStop).toBe(false);
   }, 20000);
 });
 

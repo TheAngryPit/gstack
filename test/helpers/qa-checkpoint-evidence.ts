@@ -59,6 +59,9 @@ export function nativeCalls(transcript: unknown[], failures: string[]): Call[] {
         if (typeof block.content === 'string') call.output = block.content;
         else if (Array.isArray(block.content) && block.content.every(part => object(part) && part.type === 'text' && typeof part.text === 'string')) {
           call.output = block.content.map(part => part.text).join('\n');
+        } else if (call.name === 'ToolSearch' && Array.isArray(block.content)
+          && block.content.every(part => object(part) && part.type === 'tool_reference' && typeof part.tool_name === 'string')) {
+          call.output = block.content.map(part => part.tool_name).join('\n');
         } else { call.failed = true; failures.push('Unsupported native result content'); }
         const file = raw.tool_use_result?.type === 'text' ? raw.tool_use_result.file : undefined;
         if (call.name === 'Read' && !call.failed && object(file) && typeof call.input.file_path === 'string' && file.filePath === call.input.file_path && typeof file.content === 'string'
@@ -91,6 +94,8 @@ export function validateQACheckpoints(input: {
   files: Record<string, string>;
   reportMarkdown: string;
   producer?: QaEvidenceContext;
+  /** Caller-authorized Bash that names checkpoints only as evidence citations, never as files to read or write. */
+  citesCheckpointsOnly?: (command: string) => boolean;
 }): string[] {
   const failures: string[] = [];
   let disk: Record<string, string>;
@@ -111,13 +116,40 @@ export function validateQACheckpoints(input: {
     else bound.push({ probe, call: matches[0] });
   }
   bound.sort((a, b) => a.call.start - b.call.start);
-  const notes: Array<{ name: string; call: Call; value: Record<string, any>; intent?: Call }> = [];
+  const notes: Array<{ name: string; call: Call; value: Record<string, any>; intent?: Call; merged?: boolean }> = [];
+  const captureId = (call: Call) => qaNativeCapture(call, input.producer)?.command.id;
   const written = new Set<string>();
   for (const call of calls) {
     const producerCommand = call.name === 'Bash' ? qaEvidenceCommand(call.input.command, input.producer) : undefined;
     let attempted = call.input.file_path;
     let content = call.input.content;
     let intent: Call | undefined;
+    const merged = producerCommand?.action === 'capture' && !!producerCommand.after;
+    if (merged) {
+      const after = producerCommand!.after!;
+      const name = `exploration-${producerCommand!.id}.json`;
+      const producer = qaProducerReceipt(call, input.producer) ?? qaProducerReceipt(call, input.producer, 'incomplete');
+      if (!producer || typeof disk[name] !== 'string' || qaEvidenceHash(disk[name]) !== producer.receipt.checkpointSha256) {
+        failures.push(`Checkpoint lacks completed native producer and intent: ${name}`);
+        continue;
+      }
+      let published: any;
+      try { published = JSON.parse(disk[name]); } catch {}
+      const captures = bound.filter(row => row.call.parent === call.parent && row.call.end < call.start)
+        .map(row => ({ row, producer: qaNativeCapture(row.call, input.producer) })).filter(row => row.producer?.command.id === after.capture);
+      const capture = captures.length === 1 ? captures[0] : undefined;
+      const read = capture && (capture.producer!.command.publicOutput || calls.some(read => read.name === 'Read' && !read.failed && read.parent === call.parent
+        && read.start > capture.row.call.end && read.end > read.start && read.end < call.start
+        && read.file?.path === path.join(input.reportRoot, `.qa-evidence/${after.capture}/observation.json`)
+        && read.file.content === capture.producer!.captured.observationText));
+      if (!capture || !read || !isDeepStrictEqual(published, { observationCapture: after.capture, observationArgv: capture.producer!.captured.receipt.argv,
+        observed: capture.row.probe.observed, hypothesis: after.hypothesis, nextCapture: producerCommand!.id, nextArgv: producerCommand!.argv })) {
+        failures.push(`Checkpoint intent lacks its completed observation read: ${name}`);
+        continue;
+      }
+      attempted = path.join(input.reportRoot, name);
+      content = disk[name];
+    }
     if (producerCommand?.action === 'checkpoint') {
       const producer = qaProducerReceipt(call, input.producer);
       const name = `exploration-${producerCommand.id}.json`;
@@ -154,19 +186,20 @@ export function validateQACheckpoints(input: {
       attempted = path.join(input.reportRoot, name);
       content = disk[name];
     }
-    if (call.name === 'Bash' && producerCommand?.action !== 'checkpoint' && typeof call.input.command === 'string' && /exploration-\d+\.json/.test(call.input.command)) {
+    if (call.name === 'Bash' && producerCommand?.action !== 'checkpoint' && typeof call.input.command === 'string' && /exploration-\d+\.json/.test(call.input.command)
+      && !input.citesCheckpointsOnly?.(call.input.command)) {
       failures.push('Unsupported checkpoint Bash interaction');
     }
     if (typeof attempted !== 'string' || !path.basename(attempted).startsWith('exploration-')) continue;
     if (call.name === 'Read') continue;
     const name = path.basename(attempted);
-    if ((call.name !== 'Write' && !intent) || !checkpointName.test(name) || attempted !== path.join(input.reportRoot, name)) {
+    if ((call.name !== 'Write' && !intent && !merged) || !checkpointName.test(name) || attempted !== path.join(input.reportRoot, name)) {
       failures.push(`Unsupported checkpoint write/path: ${attempted}`);
       continue;
     }
     if (written.has(name)) failures.push(`Reused or overwritten checkpoint: ${name}`);
     written.add(name);
-    if (call.failed || call.end <= call.start) { failures.push(`Checkpoint Write did not complete successfully: ${name}`); continue; }
+    if (!merged && (call.failed || call.end <= call.start)) { failures.push(`Checkpoint Write did not complete successfully: ${name}`); continue; }
     if (typeof content !== 'string' || !Object.hasOwn(disk, name) || disk[name] !== content) {
       failures.push(`Checkpoint artifact differs from captured Write: ${name}`);
       continue;
@@ -177,18 +210,19 @@ export function validateQACheckpoints(input: {
     }
     let value: unknown;
     try { value = JSON.parse(content); } catch {}
-    if (!object(value) || !isDeepStrictEqual(Object.keys(value).sort(), ['hypothesis', 'nextCommand', 'observationCommand', 'observed'])
-      || typeof value.hypothesis !== 'string' || value.hypothesis.trim().length <= 20
-      || !/[a-z]{3}/i.test(value.hypothesis) || typeof value.observationCommand !== 'string' || typeof value.nextCommand !== 'string') {
+    if (!object(value) || typeof value.hypothesis !== 'string' || value.hypothesis.trim().length <= 20 || !/[a-z]{3}/i.test(value.hypothesis)
+      || (merged ? !isDeepStrictEqual(Object.keys(value).sort(), ['hypothesis', 'nextArgv', 'nextCapture', 'observationArgv', 'observationCapture', 'observed'])
+        : !isDeepStrictEqual(Object.keys(value).sort(), ['hypothesis', 'nextCommand', 'observationCommand', 'observed'])
+          || typeof value.observationCommand !== 'string' || typeof value.nextCommand !== 'string')) {
       failures.push(`Invalid checkpoint schema: ${name}`);
       continue;
     }
-    notes.push({ name, call, value, ...(intent ? { intent } : {}) });
+    notes.push({ name, call, value, ...(intent ? { intent } : {}), ...(merged ? { merged } : {}) });
   }
   for (const name of Object.keys(disk)) if (!written.has(name)) failures.push(`Checkpoint has no public Write: ${name}`);
   const additional: Array<{ command: string; call: Call }> = [];
   for (const target of input.additionalTargets ?? []) {
-    if (!notes.some(note => note.value.nextCommand === target.command)) continue;
+    if (!notes.some(note => note.value.nextCommand === target.command || note.merged && note.call.input.command === target.command && note.call.output === target.output)) continue;
     const matches = calls.filter(call => call.name === 'Bash' && call.input.command === target.command
       && call.end > call.start && call.output === target.output);
     if (matches.length !== 1 || bound.some(row => row.call === matches[0]) || additional.some(row => row.call === matches[0])) {
@@ -198,7 +232,9 @@ export function validateQACheckpoints(input: {
   const owners = new Map<Call, typeof notes>();
   for (const target of [...bound.map(row => ({ command: row.probe.command, call: row.call })), ...additional]) {
     const previous = bound.filter(row => row.call.parent === target.call.parent && row.call.start < target.call.start).at(-1);
-    owners.set(target.call, notes.filter(note => previous && note.call.parent === target.call.parent
+    owners.set(target.call, notes.filter(note => previous && note.call.parent === target.call.parent && note.merged
+      ? note.call === target.call && note.value.observationCapture === captureId(previous.call) && isDeepStrictEqual(note.value.observed, previous.probe.observed)
+      : previous && note.call.parent === target.call.parent && !note.merged
       && note.call.start > previous.call.end && note.call.end < target.call.start
       && (!note.intent || note.intent.start > previous.call.end)
       && note.value.observationCommand === previous.probe.command && isDeepStrictEqual(note.value.observed, previous.probe.observed)

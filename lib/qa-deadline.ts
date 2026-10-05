@@ -7,6 +7,7 @@ import { initializeWindowsReviewJob } from './claude-code-windows-job';
 
 const MAX_MS = 2_147_483_647;
 class QaDeadlineError extends Error {}
+const QA_DEADLINE_USAGE = 'gstack-qa-deadline start FILE SECONDS [EARLIER_UTC] | status FILE | run FILE -- COMMAND ARGS...';
 type QaCommandResult = { exitCode: number; signal: NodeJS.Signals | null; completed: boolean };
 type Emit = (stream: 'stdout' | 'stderr', receipt: Record<string, unknown>, completion?: QaCommandResult) => void;
 
@@ -269,6 +270,10 @@ export async function qaDeadlineMain(args: string[], receiptWorker = false): Pro
   return withQaReceiptOutput(receiptWorker, 'qa-deadline-receipt', receipt => '\nQA_DEADLINE ' + JSON.stringify({ guard: 'qa-deadline', ...receipt }) + '\n', async emit => {
     try {
       const [action, file, ...rest] = args;
+      if (action === '--help' && args.length === 1) {
+        emit('stdout', { event: 'help', usage: QA_DEADLINE_USAGE });
+        return 0;
+      }
       if (action === 'start' && file && (rest.length === 1 || rest.length === 2)) {
         const status = qaDeadlineStatus(startQaDeadline(file, rest[0], rest[1]));
         emit('stdout', { event: 'start', ...status });
@@ -283,7 +288,7 @@ export async function qaDeadlineMain(args: string[], receiptWorker = false): Pro
         if (process.platform === 'win32' && !receiptWorker) return await runWindowsWorker(args, emit);
         return await runQaDeadlineCommand(file, rest[1], rest.slice(2), emit);
       }
-      throw new QaDeadlineError('Usage: gstack-qa-deadline start FILE SECONDS [EARLIER_UTC] | status FILE | run FILE -- COMMAND ARGS...');
+      throw new QaDeadlineError(`Usage: ${QA_DEADLINE_USAGE}`);
     } catch (error) {
       emit('stderr', { event: 'error', message: error instanceof QaDeadlineError ? error.message : 'Deadline guard failed' });
       return 2;

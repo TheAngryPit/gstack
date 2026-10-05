@@ -49,8 +49,12 @@ import { randomBytes } from 'node:crypto';
 
 export const RENDER_SENTINEL = 'GSTACK_RENDER_OK';
 const DEFAULT_TIMEOUT_MS = 120_000;
-/** Slack over the script budget so the `aside repl` process can wind down before we kill it. */
-const ASIDE_PROCESS_SLACK_MS = 10_000;
+/** Slack over the script budget so the `aside repl` process can wind down before we kill it;
+ *  it also scales runProc's kill and give-up allowances. GSTACK_RENDER_SLACK_MS lets tests shrink it. */
+function processSlackMs(): number {
+  const ms = Number(process.env.GSTACK_RENDER_SLACK_MS);
+  return Number.isInteger(ms) && ms > 0 ? ms : 10_000;
+}
 /** Default budget for a waitFor selector/expression, on either engine. */
 const DEFAULT_WAIT_MS = 30_000;
 /** Default cap (chars) on an inline eval result. */
@@ -94,7 +98,7 @@ export function probeAside(timeoutMs = 30_000): AsideProbe {
 
 // ─── Spec ────────────────────────────────────────────────────────────────────
 
-/** CDP Page.printToPDF options, plus make-pdf's Paged.js wait. Inches for paper/margins. */
+/** CDP Page.printToPDF options, plus an optional Paged.js wait. Inches for paper/margins. */
 export interface PdfStepOptions {
   paperWidth?: number;
   paperHeight?: number;
@@ -112,7 +116,12 @@ export interface PdfStepOptions {
   generateDocumentOutline?: boolean;
   pageRanges?: string;
   scale?: number;
-  /** Wait (≤3s, non-fatal) for `window.__pagedjsAfterFired` before printing. */
+  /**
+   * Wait (≤3s, non-fatal) for `window.__pagedjsAfterFired` before printing —
+   * only for pages that load Paged.js themselves (gstack-render
+   * --wait-pagedjs). make-pdf ships no pagination script and never sets it:
+   * its TOC page numbers come from make-pdf/src/toc-pages.ts.
+   */
   waitForPagedJs?: boolean;
 }
 
@@ -296,7 +305,7 @@ export function serveDir(root: string, nonce: string = randomBytes(16).toString(
 // ─── Async spawn (keeps the loopback server's event loop free) ────────────────
 
 async function runProc(cmd: string, args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string; error?: string }> {
-  let child: ReturnType<typeof Bun.spawn>;
+  let child: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
   try {
     child = Bun.spawn([cmd, ...args], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
   } catch (e) {
@@ -308,18 +317,19 @@ async function runProc(cmd: string, args: string[], timeoutMs: number): Promise<
   // for up to timeoutMs after printing its result.
   const timers: ReturnType<typeof setTimeout>[] = [];
   const after = (ms: number, fn: () => void) => { timers.push(setTimeout(fn, ms)); };
+  const slackMs = processSlackMs();
   after(timeoutMs, () => { timedOut = true; try { child.kill(); } catch {} });
   // A child that ignores SIGTERM (a CLI blocked on its app) gets SIGKILL; a
   // grandchild holding the pipes open must not hang the render either.
-  after(timeoutMs + 5_000, () => { try { child.kill('SIGKILL'); } catch {} });
+  after(timeoutMs + slackMs / 2, () => { try { child.kill('SIGKILL'); } catch {} });
   const read = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-  const giveUp = new Promise<[string, string]>((resolve) => after(timeoutMs + 10_000, () => resolve(['', ''])));
+  const giveUp = new Promise<[string, string]>((resolve) => after(timeoutMs + slackMs, () => resolve(['', ''])));
   const [stdout, stderr] = await Promise.race([read, giveUp]);
   // Pipes at EOF means the child is exiting; wait for the exit code until the
   // SIGKILL above has had its turn. A flat 5s bound here once failed a CI render
   // whose fake had already written its artifact — under a 6-shard load the
   // reaper needed longer than that, and a null code reads as a failed command.
-  const code = await Promise.race([child.exited, new Promise<null>((resolve) => after(timeoutMs + 6_000, () => resolve(null)))]);
+  const code = await Promise.race([child.exited, new Promise<null>((resolve) => after(timeoutMs + slackMs * 3 / 5, () => resolve(null)))]);
   for (const t of timers) clearTimeout(t);
   return { code, stdout, stderr, error: timedOut ? `timed out after ${timeoutMs}ms` : undefined };
 }
@@ -343,7 +353,7 @@ async function asideRender(spec: RenderSpec): Promise<RenderResult> {
     const script = buildRenderScript(url, spec);
     // Async spawn: a synchronous wait would block this event loop, and the
     // loopback server above runs on it — Page.navigate would then time out.
-    const proc = await runProc('aside', ['repl', script], (spec.timeoutMs ?? DEFAULT_TIMEOUT_MS) + ASIDE_PROCESS_SLACK_MS);
+    const proc = await runProc('aside', ['repl', script], (spec.timeoutMs ?? DEFAULT_TIMEOUT_MS) + processSlackMs());
     const stdout = `${proc.stdout}${proc.stderr}`.replace(/\x1b\[[0-9;]*m/g, '');
     const evals: Record<number, string> = {};
     for (const m of stdout.matchAll(/^EVAL (\d+) ([A-Za-z0-9+/=]*)$/gm)) evals[Number(m[1])] = Buffer.from(m[2], 'base64').toString('utf8');
@@ -608,7 +618,7 @@ export const NO_BROWSER_HELP = "open the Aside app (macOS 15+, aside.com), or ru
 export type EngineChoice =
   | { engine: 'aside'; version: string }
   | { engine: 'browse'; bin: string }
-  | { engine: null; probe: AsideProbe; error: string };
+  | { engine: null; probe: Extract<AsideProbe, { ok: false }>; error: string };
 
 let chosen: EngineChoice | undefined;
 

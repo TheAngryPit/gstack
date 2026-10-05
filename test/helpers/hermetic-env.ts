@@ -21,11 +21,15 @@
  *   └─────────────────────────────┘
  *      + per-runner extraAllow (codex: OpenAI vars; gemini: Google vars)
  *      + CLAUDE_CONFIG_DIR=<runRoot>/.claude  GSTACK_HOME=<runRoot>/gstack-home
+ *      + DISABLE_AUTOUPDATER=1 (pinned in both branches; the scrub drops the
+ *        workflow's copy and every PTY screen otherwise shows the updater's
+ *        "no write permission to npm prefix" failure)
  *      + per-test overrides spread LAST
  *
  * Escape hatch: EVALS_HERMETIC=0 restores the legacy contaminated env
- * byte-identically (runners must also gate --strict-mcp-config on
- * isHermeticEnabled() so the escape hatch restores args too).
+ * plus only the DISABLE_AUTOUPDATER pin (runners must also gate
+ * --strict-mcp-config on isHermeticEnabled() so the escape hatch restores
+ * args too).
  *
  * isHermeticEnabled() is evaluated at CALL time, never at module load —
  * ESM hoists imports above any in-file `process.env.EVALS_HERMETIC = '0'`
@@ -67,14 +71,26 @@ const ALLOW_EXACT = new Set([
  * VOYAGE_API_KEY) — CI doesn't have them and eval children have no business
  * using them. A test that legitimately needs one opts in via its own env
  * override; a provider runner (codex/gemini) re-admits its auth vars via
- * opts.extraAllow. Prefix matches reject credential-shaped suffixes; exact
+ * opts.extraAllow. Prefix matches reject credential-shaped segments; exact
  * and explicit runner admissions still win. */
 const ALLOW_PREFIXES = ['EVALS_', 'GITHUB_'];
-const CREDENTIAL_SUFFIXES = new Set([
+const CREDENTIAL_SEGMENTS = new Set([
   'KEY', 'KEYS', 'TOKEN', 'TOKENS', 'SECRET', 'SECRETS', 'PASSWORD', 'PASSWD',
   'PASS', 'CREDENTIAL', 'CREDENTIALS', 'AUTH', 'PAT', 'DSN', 'COOKIE',
   'SESSION', 'PRIVATE',
 ]);
+
+/**
+ * True when any underscore-separated segment of `name` is a credential word.
+ * Every segment, not just the last: a trailing qualifier moves the credential
+ * word off the end (`GITHUB_APP_PRIVATE_KEY_BASE64` is the PEM itself,
+ * `GITHUB_TOKEN_1` is a token). Segments, not substrings: `GITHUB_PATH`
+ * contains "PAT" and `GITHUB_TOKENIZER` contains "TOKEN", and both are
+ * metadata.
+ */
+function isCredentialShapedName(name: string): boolean {
+  return name.toUpperCase().split('_').some((segment) => CREDENTIAL_SEGMENTS.has(segment));
+}
 
 export interface HermeticEnvOpts {
   /** Per-runner additional allowed names (exact match) or prefixes (entries
@@ -100,9 +116,10 @@ export function buildHermeticEnv(
   opts?: HermeticEnvOpts,
 ): Record<string, string> {
   if (!isHermeticEnabled(base)) {
-    // Escape hatch: byte-identical to the legacy spread.
+    // Escape hatch: the legacy spread plus the updater pin.
     const legacy: Record<string, string> = {};
     for (const [k, v] of Object.entries(base)) if (v !== undefined) legacy[k] = v;
+    legacy.DISABLE_AUTOUPDATER = '1';
     for (const [k, v] of Object.entries(overrides ?? {})) if (v !== undefined) legacy[k] = v;
     return legacy;
   }
@@ -121,12 +138,12 @@ export function buildHermeticEnv(
     const allowed =
       ALLOW_EXACT.has(k) ||
       extraExact.has(k) ||
-      (ALLOW_PREFIXES.some((p) => k.startsWith(p)) &&
-        !CREDENTIAL_SUFFIXES.has(k.slice(k.lastIndexOf('_') + 1).toUpperCase())) ||
+      (ALLOW_PREFIXES.some((p) => k.startsWith(p)) && !isCredentialShapedName(k)) ||
       extraPrefixes.some((p) => k.startsWith(p));
     if (allowed) out[k] = v;
   }
   if (!out.TERM) out.TERM = 'xterm-256color';
+  out.DISABLE_AUTOUPDATER = '1';
   Object.assign(out, hermeticVars);
   for (const [k, v] of Object.entries(overrides ?? {})) if (v !== undefined) out[k] = v;
   return out;

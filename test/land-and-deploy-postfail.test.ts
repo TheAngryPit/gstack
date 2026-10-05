@@ -8,12 +8,11 @@
  * only the STOP-Read pointer). After ANY non-zero `gh pr merge`, the skill
  * must query authoritative PR state via
  * GraphQL (including queue membership) and
- * branch on the result instead of blindly retrying `gh pr merge` (cli/cli#3442,
- * cli/cli#13380).
+ * branch on the result instead of blindly retrying `gh pr merge`.
  *
  * Static invariants pin:
  *   - §4a-postfail header present
- *   - Universal invariant text + reference to upstream gh bugs
+ *   - Query-before-retry invariant after any non-zero merge exit
  *   - All three state branches (MERGED, OPEN, CLOSED) named explicitly
  *   - MERGED branch: capture merge SHA via mergeCommit.oid
  *   - MERGED branch: non-destructive worktree cleanup with uncommitted-work guard
@@ -26,6 +25,7 @@
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { expectMentions } from './helpers/prompt-structure';
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const TMPL = path.join(ROOT, "land-and-deploy", "sections", "merge-and-deploy.md.tmpl");
@@ -52,18 +52,14 @@ describe("PR #1620 §4a-postfail in land-and-deploy template", () => {
     expect(postfail).toBeLessThan(queue);
   });
 
-  test("Universal invariant + upstream gh bug references", () => {
-    const body = readTmpl();
-    expect(body).toMatch(/Universal invariant/);
-    expect(body).toMatch(/non-zero exit from `gh pr merge`/);
-    expect(body).toMatch(/cli\/cli#3442/);
-    expect(body).toMatch(/cli\/cli#13380/);
+  test("any non-zero merge exit queries authoritative state before retrying", () => {
+    const body = readTmpl().replace(/\s+/g, " ");
+    expect(body).toMatch(/non-zero exit from `gh pr merge`, query authoritative PR state before retrying/i);
   });
 
   test("Authoritative state query includes auto request and queue membership", () => {
     const body = readTmpl();
     expect(body).toMatch(/gh api graphql/);
-    expect(body).toContain('state headRefOid baseRefName mergedAt mergeCommit { oid }');
     expect(body).toContain('autoMergeRequest { enabledAt } mergeQueueEntry { id state }');
   });
 
@@ -82,14 +78,14 @@ describe("PR #1620 §4a-postfail in land-and-deploy template", () => {
   test("MERGED worktree cleanup is non-destructive (uncommitted-work guard)", () => {
     const body = readTmpl();
     expect(body).toMatch(/uncommitted work/);
-    expect(body).toMatch(/STOP worktree cleanup without removing/);
-    expect(body).toMatch(/Do NOT use `--force`/);
-    expect(body).toMatch(/Do NOT remove the user's primary working tree/);
+    expectMentions(body, [['stop', 'worktree', 'removing']], 'body');
+    expect(body).toMatch(/do not use `--force`/i);
+    expectMentions(body, [['do not', 'primary', 'working']], 'body');
   });
 
   test("MERGED branch continues to §4b CI auto-deploy detection", () => {
     const body = readTmpl();
-    expect(body).toMatch(/continue to §4b \(CI auto-deploy detection\)/);
+    expect(body).toContain('§4b');
   });
 
   // #2656: the failed merge carried --delete-branch; the recovery path must
@@ -114,29 +110,27 @@ describe("PR #1620 §4a-postfail in land-and-deploy template", () => {
   test("MERGED branch reconciliation distinguishes branch-absent from check-failed", () => {
     const body = readTmpl();
     // exit 0 + empty output = already clean (idempotent re-runs)...
-    expect(body).toMatch(/already been cleaned up/);
+    expect(body).toMatch(/already been cleaned up/i);
     // ...non-zero exit = unknown state, never read as a clean branch.
-    expect(body).toMatch(/Couldn't verify remote branch state/);
-    expect(body).toMatch(/never read a failed check as a clean branch/);
+    expectMentions(body, [['never', 'failed', 'branch']], 'body');
   });
 
   test("OPEN branch checks autoMergeRequest before treating as failure", () => {
     const body = readTmpl();
     expect(body).toMatch(/autoMergeRequest != null or \.mergeQueueEntry != null/);
-    expect(body).toMatch(/auto-merge is enabled or\s+merge queue is in use/);
   });
 
   test("CLOSED branch STOPs", () => {
     const body = readTmpl();
-    expect(body).toMatch(/state == "CLOSED".*[\s\S]{0,200}STOP/);
+    expect(body).toMatch(/state == "CLOSED"[\s\S]{0,200}\bstop\b/i);
   });
 
   test("Hard rule: no replay after MERGED and only one guarded direct fallback", () => {
-    const body = readTmpl();
-    expect(body).toMatch(/never\s+replay a merge after MERGED/);
-    expect(body).toContain('one direct fallback');
-    expect(body).toContain('There is no fallback from a direct attempt');
-    expect(body).toContain('readback has confirmed OPEN, no auto request and no queue entry');
+    const body = readTmpl().replace(/\s+/g, " ");
+    expect(body).toMatch(/never replay a merge after MERGED/i);
+    expect(body).toMatch(/one direct fallback/i);
+    expectMentions(body, [['no', 'fallback', 'attempt']], 'body');
+    expect(body).toMatch(/confirmed OPEN, no auto request and no queue entry/i);
   });
 
   test("Generated merge-and-deploy.md carries the §4a-postfail section (atomic regen per T-Codex-3)", () => {

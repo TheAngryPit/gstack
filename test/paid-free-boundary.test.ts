@@ -27,7 +27,7 @@ function runnerDependencies(root: string, entries: string[]): string[] {
     const source = fs.readFileSync(file, 'utf8').replace(/^#![^\n]*(?:\n|$)/, '\n');
     let audited = source;
     if (relative === 'test/helpers/test-selection.ts') {
-      if (createHash('sha256').update(source).digest('hex') !== '4d2fbcb6249e8d22453d25bfe9b18ee0f4568bbec071918675c38a455d4e1e08') {
+      if (createHash('sha256').update(source).digest('hex') !== '052ad5a52472bcb41db04c9f21fe6a819e9547768468f7e5d390e0014b567677') {
         throw new Error('Re-audit the historical touchfile map loader before excluding its computed import');
       }
       audited = source.replace('`const m = await import(${JSON.stringify(dataPath)});`,', "'',");
@@ -64,7 +64,7 @@ describe('paid/free dependency boundary', () => {
     expect(paid.length).toBeGreaterThan(0);
     const all = workflowJudgeDependencies(ROOT, paid);
     for (const dependencies of [runner, all]) {
-      expect(dependencies).toContain('scripts/test-strict-output.ts');
+      expect(dependencies).toContain('scripts/lib/shard-engine.ts');
       expect(dependencies).toContain('test/helpers/test-selection.ts');
       expect(dependencies).not.toContain('scripts/eval-flake-rank.ts');
       for (const freeOnly of FREE_ONLY_PR_FILES) expect(dependencies).not.toContain(freeOnly);
@@ -113,16 +113,23 @@ describe('paid/free dependency boundary', () => {
       expect(result.coverage?.unknownFiles).toEqual([]);
       expect(result.selection).toEqual({ e2e: [], judges: [] });
     }
-    for (const file of [
-      'scripts/new-helper.ts', 'scripts/free-test-durations.json', 'scripts/eval-flake-rank.ts',
-      'lib/new-runtime.ts', 'test/helpers/new-helper.ts', 'test/fixtures/new-fixture.ts',
-      '.github/workflows/new-free-tests.yml',
-    ]) {
+    // Tracked files outside every mapping and outside the derivable directories restore the full gate.
+    for (const file of ['ETHOS.md', 'SECURITY.md', 'conductor.json', '.osv-scanner.toml']) {
       const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [FREE_ONLY_PR_FILES[0], file] });
       expect(result.coverage?.mode, file).toBe('full-fallback');
       expect(result.coverage?.unknownFiles).toContain(file);
       expect(result.selection.e2e).toEqual(Object.keys(E2E_TIERS).filter(id => E2E_TIERS[id] === 'gate').sort());
       expect(result.selection.judges).toEqual(Object.keys(LLM_JUDGE_TOUCHFILES).sort());
+    }
+    // A tracked file under a derivable directory that no paid case's reference closure reaches is consumed by no paid case.
+    const unconsumed = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: ['scripts/eval-flake-rank.ts'] });
+    expect(unconsumed.coverage?.mode).toBe('pr');
+    expect(unconsumed.coverage?.noConsumerFiles).toEqual(['scripts/eval-flake-rank.ts']);
+    // A path absent from the head tree is a deletion: with no live reference it has no consumer.
+    for (const file of ['scripts/new-helper.ts', 'lib/new-runtime.ts', 'test/helpers/new-helper.ts', '.github/workflows/new-free-tests.yml']) {
+      const deleted = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [file] });
+      expect({ file, mode: deleted.coverage?.mode }).toEqual({ file, mode: 'pr' });
+      expect(deleted.coverage?.noConsumerFiles).toEqual([file]);
     }
     const missingBase = computePaidCaseSelection({ profile: 'pr', env: { EVALS_BASE: 'missing-boundary-ref' },
       changedFiles: ['package.json'] });
@@ -182,7 +189,7 @@ describe('paid/free dependency boundary', () => {
     const real = computePaidCaseSelection({ profile: 'pr', env: {},
       changedFiles: [file, 'plan-ceo-review/SKILL.md.tmpl'] });
     expect(real.coverage?.mode).toBe('pr');
-    expect(real.selection.e2e).toContain('plan-ceo-review-benefits');
+    expect(real.selection.e2e).toContain('auq-format-gate');
     expect(real.selection.judges).toContain('plan-ceo-review/SKILL.md modes');
     expect(real.selection.e2e?.every(id => PR_PROFILE_CASE_IDS.includes(id as typeof PR_PROFILE_CASE_IDS[number]))).toBe(true);
   });

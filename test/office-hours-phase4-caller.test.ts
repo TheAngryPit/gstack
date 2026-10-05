@@ -96,3 +96,16 @@ test('Phase4 caller fixture retains fork validation under either path convention
     expect(rejected.thrown).toBeDefined(); expect(rejected.judged).toBe(0); expect(rejected.rows[0].passed).toBe(false);
   }
 });
+
+test('Phase4 caller accepts a fork whose outer options are the seeded shapes, without Phase 4 vocabulary', async () => {
+  // Census 36776104571 trials 1-2: a complete Phase 4 fork naming the three seeded shapes as its options.
+  const seeded = (options: string) => `Where should the cross-skill retrieval smarts live?\nThe choice locks in who owns the ranking logic.\n${options}\nRecommendation: C because we can tune the salience signal before freezing a contract.\n`;
+  for (const options of ['A) Server-side — new MCP tools in gbrain\nB) Client-side — a gstack helper\nC) Hybrid — V1 client-side, V1.5 in gbrain',
+    'A) **Server-side** gbrain tools\nB) **Hybrid** promotion later']) {
+    const x = await runCaller(seeded(options)); expect(x.thrown).toBeUndefined(); expect(x.judged).toBe(1); expect(x.rows[0].passed).toBe(true);
+  }
+  for (const options of ['A) Server-side — new MCP tools\nB) Put retrieval on the client', 'A) Server-side\n    1) Client-side\n    2) Hybrid',
+    'A) Use a queue\n```text\nB) Server-side\nC) Client-side\n```', 'A) Ask customers first\nB) Ask later\nServer-side and Client-side are both options.']) {
+    const x = await runCaller(seeded(options)); expect(x.thrown).toBeDefined(); expect(x.judged).toBe(0); expect(x.rows[0].passed).toBe(false);
+  }
+});

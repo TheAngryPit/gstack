@@ -29,7 +29,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # GSTACK_STATE_ROOT takes precedence over GSTACK_HOME (test isolation per D16).
-GSTACK_HOME="${GSTACK_STATE_ROOT:-${GSTACK_HOME:-$HOME/.gstack}}"
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+GSTACK_HOME="$_gstack_sr_root"
 # Windows git-bash: GSTACK_HOME resolves to an MSYS path (/c/Users/...), which
 # Bun on Windows cannot open as a filesystem path (bites --derive). Normalize
 # once, here, before PROFILE_FILE/LEGACY_FILE are derived from it below —
@@ -351,6 +353,7 @@ do_derive() {
       const qids = new Set();
       const days = new Set();
       let count = 0;
+      let signalEvents = 0;
       for (const line of lines) {
         let e;
         try { e = JSON.parse(line); } catch { continue; }
@@ -360,8 +363,8 @@ do_derive() {
         qids.add(e.question_id);
         if (e.ts) days.add(String(e.ts).slice(0,10));
         const def = QUESTIONS[e.question_id];
-        if (def && def.signal_key) {
-          applySignal(totals, def.signal_key, e.user_choice);
+        if (def && def.signal_key && applySignal(totals, def.signal_key, e.user_choice).length > 0) {
+          signalEvents++;
         }
       }
 
@@ -373,6 +376,9 @@ do_derive() {
       profile.inferred = {
         values,
         sample_size: count,
+        // Events that actually moved a dimension (B10): sample_size counts every
+        // logged answer, most of which match no signal and leave the 0.5 seed.
+        signal_events: signalEvents,
         diversity: {
           skills_covered: skills.size,
           question_ids_covered: qids.size,

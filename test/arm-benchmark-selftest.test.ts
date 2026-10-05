@@ -13,10 +13,11 @@ import {
 } from './helpers/arm-benchmark-harness';
 import {
   armJudge, buildArmJudgePrompt, parseArmJudgeResponse,
-  ARM_JUDGE_ATTEMPTS, callJudge,
+  callJudge, ARM_JUDGE_MODEL, ARM_JUDGE_SCHEMA, type CallJudgeOptions,
 } from './helpers/llm-judge';
 import * as fs from 'fs';
 import * as path from 'path';
+import { expectMentions } from './helpers/prompt-structure';
 
 describe('arm benchmark selftest (free, no API)', () => {
   test('fixtures exist with their planted content; decoy credentials are obviously fake', () => {
@@ -127,9 +128,8 @@ describe('arm benchmark selftest (free, no API)', () => {
       expect(prompt).toContain(diff);
       expect(prompt).toContain(TASKS[0].ticket);
       expect(prompt).toContain('0-3 scale');
-      expect(prompt).toContain('Coverage is NOT over-engineering');
-      expect(prompt).toContain('MUST name the specific class, function, file, or pattern');
-      expect(prompt).toContain('construct MUST be exactly "none"');
+      expect(prompt).toContain('"none"');
+      expectMentions(prompt, [['coverage', 'not', 'over-engineering'], ['name', 'specific', 'class'], ['construct', 'exactly', '"none"']], 'arm judge prompt');
     }
     // The reference diffs are what the rubric anchors describe: the bad diff
     // carries a hand-rolled widget replacing a native element, the good one
@@ -182,28 +182,25 @@ describe('arm benchmark selftest (free, no API)', () => {
     expect(score.construct).toBe('none');
   });
 
-  test('armJudge: bounded retry-on-malformed — recovers once, then gives up', async () => {
-    // Malformed first, valid second: recovers within the 2-attempt bound.
+  test('armJudge: a malformed verdict is a failed sample, never re-asked', async () => {
     let calls = 0;
-    const flaky = (async () => {
+    const malformedFirst = (async () => {
       calls++;
       return calls === 1
         ? { over_engineering: 9, construct: 'garbage' }
         : { over_engineering: 2, construct: 'repository layer in app.js', reasoning: 'ok' };
     }) as unknown as typeof callJudge;
-    const recovered = await armJudge('ticket', 'diff --git a/x b/x\n+1\n', { call: flaky });
-    expect(recovered.over_engineering).toBe(2);
-    expect(calls).toBe(ARM_JUDGE_ATTEMPTS);
+    await expect(armJudge('ticket', 'diff --git a/x b/x\n+1\n', { call: malformedFirst }))
+      .rejects.toThrow(/malformed verdict \(never resampled\)/);
+    expect(calls).toBe(1);
 
-    // Always malformed: throws after exactly ARM_JUDGE_ATTEMPTS attempts.
-    let badCalls = 0;
-    const alwaysBad = (async () => {
-      badCalls++;
-      return { nonsense: true };
+    const received: Array<{ model?: string; opts?: CallJudgeOptions }> = [];
+    const wellFormed = (async (_prompt: string, model?: string, opts?: CallJudgeOptions) => {
+      received.push({ model, opts });
+      return { over_engineering: 2, construct: 'repository layer in app.js', reasoning: 'ok' };
     }) as unknown as typeof callJudge;
-    await expect(armJudge('ticket', 'diff --git a/x b/x\n+1\n', { call: alwaysBad }))
-      .rejects.toThrow(/no well-formed verdict after 2 attempts/);
-    expect(badCalls).toBe(ARM_JUDGE_ATTEMPTS);
+    expect((await armJudge('ticket', 'diff --git a/x b/x\n+1\n', { call: wellFormed })).over_engineering).toBe(2);
+    expect(received).toEqual([{ model: ARM_JUDGE_MODEL, opts: { jsonSchema: ARM_JUDGE_SCHEMA } }]);
   });
 });
 

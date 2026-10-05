@@ -1,0 +1,21 @@
+#!/usr/bin/env bun
+/** Allocates/retire-only helper; it never scans, dispatches or grants permission. */
+import { preparePrivateRequest, claimPrivateRequest, finishPrivateRequest } from '../lib/codex-request-file';
+
+try {
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === '--prepare') {
+    console.log(JSON.stringify(preparePrivateRequest({ filename: 'input.txt' })));
+  } else if (args.length === 4 && args[0] === '--retire' && args[2] === '--sha256' && /^[a-f0-9]{64}$/.test(args[3])) {
+    const claimed = claimPrivateRequest(args[1]);
+    const matches = claimed.hash === args[3];
+    const result = finishPrivateRequest(claimed, matches);
+    if (!matches) result.reason = 'consumed_bytes_changed';
+    console.log(JSON.stringify(result));
+    process.exitCode = result.status === 'retired' ? 0 : 1;
+  } else throw new Error('usage');
+} catch {
+  // Paths/contents from invalid input and native filesystem errors are untrusted.
+  process.stderr.write('Private input operation refused; no foreign artifact was retired. Preserve any allocated private input and report its trusted allocation path locally.\n');
+  process.exitCode = 1;
+}

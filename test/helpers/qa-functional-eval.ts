@@ -10,7 +10,7 @@ import { runRecordedOfficeHoursAttempt, OFFICE_HOURS_BUN_GRACE_MS } from './offi
 import { resolveEvalModel } from '../../lib/eval-model';
 import { createQAFunctionalFixture, fixtureGit, ownedPath, qaFixtureActor, QA_TOOLS, type QAFamily, type QAMode } from './qa-functional-fixture';
 import { observeQAWrites, type QAWriteObservation } from './qa-functional-observer';
-import { qaFunctionalVerdict, verifyQANativeRegression, preserveQAArtifact, qaCaptureArtifacts } from './qa-functional-evidence';
+import { QA_WEBHOOK_REQUIRED_SCENARIOS, qaFunctionalVerdict, verifyQANativeRegression, preserveQAArtifact, qaCaptureArtifacts } from './qa-functional-evidence';
 import { QA_EVIDENCE_RUNTIME, qaEvidenceCommand, qaProducerReceipt, qaEvidenceHash } from './qa-evidence-producer';
 import { nativeCalls } from './qa-checkpoint-evidence';
 
@@ -21,18 +21,6 @@ export const QA_FUNCTIONAL_CASES = [
   { id: 'qa-functional-webhook-fix', family: 'webhook', mode: 'qa' },
 ] as const;
 
-export const QA_FUNCTIONAL_INPUTS = [
-  ...QA_EVIDENCE_RUNTIME, 'test/helpers/qa-evidence-producer.ts', 'test/qa-evidence.test.ts', 'test/qa-evidence-producer.test.ts',
-  'qa/SKILL.md.tmpl', 'qa-only/SKILL.md.tmpl',
-  'qa/sections/', 'qa-only/sections/', 'qa/templates/',
-  'scripts/resolvers/qa.ts', 'scripts/resolvers/utility.ts', 'scripts/resolvers/sections.ts',
-  'scripts/gen-skill-docs.ts', 'test/helpers/qa-functional-fixture.ts',
-  'test/helpers/qa-functional-observer.ts', 'test/helpers/qa-functional-evidence.ts',
-  'test/helpers/qa-checkpoint-evidence.ts',
-  'test/helpers/qa-functional-eval.ts', 'test/helpers/session-runner.ts',
-  'test/helpers/hermetic-env.ts', 'test/helpers/skill-fixture.ts',
-];
-
 export function qaFunctionalPrompt(entry: { family: QAFamily; mode: QAMode }): string {
   return `Read ${entry.mode}/SKILL.md, qa/sections/scope.md, ${entry.mode}/sections/exploratory.md and qa/sections/system-functional.md in full to load gstack's /${entry.mode} functional workflow for this repository with ${entry.mode === 'qa' ? 'Full exploration and the Standard fix tier' : 'Full report-only exploration'}. All four reads are required before probing in this fixture, even when its surfaces and isolation are already established. This is a CLI/webhook product, not a browser or DX request. The generated local skill copies are the current evaluation inputs; all their installed-root references resolve inside this fixture. The common preamble alone was removed using the repository extractor.
 
@@ -42,7 +30,7 @@ ${qaFixtureActor(entry.mode)}${entry.mode === 'qa' ? `
 
 This is a fix run, not an optional report-only handoff: a reproduced in-tier defect requires the authorized native regression, repair and verification. Complete these stages in order:
 1. Prove the regression red with a new native test under test/; existing tests remain read-only. Freeze all test files after red, repair only src/${entry.family === 'cli' ? 'cli' : 'worker'}.ts, and prove the unchanged regression green.
-2. On the repaired source, run the original failing probe, an adjacent happy-path probe, cancellation and the unavailable-dependency probe.${entry.family === 'webhook' ? ' Complete required webhook coverage: `happy`, `reject`, `duplicate`, `partial`, `concurrent-ab`, `concurrent-ba`, `cancel`, `dependency`. Run every still-unobserved scenario and recheck earlier scenarios affected by the repair. None of these scenarios is optional exploration. All eight scenarios are required coverage; a replay does not replace another scenario.' : ''} Preserve their actual JSON and checkpoints. A green test suite does not substitute for these native probes. Expected dependency blockage stays blocked, never pass.
+2. On the repaired source, run the original failing probe, an adjacent happy-path probe, cancellation and the unavailable-dependency probe. Preserve their actual JSON and checkpoints. A green test suite does not substitute for these native probes. Expected dependency blockage stays blocked, never pass.
 3. Save the evidence and Markdown artifacts, then return their paths and the actual completion status.
 
 The completion reserve is for both required verification and artifacts, not a signal to stop stage 2: the completion reserve does not end required coverage. Stop only exploration beyond the required contracts to protect that work. If required verification remains unfinished at the hard deadline, report incomplete; do not call it complete with a caveat.` : ''}
@@ -54,15 +42,16 @@ Fixture execution boundary:
 - Reports belong only in existing qa-reports. Retain fixture state; the owner cleans it after preserving evidence. Authorized source/test edits use Write/Edit. Read/Glob/Grep support arbitrary read-only discovery, including directory/path inventory.
 - Bash accepts separate literal commands only: no shell composition, scripts or added path operands. Read-only forms are pwd, ls, ls -la, git status --short, git status --porcelain, git branch --show-current, git diff, git diff --stat, git rev-parse HEAD, bun --version, and exactly date -u +%Y-%m-%dT%H:%M:%SZ. Native tests use bun test with optional named test/*.test.ts selectors.
 - These are complete command forms, not general shell examples. For inventory inside a named directory, use Read/Glob/Grep; the listed ls forms inspect only the working directory. Do not add operands or flags beyond the declared forms, even for read-only discovery.
-- The installed production helper is bin/gstack-qa-evidence (absolute owned path also accepted). Probe outputs are declared public/synthetic, so capture with: bun bin/gstack-qa-evidence capture qa-reports NNN --public --timeout-ms 10000 -- NATIVE_PROBE. The child must be one of the observation forms below. Each execution/replay gets a fresh three-digit ID. The helper does not authorize another command, interpreter, path, pipeline or redirect.
-- Publish causal intent from the most recent completed native probe with bun bin/gstack-qa-evidence checkpoint qa-reports NNN CAPTURE_ID 'full prior capture command' 'causal hypothesis' 'full next capture command'; quote each argument literally. For complex quoting, Write only capture, observationCommand, hypothesis and nextCommand to qa-reports/intent.json, then use bun bin/gstack-qa-evidence checkpoint qa-reports NNN intent.json. Wait for successful publication before dispatching the exact next command. Only the helper writes observed fields.
+- The installed production helper is bin/gstack-qa-evidence (absolute owned path also accepted); \`bun bin/gstack-qa-evidence --help\` prints its usage, and the helper source is not part of the task. Probe outputs are declared public/synthetic, so capture with: bun bin/gstack-qa-evidence capture qa-reports NNN --public --timeout-ms 10000 -- NATIVE_PROBE. The child must be one of the observation forms below. Each execution/replay gets a fresh three-digit ID. The helper does not authorize another command, interpreter, path, pipeline or redirect.
+- After the first capture, put causal intent in the next capture itself: bun bin/gstack-qa-evidence capture qa-reports NNN --public --timeout-ms 10000 --after PREV --hypothesis 'causal hypothesis' -- NATIVE_PROBE, where PREV is the capture ID of the most recent completed native probe. Before running the probe, the helper publishes qa-reports/exploration-NNN.json linking capture PREV's observation to it, so one call is both checkpoint and probe. The separate form stays valid: bun bin/gstack-qa-evidence checkpoint qa-reports NNN CAPTURE_ID 'full prior capture command' 'causal hypothesis' 'full next capture command' (or an intent.json with only capture, observationCommand, hypothesis and nextCommand), then the exact next command after successful publication. Quote arguments literally. Only the helper writes observed fields.
 - Write annotations.json inside qa-reports, then run bun bin/gstack-qa-evidence materialize qa-reports annotations.json to produce evidence.json before writing Markdown. Annotations have revision, runtime, cwd, evidence rows {capture,command,contract,expected,classification}, learning (selected checkpoint IDs) and limits; omit observed, which the helper supplies from captures. In each evidence row, capture is the three-digit capture ID and command is the exact full outer capture invocation, including that ID and all wrapper options, not just the native child command after --. This same full-command definition applies to observationCommand and nextCommand. Select a checkpoint whose next native command differs, not a same-command replay with a new capture ID. Retain all required safe observations and every executed probe.
 - ${entry.family === 'cli' ? 'CLI observation forms: bun run probe -- balance; bun run probe -- export; bun run probe -- apply with zero to three literal arguments; bun cancel.ts. The equivalent bun run cli commands may be diagnostic but do not emit probe JSON. Arguments use ASCII letters/digits/._+- or quoted forms including spaces. The generic wrapper does NOT support wait: the only bounded wait/cancellation interface is bun cancel.ts.' : `Webhook observation form: bun run probe -- followed by one of happy, reject, duplicate, partial, concurrent-ab, concurrent-ba, cancel, dependency. ${entry.mode === 'qa-only' ? 'All eight scenarios are required coverage; a replay does not replace another scenario. ' : ''}Choose their order from observations after the happy path. bun cancel.ts is a CLI-only entrypoint, not part of this fixture.`}
 Actions outside this interface are unsupported and fail acceptance; they are not implicitly approved.
 
 Materialize qa-reports/evidence.json first, then write a concise qa-reports/report.md using the functional report structure. Link the evidence and checkpoint files rather than repeating full probe payloads in Markdown. Both artifacts are required before completion. The resulting evidence.json schema is:
-{ "revision": "<git HEAD>", "runtime": "bun <version>", "cwd": "<working directory>", "evidence": [{"command":"<exact full outer capture invocation>","contract":"README.md","expected":"<declared expected behavior>","classification":"pass|product-defect|setup-blocked|inconclusive","observed":<complete unchanged JSON emitted by the native probe>}], "learning":[{"observationCommand":"<earlier full capture invocation>","hypothesis":"<what it taught you to challenge>","nextCommand":"<later full capture invocation>"}], "limits":["<untested or blocked coverage>"] }
-Evidence rows contain ONLY complete JSON actually emitted by native probes, including failures and repeats; retain pre-repair results alongside green results. Never synthesize JSON from a tool error or raw test output. Put tests, raw CLI diagnostics, launch failures and timeouts in Markdown with their actual output and limits. The learning array is a summary: choose one completed checkpoint where an observation motivated a different later command, not the required same-command replay. Select that checkpoint ID in annotations.learning; the production helper copies its observationCommand, hypothesis and nextCommand. Both commands must name exact captured probes with different native child commands, never a combined command list or a replay distinguished only by capture ID. This selects existing exploration evidence, not another probe or a duplicate of the complete checkpoint ledger. Preserve every checkpoint and link every checkpoint in Markdown; keep every executed probe and its complete JSON in evidence, including the required replay. Missing dependencies remain setup blockers, not repairs. No browser installation or execution is needed.`;
+{ "revision": "<full 40-character git rev-parse HEAD>", "runtime": "bun <version>", "cwd": "<working directory>", "evidence": [{"command":"<exact full outer capture invocation>","contract":"README.md","expected":"<declared expected behavior>","classification":"pass|product-defect|setup-blocked|inconclusive","observed":<complete unchanged JSON emitted by the native probe>}], "learning":[<rows the helper copies from the selected checkpoints>], "limits":["<untested or blocked coverage>"] }
+Classify by what the probe observed: setup-blocked whenever it reported a missing optional dependency (exit 69, SETUP_BLOCKED), even where README documents that outcome; product-defect when observed behavior contradicts README; pass when a working path behaved as README states; inconclusive otherwise.
+Evidence rows contain ONLY complete JSON actually emitted by native probes, including failures and repeats; retain pre-repair results alongside green results. Never synthesize JSON from a tool error or raw test output. Put tests, raw CLI diagnostics, launch failures and timeouts in Markdown with their actual output and limits. The learning array is a summary: choose one completed checkpoint where an observation motivated a different later command, not the required same-command replay. Select that checkpoint ID in annotations.learning; the production helper copies its observationCommand, hypothesis and nextCommand, or a merged note's capture IDs, argv and hypothesis. Both commands must name exact captured probes with different native child commands, never a combined command list or a replay distinguished only by capture ID. This selects existing exploration evidence, not another probe or a duplicate of the complete checkpoint ledger. Preserve every checkpoint and link every checkpoint in Markdown; keep every executed probe and its complete JSON in evidence, including the required replay. Missing dependencies remain setup blockers, not repairs. No browser installation or execution is needed.`;
 }
 
 export async function runQAFunctionalCase(entry: { id: string; family: QAFamily; mode: QAMode }, collector: EvalCollector | null) {
@@ -103,7 +92,7 @@ export async function runQAFunctionalCase(entry: { id: string; family: QAFamily;
     fixtureGit(fixture.root, ['commit', '-m', 'Bind current QA instructions to fixture']);
     fixture.revision = fixtureGit(fixture.root, ['rev-parse', 'HEAD']);
     if (fixtureGit(fixture.root, ['status', '--porcelain'])) throw new Error('QA fixture must start clean');
-    observer = await observeQAWrites(fixture.root, { evidenceProducer: true });
+    observer = await observeQAWrites(fixture.root, { evidenceProducer: true, atomicWriteMode: entry.mode });
     await runRecordedOfficeHoursAttempt({
       collector, name: entry.id, suite: 'Functional QA native E2E',
       model: process.env.EVALS_MODEL ?? resolveEvalModel('capture'),
@@ -115,7 +104,8 @@ export async function runQAFunctionalCase(entry: { id: string; family: QAFamily;
           workingDirectory: fixture.root, maxTurns: 40, allowedTools: QA_TOOLS, tools: QA_TOOLS,
           timeout, completionReserveMs: timeout / 4,
           testName: entry.id, runId, signal, env: { CLAUDE_CONFIG_DIR: fixture.config,
-            GIT_OPTIONAL_LOCKS: '0', QA_STATE_ROOT: path.join(fixture.root, '.qa-state') },
+            GIT_OPTIONAL_LOCKS: '0', QA_STATE_ROOT: path.join(fixture.root, '.qa-state'),
+            ...(entry.family === 'webhook' ? { GSTACK_QA_REQUIRED_PROBES: JSON.stringify(QA_WEBHOOK_REQUIRED_SCENARIOS[entry.mode].map(scenario => `bun run probe -- ${scenario}`)) } : {}) },
         });
         return result;
       },
@@ -132,7 +122,10 @@ export async function runQAFunctionalCase(entry: { id: string; family: QAFamily;
         const context = { cwd: fixture.root, reportRoot: path.join(fixture.root, 'qa-reports'), executable: path.join(fixture.root, 'bin/gstack-qa-evidence') };
         const calls = nativeCalls(captured.transcript, failures);
         for (const action of ['capture', 'checkpoint', 'materialize']) {
-          if (!calls.some(call => qaProducerReceipt(call, context)?.command.action === action)) failures.push(`missing completed production ${action}`);
+          if (!calls.some(call => {
+            const command = qaProducerReceipt(call, context)?.command;
+            return command?.action === action || action === 'checkpoint' && !!command?.after;
+          })) failures.push(`missing completed production ${action}`);
         }
         if (!calls.some(call => {
           const producer = qaProducerReceipt(call, context);

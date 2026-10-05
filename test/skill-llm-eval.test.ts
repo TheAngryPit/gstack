@@ -14,11 +14,11 @@ import { afterAll, expect } from 'bun:test';
 import { JUDGE_MS } from './helpers/eval-budgets';
 import * as fs from 'fs';
 import * as path from 'path';
-import { callJudge, judge, JudgeRefusalError, DEFAULT_JUDGE_MAX_TOKENS } from './helpers/llm-judge';
-import { ENG_REVIEW_EXCERPT } from './helpers/workflow-excerpt';
+import { callJudge, judge, JudgeRefusalError, JUDGE_SCORE_SCHEMA, QA_ANTI_REFUSAL_JUDGE_SCHEMA, VOICE_DIRECTIVE_JUDGE_SCHEMA, CROSS_SKILL_CONSISTENCY_JUDGE_SCHEMA, buildQaWorkflowJudgePrompt, buildQaHealthRubricJudgePrompt, buildQaAntiRefusalJudgePrompt, buildCrossSkillConsistencyJudgePrompt, buildVoiceDirectiveJudgePrompt, DEFAULT_JUDGE_MAX_TOKENS, judgePanel, judgePanelMean, judgePanelMajority, judgePanelReasoning, JUDGE_SCORE_DIMENSIONS } from './helpers/llm-judge';
+import { ASK_QUESTIONS_HEADING, ENG_REVIEW_EXCERPT } from './helpers/workflow-excerpt';
 import type { JudgeScore } from './helpers/llm-judge';
 import { readWorkflowJudgeInput, buildWorkflowJudgePrompt, QA_DISCOVERY_REFERENCES, WORKFLOW_JUDGE_RESPONSE_SCHEMA, type WorkflowJudgeInput } from './helpers/workflow-judge-input';
-import { prepareWorkflowJudgeCache, validWorkflowJudgeScore } from './helpers/workflow-judge-cache';
+import { BROWSE_JUDGE_FLOORS, browseJudgeFloorsMet, prepareWorkflowJudgeCache, validWorkflowJudgeScore } from './helpers/workflow-judge-cache';
 import { buildCookieWorkflowJudgeInput, COOKIE_WORKFLOW_JUDGE } from './helpers/cookie-workflow-judge-input';
 import { getCookieWorkflowManualReview, type ManualJudgeReview } from './helpers/cookie-workflow-manual-review';
 import { resolveEvalModel } from '../lib/eval-model';
@@ -96,12 +96,13 @@ describeIfSelected('LLM-as-judge quality evals', [
     const t0 = Date.now();
     // Browse carve: snapshot flags + the full command list are the whole
     // generated section file; one judge grades the union. Scores are also
-    // pinned against test/fixtures/eval-baselines.json (UPDATE_BASELINES=1
-    // rewrites the pin).
+    // compared with test/fixtures/eval-baselines.json and the difference is
+    // recorded (UPDATE_BASELINES=1 rewrites it); only the floors gate.
     const section = sliceBrowseSection('## Snapshot Flags');
 
-    const scores = await judge('browse skill reference (flags + commands)', section);
-    console.log('Browse SKILL.md scores:', JSON.stringify(scores, null, 2));
+    const samples = await judgePanel(() => judge('browse skill reference (flags + commands)', section));
+    const scores = judgePanelMean(samples, JUDGE_SCORE_DIMENSIONS);
+    console.log('Browse SKILL.md panel:', JSON.stringify({ mean: scores, samples }, null, 2));
 
     const baselinesPath = path.join(ROOT, 'test', 'fixtures', 'eval-baselines.json');
     const baselines = JSON.parse(fs.readFileSync(baselinesPath, 'utf-8'));
@@ -118,17 +119,16 @@ describeIfSelected('LLM-as-judge quality evals', [
       name: 'browse/SKILL.md reference',
       suite: 'LLM-as-judge quality evals',
       tier: 'llm-judge',
-      passed: scores.clarity >= 3 && scores.completeness >= 4 && scores.actionability >= 4 && regressions.length === 0,
+      passed: browseJudgeFloorsMet(scores),
       duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
+      cost_usd: 0.02 * samples.length,
       judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-      judge_reasoning: regressions.length ? `${scores.reasoning} | ${regressions.join('; ')}` : scores.reasoning,
+      judge_reasoning: regressions.length ? `${judgePanelReasoning(samples)} | ${regressions.join('; ')}` : judgePanelReasoning(samples),
     });
 
-    expect(scores.clarity).toBeGreaterThanOrEqual(3);
-    expect(scores.completeness).toBeGreaterThanOrEqual(4);
-    expect(scores.actionability).toBeGreaterThanOrEqual(4);
-    expect(regressions).toEqual([]);
+    expect(scores.clarity).toBeGreaterThanOrEqual(BROWSE_JUDGE_FLOORS.clarity);
+    expect(scores.completeness).toBeGreaterThanOrEqual(BROWSE_JUDGE_FLOORS.completeness);
+    expect(scores.actionability).toBeGreaterThanOrEqual(BROWSE_JUDGE_FLOORS.actionability);
   }, JUDGE_MS);
 
   testIfSelected('setup block', async () => {
@@ -144,8 +144,9 @@ describeIfSelected('LLM-as-judge quality evals', [
     if (setupStart < 0 || setupEnd < 0) throw new Error('browse/SKILL.md: setup block not found — regenerate with: bun run gen:skill-docs');
     const section = content.slice(setupStart, setupEnd);
 
-    const scores = await judge('setup/binary discovery instructions', section);
-    console.log('Setup block scores:', JSON.stringify(scores, null, 2));
+    const samples = await judgePanel(() => judge('setup/binary discovery instructions', section));
+    const scores = judgePanelMean(samples, JUDGE_SCORE_DIMENSIONS);
+    console.log('Setup block panel:', JSON.stringify({ mean: scores, samples }, null, 2));
 
     evalCollector?.addTest({
       name: 'setup block',
@@ -153,9 +154,9 @@ describeIfSelected('LLM-as-judge quality evals', [
       tier: 'llm-judge',
       passed: scores.actionability >= 3 && scores.clarity >= 3,
       duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
+      cost_usd: 0.02 * samples.length,
       judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-      judge_reasoning: scores.reasoning,
+      judge_reasoning: judgePanelReasoning(samples),
     });
 
     // Setup block is intentionally minimal (binary discovery only).
@@ -201,29 +202,12 @@ describeIfSelected('QA skill quality evals', ['qa/SKILL.md workflow', 'qa/SKILL.
     const t0 = Date.now();
     const section = readWorkflowJudgeInput({ root: ROOT, skillPath: 'qa/SKILL.md',
       startMarker: '# /qa: Test', endMarker: null,
-      references: ['qa/templates/functional-report-template.md'] }).text;
+      // qa-patterns.md loads both browser assets; judges penalized their absence.
+      references: ['qa/templates/functional-report-template.md', 'qa/templates/qa-report-template.md', 'qa/references/issue-taxonomy.md'] }).text;
 
-    const scores = await callJudge<JudgeScore>(`You are evaluating the quality of a QA testing workflow document for an AI coding agent.
-
-The agent reads this source-file bundle to select browser, native functional or mixed
-surfaces, explore with bounded probes, reproduce and diagnose defects, add a regression
-before repair, recheck behavior and report evidence/coverage. Sections are separate
-files loaded only at their stated conditions; bundle order is not execution order.
-Evaluate the complete workflow, including authority, isolation, native contracts,
-conditional browser/DX loading and blocked paths, for clarity and executable decisions.
-
-Rate on three dimensions (1-5 scale):
-- **clarity** (1-5): Can an agent follow the step-by-step phases without ambiguity?
-- **completeness** (1-5): Are all phases, decision points, and outputs well-defined?
-- **actionability** (1-5): Can an agent execute the workflow and produce the expected deliverables?
-
-Respond with ONLY valid JSON:
-{"clarity": N, "completeness": N, "actionability": N, "reasoning": "brief explanation"}
-
-Here is the QA workflow to evaluate:
-
-${section}`);
-    console.log('QA workflow scores:', JSON.stringify(scores, null, 2));
+    const samples = await judgePanel(() => callJudge<JudgeScore>(buildQaWorkflowJudgePrompt(section)));
+    const scores = judgePanelMean(samples, JUDGE_SCORE_DIMENSIONS);
+    console.log('QA workflow panel:', JSON.stringify({ mean: scores, samples }, null, 2));
 
     evalCollector?.addTest({
       name: 'qa/SKILL.md workflow',
@@ -231,9 +215,9 @@ ${section}`);
       tier: 'llm-judge',
       passed: scores.clarity >= 3 && scores.completeness >= 3 && scores.actionability >= 4,
       duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
+      cost_usd: 0.02 * samples.length,
       judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-      judge_reasoning: scores.reasoning,
+      judge_reasoning: judgePanelReasoning(samples),
     });
 
     expect(scores.clarity).toBeGreaterThanOrEqual(3);
@@ -247,25 +231,9 @@ ${section}`);
     const t0 = Date.now();
     const section = sliceQaPatterns('## Health Score Rubric');
 
-    const scores = await callJudge<JudgeScore>(`You are evaluating a health score rubric that an AI agent must follow to compute a numeric QA score.
-
-The agent uses this rubric after QA testing a website. It needs to:
-1. Understand each scoring category and what counts as a deduction
-2. Apply the weights correctly to compute a final score out of 100
-3. Produce a consistent, reproducible score
-
-Rate on three dimensions (1-5 scale):
-- **clarity** (1-5): Are the categories, deduction criteria, and weights unambiguous?
-- **completeness** (1-5): Are all edge cases and scoring boundaries defined?
-- **actionability** (1-5): Can an agent compute a correct score from this rubric alone?
-
-Respond with ONLY valid JSON:
-{"clarity": N, "completeness": N, "actionability": N, "reasoning": "brief explanation"}
-
-Here is the rubric to evaluate:
-
-${section}`);
-    console.log('QA health rubric scores:', JSON.stringify(scores, null, 2));
+    const samples = await judgePanel(() => callJudge<JudgeScore>(buildQaHealthRubricJudgePrompt(section), undefined, { jsonSchema: JUDGE_SCORE_SCHEMA }));
+    const scores = judgePanelMean(samples, JUDGE_SCORE_DIMENSIONS);
+    console.log('QA health rubric panel:', JSON.stringify({ mean: scores, samples }, null, 2));
 
     evalCollector?.addTest({
       name: 'qa/SKILL.md health rubric',
@@ -273,9 +241,9 @@ ${section}`);
       tier: 'llm-judge',
       passed: scores.clarity >= 3 && scores.completeness >= 3 && scores.actionability >= 4,
       duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
+      cost_usd: 0.02 * samples.length,
       judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-      judge_reasoning: scores.reasoning,
+      judge_reasoning: judgePanelReasoning(samples),
     });
 
     expect(scores.clarity).toBeGreaterThanOrEqual(3);
@@ -294,33 +262,10 @@ ${section}`);
     const diffAwareSection = sliceQaPatterns('### Diff-aware', '### Full');
     const rulesSection = sliceQaPatterns('## Important Rules');
 
-    const result = await callJudge<{ would_browse: boolean; fallback_behavior: string; confidence: number; reasoning: string }>(`You are evaluating whether a QA testing skill document would cause an AI agent to USE THE BROWSER or REFUSE to use the browser in a specific scenario.
+    const samples = await judgePanel(() => callJudge<{ would_browse: boolean; fallback_behavior: string; confidence: number; reasoning: string }>(buildQaAntiRefusalJudgePrompt(diffAwareSection, rulesSection), undefined, { jsonSchema: QA_ANTI_REFUSAL_JUDGE_SCHEMA }));
+    const result = { would_browse: judgePanelMajority(samples, 'would_browse'), ...judgePanelMean(samples, ['confidence'] as const) };
 
-SCENARIO:
-A user runs /qa (a browser-based QA testing skill). The branch diff shows ONLY prompt template files and config file changes — no routes, views, controllers, components, or CSS were changed. The changes are "purely backend" with no obvious UI surface.
-
-QUESTION: Based on the document excerpts below, would the agent open the browser and test the application, or would it decline/refuse to browse and suggest running evals or unit tests instead?
-
-DOCUMENT EXCERPT 1 (Diff-aware mode instructions):
-${diffAwareSection}
-
-DOCUMENT EXCERPT 2 (Important Rules):
-${rulesSection}
-
-Respond with ONLY valid JSON:
-{
-  "would_browse": true or false,
-  "fallback_behavior": "description of what the agent would do when no UI pages are identified from the diff",
-  "confidence": N (1-5, how confident you are in your answer),
-  "reasoning": "brief explanation"
-}
-
-Rules:
-- would_browse should be true if the document instructs the agent to always use the browser regardless of diff content
-- would_browse should be false if the document allows the agent to skip browser testing for non-UI changes
-- confidence: 5 = document is unambiguous, 1 = document is unclear or contradictory`);
-
-    console.log('QA anti-refusal result:', JSON.stringify(result, null, 2));
+    console.log('QA anti-refusal panel:', JSON.stringify({ result, samples }, null, 2));
 
     evalCollector?.addTest({
       name: 'qa/SKILL.md anti-refusal',
@@ -328,9 +273,9 @@ Rules:
       tier: 'llm-judge',
       passed: result.would_browse === true && result.confidence >= 4,
       duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
+      cost_usd: 0.02 * samples.length,
       judge_scores: { would_browse: result.would_browse ? 1 : 0, confidence: result.confidence },
-      judge_reasoning: result.reasoning,
+      judge_reasoning: judgePanelReasoning(samples),
     });
 
     expect(result.would_browse).toBe(true);
@@ -362,30 +307,10 @@ describeIfSelected('Cross-skill consistency evals', ['cross-skill greptile consi
       extractGrepLines(retroContent, 'retro/SKILL.md'),
     ].join('\n\n');
 
-    const result = await callJudge<{ consistent: boolean; issues: string[]; score: number; reasoning: string }>(`You are evaluating whether multiple skill configuration files implement the same data architecture consistently.
+    const samples = await judgePanel(() => callJudge<{ consistent: boolean; issues: string[]; score: number; reasoning: string }>(buildCrossSkillConsistencyJudgePrompt(collected), undefined, { jsonSchema: CROSS_SKILL_CONSISTENCY_JUDGE_SCHEMA }));
+    const result = { consistent: judgePanelMajority(samples, 'consistent'), ...judgePanelMean(samples, ['score'] as const) };
 
-INTENDED ARCHITECTURE:
-- greptile-history has TWO paths: per-project (~/.gstack/projects/{slug}/greptile-history.md) and global (~/.gstack/greptile-history.md)
-- /review and /ship WRITE to BOTH paths (per-project for suppressions, global for retro aggregation)
-- /review and /ship delegate write mechanics to greptile-triage.md
-- /retro READS from the GLOBAL path only (it aggregates across all projects)
-- REMOTE_SLUG derivation should be consistent across files that use it
-
-Below are greptile-related lines extracted from each skill file:
-
-${collected}
-
-Evaluate consistency. Respond with ONLY valid JSON:
-{
-  "consistent": true/false,
-  "issues": ["issue 1", "issue 2"],
-  "score": N,
-  "reasoning": "brief explanation"
-}
-
-score (1-5): 5 = perfectly consistent, 1 = contradictory`);
-
-    console.log('Cross-skill consistency:', JSON.stringify(result, null, 2));
+    console.log('Cross-skill consistency panel:', JSON.stringify({ result, samples }, null, 2));
 
     evalCollector?.addTest({
       name: 'cross-skill greptile consistency',
@@ -393,9 +318,9 @@ score (1-5): 5 = perfectly consistent, 1 = contradictory`);
       tier: 'llm-judge',
       passed: result.consistent && result.score >= 4,
       duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
+      cost_usd: 0.02 * samples.length,
       judge_scores: { consistency_score: result.score },
-      judge_reasoning: result.reasoning,
+      judge_reasoning: judgePanelReasoning(samples),
     });
 
     expect(result.consistent).toBe(true);
@@ -419,14 +344,16 @@ async function runWorkflowJudge(opts: {
   suite: string;
   skillPath: string;
   startMarker: string;
-  endMarker: string | null;
+  endMarker: string | RegExp | null;
   references?: readonly string[];
   judgeContext: string;
   judgeGoal: string;
   agentCapability?: 'frontier';
-  structuredResponse?: boolean;
+  schemaTransport?: boolean;
+  compactReasoning?: boolean;
   maxTokens?: number;
   stream?: boolean;
+  effort?: 'medium';
   model?: string;
   thresholds?: { clarity: number; completeness: number; actionability: number };
   readInput?: () => WorkflowJudgeInput;
@@ -439,7 +366,8 @@ async function runWorkflowJudge(opts: {
   const workDeadline = started + JUDGE_MS;
   let stage: 'input' | 'judge' | 'validation' | 'recording' = 'input';
   let finalized = false;
-  let scores: JudgeScore | undefined;
+  let samples: JudgeScore[] | undefined;
+  let scores: Record<typeof JUDGE_SCORE_DIMENSIONS[number], number> | undefined;
   let manualReview: ManualJudgeReview | undefined;
   let customInputMetadata: { prompt: string; model: string } | undefined;
   let reused: ReturnType<ReturnType<typeof prepareWorkflowJudgeCache>['lookup']> = null;
@@ -458,19 +386,19 @@ async function runWorkflowJudge(opts: {
     evalCollector?.addTest({
       name: opts.testName, suite: opts.suite, tier: 'llm-judge', passed, attempt,
       duration_ms: Math.max(0, performance.now() - started),
-      cost_usd: reused || !scores ? 0 : 0.02,
+      cost_usd: reused || !samples ? 0 : 0.02 * samples.length,
       execution: reused ? 'reused' : 'executed',
       ...customInputMetadata,
       ...(manualReview ? { manual_review: manualReview } : {}),
       ...(reused ? { reused_from: { input_key: reused.reuse.key, run_id: reused.reuse.source.runId,
         revision: reused.reuse.source.revision, completed_at: new Date(reused.reuse.source.completedAt).toISOString() } } : {}),
-      ...(scores ? { judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-        judge_reasoning: scores.reasoning } : {}),
+      ...(scores ? { judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability } } : {}),
+      ...(samples ? { judge_reasoning: judgePanelReasoning(samples) } : {}),
       ...(passed ? {} : { exit_reason: error instanceof JudgeRefusalError ? 'provider_refusal'
         : error instanceof Error && error.name === 'WorkflowJudgeDeadline' ? 'timeout'
         : error instanceof Error && error.name === 'WorkflowJudgeSuperseded' ? 'cancelled'
         : stage === 'validation' ? 'validation_failed' : 'harness_error',
-      error: `${error instanceof Error ? error.message : String(error)}${scores ? '' : error instanceof JudgeRefusalError
+      error: `${error instanceof Error ? error.message : String(error)}${samples ? '' : error instanceof JudgeRefusalError
         ? '\nNo automated score; provider refusal usage retained when manually accepted; cost unavailable.'
         : '\nNo completed model response; cost and usage unavailable.'}` }),
     });
@@ -508,11 +436,12 @@ async function runWorkflowJudge(opts: {
     checkActive();
     stage = 'judge';
     const maxTokens = opts.maxTokens ?? DEFAULT_JUDGE_MAX_TOKENS;
-    let result: JudgeScore;
+    let result: JudgeScore[];
     try {
-      result = reused?.scores ?? await callJudge<JudgeScore>(prompt, opts.model, { signal: controller.signal, max_tokens: maxTokens,
+      result = reused?.samples ?? await judgePanel(() => callJudge<JudgeScore>(prompt, opts.model, { signal: controller.signal, max_tokens: maxTokens,
         ...(opts.stream ? { stream: true } : {}),
-        ...(opts.structuredResponse ? { jsonSchema: WORKFLOW_JUDGE_RESPONSE_SCHEMA } : {}) });
+        ...(opts.schemaTransport ? { jsonSchema: WORKFLOW_JUDGE_RESPONSE_SCHEMA } : {}),
+        ...(opts.effort ? { effort: opts.effort } : {}) }));
     } catch (error) {
       checkActive();
       if (error instanceof JudgeRefusalError && customInputMetadata) {
@@ -529,20 +458,21 @@ async function runWorkflowJudge(opts: {
       throw error;
     }
     checkActive();
-    scores = result;
+    samples = result;
     console.log(`[workflow-judge] ${opts.testName}: ${reused ? `reused ${reused.reuse.source.runId} @ ${reused.reuse.source.revision} (${new Date(reused.reuse.source.completedAt).toISOString()})` : 'executed'}`);
-    console.log(`${opts.testName} scores:`, JSON.stringify(scores, null, 2));
     stage = 'validation';
-    if (opts.structuredResponse && !validWorkflowJudgeScore(scores as unknown as EvalCacheValue, { clarity: 1, completeness: 1, actionability: 1 }, true)) {
-      throw new Error('Structured workflow judge violated the response schema');
+    if (opts.compactReasoning && !samples.every(sample => validWorkflowJudgeScore(sample as unknown as EvalCacheValue, { clarity: 1, completeness: 1, actionability: 1 }, true))) {
+      throw new Error('Workflow judge violated the compact response contract');
     }
+    scores = judgePanelMean(samples, JUDGE_SCORE_DIMENSIONS);
+    console.log(`${opts.testName} panel:`, JSON.stringify({ mean: scores, samples }, null, 2));
     expect(scores.clarity).toBeGreaterThanOrEqual(thresholds.clarity);
     expect(scores.completeness).toBeGreaterThanOrEqual(thresholds.completeness);
     expect(scores.actionability).toBeGreaterThanOrEqual(thresholds.actionability);
     checkActive();
     stage = 'recording';
     arm();
-    const discardReceipt = reused ? undefined : cache.publish(scores, active);
+    const discardReceipt = reused ? undefined : cache.publish(samples, active);
     try { checkActive(); finish(true); }
     catch (error) { discardReceipt?.(); throw error; }
   };
@@ -560,9 +490,12 @@ describeIfSelected('Ship & Release skill evals', ['ship/SKILL.md workflow', 'doc
   testIfSelected('ship/SKILL.md workflow', async () => {
     await runWorkflowJudge({
       testName: 'ship/SKILL.md workflow',
-      structuredResponse: true,
+      schemaTransport: true,
+      compactReasoning: true,
       maxTokens: 65_536,
       stream: true,
+      // Default effort thought past JUDGE_MS in 3 of 18 measured samples; medium kept all 18 under 80 s.
+      effort: 'medium',
       suite: 'Ship & Release skill evals',
       agentCapability: 'frontier',
       // The contract now precedes platform detection; keep the complete workflow.
@@ -578,6 +511,7 @@ describeIfSelected('Ship & Release skill evals', ['ship/SKILL.md workflow', 'doc
   testIfSelected('document-release/SKILL.md workflow', async () => {
     await runWorkflowJudge({
       testName: 'document-release/SKILL.md workflow',
+      schemaTransport: true,
       suite: 'Ship & Release skill evals',
       skillPath: 'document-release/SKILL.md',
       startMarker: '# Document Release:',
@@ -595,6 +529,7 @@ describeIfSelected('Plan Review skill evals', [
   testIfSelected('plan-ceo-review/SKILL.md modes', async () => {
     await runWorkflowJudge({
       testName: 'plan-ceo-review/SKILL.md modes',
+      schemaTransport: true,
       suite: 'Plan Review skill evals',
       skillPath: 'plan-ceo-review/SKILL.md',
       startMarker: '## Step 0: Nuclear Scope Challenge',
@@ -607,6 +542,7 @@ describeIfSelected('Plan Review skill evals', [
   testIfSelected('plan-eng-review/SKILL.md sections', async () => {
     await runWorkflowJudge({
       testName: 'plan-eng-review/SKILL.md sections',
+      schemaTransport: true,
       suite: 'Plan Review skill evals',
       skillPath: ENG_REVIEW_EXCERPT.skillPath,
       startMarker: '# Plan Review Mode',
@@ -619,10 +555,11 @@ describeIfSelected('Plan Review skill evals', [
   testIfSelected('plan-design-review/SKILL.md passes', async () => {
     await runWorkflowJudge({
       testName: 'plan-design-review/SKILL.md passes',
+      schemaTransport: true,
       suite: 'Plan Review skill evals',
       skillPath: 'plan-design-review/SKILL.md',
       startMarker: '## Review Sections',
-      endMarker: '## CRITICAL RULE',
+      endMarker: ASK_QUESTIONS_HEADING,
       judgeContext: 'a design plan review framework with 7 review passes',
       judgeGoal: 'how to review a plan for design quality using a 0-10 rating method: rate each dimension, explain what a 10 looks like, edit the plan to fix gaps, then re-rate',
     });
@@ -634,6 +571,7 @@ describeIfSelected('Design skill evals', ['design-review/SKILL.md fix loop', 'de
   testIfSelected('design-review/SKILL.md fix loop', async () => {
     await runWorkflowJudge({
       testName: 'design-review/SKILL.md fix loop',
+      schemaTransport: true,
       suite: 'Design skill evals',
       skillPath: 'design-review/SKILL.md',
       startMarker: '## Phase 7:',
@@ -646,6 +584,7 @@ describeIfSelected('Design skill evals', ['design-review/SKILL.md fix loop', 'de
   testIfSelected('design-consultation/SKILL.md research', async () => {
     await runWorkflowJudge({
       testName: 'design-consultation/SKILL.md research',
+      schemaTransport: true,
       suite: 'Design skill evals',
       skillPath: 'design-consultation/SKILL.md',
       startMarker: '## Phase 0:',
@@ -664,6 +603,7 @@ describeIfSelected('Deploy skill evals', [
   testIfSelected('land-and-deploy/SKILL.md workflow', async () => {
     await runWorkflowJudge({
       testName: 'land-and-deploy/SKILL.md workflow',
+      schemaTransport: true,
       suite: 'Deploy skill evals',
       skillPath: 'land-and-deploy/SKILL.md',
       startMarker: '## Step 1: Pre-flight',
@@ -676,6 +616,7 @@ describeIfSelected('Deploy skill evals', [
   testIfSelected('canary/SKILL.md monitoring loop', async () => {
     await runWorkflowJudge({
       testName: 'canary/SKILL.md monitoring loop',
+      schemaTransport: true,
       suite: 'Deploy skill evals',
       skillPath: 'canary/SKILL.md',
       startMarker: '### Phase 2: Baseline Capture',
@@ -688,6 +629,7 @@ describeIfSelected('Deploy skill evals', [
   testIfSelected('benchmark/SKILL.md perf collection', async () => {
     await runWorkflowJudge({
       testName: 'benchmark/SKILL.md perf collection',
+      schemaTransport: true,
       suite: 'Deploy skill evals',
       skillPath: 'benchmark/SKILL.md',
       startMarker: '### Phase 3: Performance Data Collection',
@@ -700,6 +642,7 @@ describeIfSelected('Deploy skill evals', [
   testIfSelected('setup-deploy/SKILL.md platform setup', async () => {
     await runWorkflowJudge({
       testName: 'setup-deploy/SKILL.md platform setup',
+      schemaTransport: true,
       suite: 'Deploy skill evals',
       skillPath: 'setup-deploy/SKILL.md',
       startMarker: '### Step 2: Detect platform',
@@ -726,12 +669,18 @@ describeIfSelected('Other skill evals', [
       judgeContext: 'a pre-landing review with bounded exploratory QA',
       judgeGoal: 'how to review and explore changed behavior even for small diffs without a plan or server, preserve report-only discovery and the test_stub ASK gate, handle incomplete probes honestly, and rerun affected evidence after approved repairs',
       agentCapability: 'frontier',
+      // This ~64k-token bundle is the largest workflow input. Thinking and the answer share max_tokens:
+      // at default effort, 24 measured samples used up to 6.9k output tokens and a CI sample spent all
+      // 8192 without an answer. The ship-sized streaming cap removes truncation; effort stays default.
+      maxTokens: 65_536,
+      stream: true,
     });
   }, WORKFLOW_JUDGE_TEST_MS);
 
   testIfSelected('sync-gbrain/SKILL.md read-only readiness', async () => {
     await runWorkflowJudge({
       testName: 'sync-gbrain/SKILL.md read-only readiness',
+      schemaTransport: true,
       suite: 'Other skill evals',
       skillPath: 'sync-gbrain/SKILL.md',
       startMarker: '## Step 4: Refresh',
@@ -744,6 +693,7 @@ describeIfSelected('Other skill evals', [
   testIfSelected('retro/SKILL.md instructions', async () => {
     await runWorkflowJudge({
       testName: 'retro/SKILL.md instructions',
+      schemaTransport: true,
       suite: 'Other skill evals',
       skillPath: 'retro/SKILL.md',
       startMarker: '## Instructions',
@@ -756,6 +706,7 @@ describeIfSelected('Other skill evals', [
   testIfSelected('qa-only/SKILL.md workflow', async () => {
     await runWorkflowJudge({
       testName: 'qa-only/SKILL.md workflow',
+      schemaTransport: true,
       suite: 'Other skill evals',
       skillPath: 'qa-only/SKILL.md',
       startMarker: '# /qa-only:',
@@ -769,6 +720,7 @@ describeIfSelected('Other skill evals', [
   testIfSelected('gstack-upgrade/SKILL.md upgrade flow', async () => {
     await runWorkflowJudge({
       testName: 'gstack-upgrade/SKILL.md upgrade flow',
+      schemaTransport: true,
       suite: 'Other skill evals',
       skillPath: 'gstack-upgrade/SKILL.md',
       startMarker: '## Inline upgrade flow',
@@ -792,29 +744,17 @@ describeIfSelected('Voice directive eval', ['voice directive tone'], () => {
     const voiceEnd = content.indexOf('\n## ', voiceStart + 1);
     const voiceSection = content.slice(voiceStart, voiceEnd > 0 ? voiceEnd : voiceStart + 3000);
 
-    const result = await callJudge<{
+    const samples = await judgePanel(() => callJudge<{
       directness: number;
       concreteness: number;
       avoids_corporate: number;
       avoids_ai_vocabulary: number;
       connects_user_outcomes: number;
       reasoning: string;
-    }>(`You are evaluating a voice directive for an AI coding assistant framework called GStack.
-Score each dimension 1-5 where 5 is excellent:
+    }>(buildVoiceDirectiveJudgePrompt(voiceSection), undefined, { jsonSchema: VOICE_DIRECTIVE_JUDGE_SCHEMA }));
+    const result = judgePanelMean(samples, ['directness', 'concreteness', 'avoids_corporate', 'avoids_ai_vocabulary', 'connects_user_outcomes'] as const);
 
-1. directness: Does it instruct the agent to be direct, lead with the point, take positions?
-2. concreteness: Does it instruct the agent to name specific files, commands, line numbers, real numbers?
-3. avoids_corporate: Does it explicitly ban corporate/formal/academic tone and provide alternatives?
-4. avoids_ai_vocabulary: Does it ban AI-tell words and phrases with specific lists?
-5. connects_user_outcomes: Does it instruct the agent to connect technical work to real user experience?
-
-Return JSON only:
-{"directness": N, "concreteness": N, "avoids_corporate": N, "avoids_ai_vocabulary": N, "connects_user_outcomes": N, "reasoning": "..."}
-
-THE VOICE DIRECTIVE:
-${voiceSection}`);
-
-    console.log('Voice directive scores:', JSON.stringify(result, null, 2));
+    console.log('Voice directive panel:', JSON.stringify({ mean: result, samples }, null, 2));
 
     evalCollector?.addTest({
       name: 'voice directive tone',
@@ -823,7 +763,7 @@ ${voiceSection}`);
       passed: result.directness >= 4 && result.concreteness >= 4 && result.avoids_corporate >= 4
         && result.avoids_ai_vocabulary >= 4 && result.connects_user_outcomes >= 4,
       duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
+      cost_usd: 0.02 * samples.length,
       judge_scores: {
         directness: result.directness,
         concreteness: result.concreteness,
@@ -831,7 +771,7 @@ ${voiceSection}`);
         avoids_ai_vocabulary: result.avoids_ai_vocabulary,
         connects_user_outcomes: result.connects_user_outcomes,
       },
-      judge_reasoning: result.reasoning,
+      judge_reasoning: judgePanelReasoning(samples),
     });
 
     expect(result.directness).toBeGreaterThanOrEqual(4);

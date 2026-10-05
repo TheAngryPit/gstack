@@ -9,7 +9,7 @@ import type { PlanCountTranscript } from './helpers/plan-count-transcript';
 import capturedL from './fixtures/devex-review-l-calls.json';
 import designStatusCapture from './fixtures/design-count-native-issue-fields.json';
 import designEnvelope from './fixtures/design-completion-envelope-90f.json';
-import { nativePlanCallFingerprint } from './helpers/claude-pty-runner';
+import { nativePlanCallFingerprint, isNativeCompletionSummary } from './helpers/claude-pty-runner';
 import type { NativePlanQuestionCall } from './helpers/plan-count-transcript';
 import captured_ceo_completion_handoff_m from './fixtures/ceo-completion-handoff-m-call.json';
 import nextStepCapture_ceo_completion_handoff_m from './fixtures/ceo-handoff-n-calls.json';
@@ -48,13 +48,9 @@ describe('captured Design completion envelope', () => {
   });
   test('the actual runner branch recognizes the idle native envelope without answering an exit gate',()=>{
     const f=completedEnvelope();try {
-      const source=fs.readFileSync(path.join(import.meta.dir,'helpers/claude-pty-runner.ts'),'utf8');
-      const expression=/const nativeSummary = ([\s\S]+?);\n      const terminalFrame/.exec(source)?.[1];expect(expression).toBeTruthy();
-      const evaluate=new Function('opts','nativeCompletion','renderedFrame','visible','transcript','startedAt','administrative',
-        'isNumberedOptionListVisible','isPermissionDialogVisible','isProseAUQVisible','hasNativePlanTerminal',`return (${expression});`);
       const screen=designEnvelope.screen.replaceAll(designEnvelope.originalPlanPath,f.file);
-      const check=()=>evaluate({expectedPlanPath:f.file},hasNativePlanCompletion(f.transcript,f.file,designEnvelope.startedAt),classifyPlanCountFrame(screen),screen,f.transcript,
-        designEnvelope.startedAt,new Set(),isNumberedOptionListVisible,isPermissionDialogVisible,isProseAUQVisible,hasNativePlanTerminal);
+      const check=()=>isNativeCompletionSummary({expectedPlanPath:f.file,nativeCompletion:hasNativePlanCompletion(f.transcript,f.file,designEnvelope.startedAt),
+        renderedFrame:classifyPlanCountFrame(screen),visible:screen,transcript:f.transcript,startedAt:designEnvelope.startedAt,administrative:new Set()});
       expect(check()).toBe(true);
       f.transcript.calls[0]!.answered=false;expect(check()).toBe(false);
     }finally{f.cleanup();}

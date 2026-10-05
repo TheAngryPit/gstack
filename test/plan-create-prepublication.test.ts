@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import {createHash} from 'node:crypto';
 import {createFilePermissionRecorder,recordFilePermission,currentFilePermissionEpoch,readPendingWriteInput} from './helpers/plan-count-file-permission';
 import {readPlanCountTranscript} from './helpers/plan-count-transcript';
-import {createPlanCountPermissionGuard} from './helpers/claude-pty-runner';
+import {createPlanCountPermissionGuard,countingCapture,type CountingRun} from './helpers/claude-pty-runner';
 import {createPlanCountSnapshotWriter} from './helpers/plan-count-artifacts';
 import captured from './fixtures/plan-create-prepublication-491.json';
 
@@ -137,22 +137,18 @@ test('legacy published Write metadata remains sufficient without a sidecar',()=>
 });
 
 // Execute only the actual count capture assembly with its real reader/writer.
-// This is not a full counting-loop execution; existing count throw/timeout tests
+// This calls the counting runner's capture step directly, not a full loop; existing count throw/timeout tests
 // separately prove that the lifecycle invokes capture before fixture disposal.
 test('count capture assembly retains exact prepublication input through refresh, throw and fixture cleanup',()=>{
  const f=fixture(),evalDir=fs.mkdtempSync(path.join(os.tmpdir(),'count-write-retention-'));
  try {
   f.hook();const expected=readPendingWriteInput(f.recorder.file,f.expected,f.cwd,f.config,f.startedAt);
   expect(expected).toBeDefined();
-  const source=fs.readFileSync(path.join(import.meta.dir,'helpers/claude-pty-runner.ts'),'utf8');
-  const start=source.indexOf('  const capture = (observation: object) => {',source.indexOf('export async function runPlanSkillCounting('));
-  const end=source.indexOf('\n  function snapshot(',start);
-  expect(start).toBeGreaterThan(0);expect(end).toBeGreaterThan(start);
-  const code=new Bun.Transpiler({loader:'ts'}).transformSync(source.slice(start,end)+'\nreturn capture;');
-  const capture=new Function('saveSnapshot','opts','ownedFilePermissions','readPendingWriteInput','readPlanCountTranscript','fixture','session','startedAt','viewport',code)(
-   createPlanCountSnapshotWriter({EVALS_RUN_ID:'count-prepublication-free',GSTACK_EVAL_DIR:evalDir}),
-   {skillName:'plan-eng-review'},[{file:f.recorder.file,expected:f.expected}],readPendingWriteInput,readPlanCountTranscript,
-   {cwd:f.cwd},{hermeticConfigDir:f.config,rawOutput:()=>f.screen,visibleText:()=>f.screen},f.startedAt,f.screen);
+  // The runner's own capture step, called with the state it builds for an attempt.
+  const run={opts:{skillName:'plan-eng-review'},fixture:{cwd:f.cwd},startedAt:f.startedAt,viewport:f.screen,
+   ownedFilePermissions:[{file:f.recorder.file,expected:f.expected}],
+   saveSnapshot:createPlanCountSnapshotWriter({EVALS_RUN_ID:'count-prepublication-free',GSTACK_EVAL_DIR:evalDir})} as unknown as CountingRun;
+  const capture=(observation:object)=>countingCapture(run,{hermeticConfigDir:f.config,rawOutput:()=>f.screen,visibleText:()=>f.screen},observation);
   const progress=capture({state:'in_progress'});
   expect(progress.artifactError).toBeUndefined();expect(progress.artifactDir).toBeDefined();
   const initial=JSON.parse(fs.readFileSync(path.join(progress.artifactDir,'observation.json'),'utf8'));

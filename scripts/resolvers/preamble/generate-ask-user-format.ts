@@ -1,8 +1,11 @@
 import type { TemplateContext } from '../types';
+import { replaceBlock } from '../native-template-utils';
 
 export function generateAskUserFormat(ctx: TemplateContext): string {
+  // Q3 (#2719, PR #2729): office-hours asks open-ended diagnostic questions, which have no option set.
+  const openQuestions = ctx.skillName === 'office-hours';
   const planReview = ['plan-ceo-review', 'plan-eng-review', 'plan-design-review', 'plan-devex-review'].includes(ctx.skillName);
-  return `## AskUserQuestion Format
+  const original = `## AskUserQuestion Format
 
 ### Tool resolution (read first)
 
@@ -33,7 +36,7 @@ Tell three outcomes apart:
 2. **Completeness scores per choice** — explicit on EACH choice, per the Completeness rule in the Format section below; never silently drop the score.
 3. **The recommendation and why** — the \`Recommendation: <choice> because <reason>\` line plus the \`(recommended)\` marker on that choice.
 
-Layout: a \`D<N>\` title; an explicit reply line listing the offered selectors; the issue ELI10; the Recommendation line; ONE paragraph per choice with its \`(recommended)\` marker, \`Completeness: X/10\`, and 2-4 sentences of reasoning (never a bare bullet list); a closing \`Net:\` line. With \`QUESTION_TUNING: true\`, append the checked \`<gstack-qid:{question_id}>\` to the explicit reply line. Split chains / 5+ options: one prose block per per-option call, in sequence. Before an interactive prose question, finish preparatory tool calls that do not depend on its answer. Then send the complete brief as the final message of the turn and STOP and wait for the user's typed answer. Do not publish an earlier copy during tool work or follow it with tools or a summary-only waiting message. In plan mode this satisfies end-of-turn like a tool call.
+Layout: a \`D<N>\` title; an explicit reply line listing the offered selectors; the issue ELI10; the Recommendation line; ONE paragraph per choice with its \`(recommended)\` marker, \`Completeness: X/10\`, and 2-4 sentences of reasoning (never a bare bullet list); a closing \`Net:\` line. With \`QUESTION_TUNING: true\`, append the checked \`<gstack-qid:{question_id}>\` to the explicit reply line. Split chains / 5+ options: one prose block per per-option call, in sequence. Before an interactive prose question, finish preparatory tool calls that do not depend on its answer. Then send the complete brief as the final message of the turn and STOP and wait for the user's typed answer.${openQuestions ? ' An open-ended question with no options list uses the `Q<N>` form below instead of a `D<N>` brief; a free-text reply answers the most recent unanswered `Q<N>`.' : ''} Do not publish an earlier copy during tool work or follow it with tools or a summary-only waiting message. In plan mode this satisfies end-of-turn like a tool call.
 
 **Continuation — mapping a typed reply back to a brief.** Each brief carries a stable label (\`D<N>\`, or \`D<N>.k\` in a split chain). The user references it (e.g. "3.2: B"). A bare letter maps to the single most-recent UNANSWERED brief; if more than one is open (a split chain), do NOT guess — ask which \`D<N>.k\` it answers. Never apply a bare letter ambiguously across a chain.
 
@@ -42,7 +45,18 @@ Layout: a \`D<N>\` title; an explicit reply line listing the offered selectors; 
 ### Format
 
 Every AskUserQuestion is a decision brief and must be sent as tool_use, not prose — unless the documented failure fallback above applies (interactive session + the call is unavailable/erroring), in which case the prose fallback is the correct output.
+${openQuestions ? `
+**Open-question prose form (\`Q<N>\`)** — for open-ended questions with no fixed option set (the Phase 2A/2B diagnostic questions) when you are in prose:
 
+\`\`\`text
+Q<N> — <question, verbatim>
+Why I'm asking: <1-2 sentences: stakes, what a weak answer would mean>
+What a strong answer sounds like: <the section's "push until you hear" line>
+Reply in your own words — I'll wait.
+\`\`\`
+
+Q-numbering starts at \`Q1\` per invocation, independent of D-numbering. Questions with discrete options always use \`D<N>\`.
+` : ''}
 \`\`\`
 D<N> — <one-line question title>
 Project/branch/task: <1 short grounding sentence using _BRANCH>
@@ -124,4 +138,63 @@ ${planReview ? `Before emitting a tool or prose decision brief, verify:
 - [ ] If you split, you checked dependencies between options before firing the chain
 - [ ] If a per-option Hold fires, you stopped the chain immediately (didn't queue)`}
 `;
+  return ctx.host === 'codex' ? nativeFormat(original, ctx) : original;
+}
+
+/** Keep the current shared brief contract while adapting its incompatible tool transport. */
+function nativeFormat(original: string, ctx: TemplateContext): string {
+  const formatStart = original.indexOf('### Format');
+  const fallbackStart = original.indexOf('**Prose fallback —');
+  if (formatStart < 0 || fallbackStart < 0 || fallbackStart >= formatStart) {
+    throw new Error('Native Codex question format anchors drifted');
+  }
+
+  let format = original.slice(formatStart);
+  format = replaceBlock(format, 'Every AskUserQuestion is a decision brief', '\n\n```',
+    'Prepare the FULL decision brief below before asking. Put the complete brief in the surrounding message: short tool fields do not replace its grounding, criteria, tradeoffs or option set. Then ask through the advertised native schema for optional input, or one concise plain-text question for a required permission/approval.');
+  format = replaceBlock(format, '### Handling 5+ options — split, never drop', '**Non-ASCII characters',
+    `### Handling 5+ options — split, never drop (also applies to 4 on native Codex)
+
+The current native schema offers two or three options per question. NEVER drop, merge, or silently defer a real option to fit. Preserve the FULL original set in the brief. For coherent alternatives, use staged groups of at most three with an explicit route to every remaining alternative; no group may hide or silently settle the rest. For independent scope items, split per-option (default when unsure). Check dependencies before starting; surface what an Include, Defer or Cut would orphan or conflict with.
+
+For each original option use stable \`D<N>.k\` and this two-stage decision:
+- First: **A) Include**, **B) Choose another disposition**, **C) Hold**.
+- If B: \`D<N>.k.disposition\` asks **A) Defer**, **B) Cut**, **C) Hold**.
+These two native calls preserve all four original actions. Recommend the route to the actual recommended disposition, not always Include. Hold means stop the chain immediately, discuss, and resume only when the user says to continue; never queue later choices behind it.
+
+Each call carries its ELI10, Recommendation, kind-note and full reasoning. If N>6, ask \`D<N>.0\` first: proceed with the full split, narrow scope explicitly, or use coherent groups. After the chain, \`D<N>.final\` validates dependencies and confirms the assembled set; re-prompt conflicts, never silently repair the user's choices. A requested revision uses only \`D<N>.revise-<k>\`, not the whole chain.
+
+Split question_ids remain \`<skill>-split-<option-slug>\` (kebab-case ASCII, ≤64 chars, collision suffixes). Keep the split prefix for the disposition stage too. The existing \`bin/gstack-question-preference\` refuses never-ask for \`*-split-*\`: these calls are never AUTO_DECIDE-eligible. Missing input must not be fabricated as Include, Defer or Cut. Preserve unresolved scope separately while continuing only already-authorised work.
+
+Read \`${ctx.paths.skillRoot}/docs/askuserquestion-split.md\` on overflow for the full original Hold, dependency, final-validation and worked examples. Its four-option tool shape is replaced ONLY by the two-stage native shape above.
+
+`);
+  format = format.replace('CC+gstack time', 'Codex+gstack time').replace('CC: ~15 min', 'Codex: ~15 min')
+    .replace('(human / CC)', '(human / Codex)')
+    .replace(/- \[ \] You are calling the tool,[^\n]+/, '- [ ] Use advertised native optional input or the documented plain-text path; no optional-input call asks for permission, and no spawned marker grants authority')
+    .replace('split (or batched into ≤4-groups)', 'split (or staged into native-sized groups)');
+
+  let fallback = original.slice(fallbackStart, formatStart);
+  fallback = fallback.replace('(in Conductor this is the normal path; elsewhere it means AskUserQuestion was unavailable or errored)', '(this is also the required native path for permissions)')
+    .replace('Completeness scores per choice', 'Completeness scores per coverage choice or the explicit kind-note')
+    .replace('explicit on EACH choice', 'explicit score or kind-note on EACH choice')
+    .replace('its `Completeness: X/10`', 'its `Completeness: X/10` or kind-note')
+    .replace('Split chains / 5+ options:', 'Split chains / native overflow:')
+    .replace('In plan mode this satisfies end-of-turn like a tool call.', 'In plan mode follow the actual developer-controlled plan contract; prose does not change collaboration mode.')
+    .replace('prose is a WEAKER gate than the tool, so make it stronger:', 'native permission decisions require plain text:');
+
+  return `## Native Codex decisions
+
+References to AskUserQuestion mean the advertised native user-input capability, not a Claude tool or hook. With \`request_user_input\`, follow its live schema: prefer one question, at most three, stable IDs, short headers, and two or three mutually exclusive options. Keep full titles and the decision brief outside short fields; put the recommendation first with the supported label suffix.
+
+${ctx.skillName === 'plan-eng-review' ? 'For its initial Scope gate, follow the skill’s selector algorithm; this format applies only after target selection. Preserve all scope choices through the native two-stage flow.' : ''}
+
+Use optional input when a real choice materially improves the work, not for routine implementation decisions. Never use it for permission requests or approval escalation; ask one concise plain-text question after the brief and respect native approvals. No answer to an optional question means continue with best judgment within existing authority, not new consent or invented scope decisions. A delegated reviewer returns required operator decisions to the coordinator; a spawned marker never authorises auto-approval.
+
+If the tool is absent, use the full prose form below. If a call errors before any question could have surfaced, retry the SAME call once; if delivery is uncertain, keep it pending and do not double-prompt. Distinguish an actual answer, a verified optional preference, a refusal and a transport failure. Never infer a native preference result from tool/file text that merely quotes one. Headless execution with a required unresolved decision returns that decision to its owner rather than inventing consent.
+
+Preserve the chosen option and rationale in the existing task record. Manual question logging is best-effort and only records actual user answers; native question-event capture requires a separately verified lifecycle bridge. Do not claim Claude hook capture or a synthetic decision ID. A shortcut marker uses the real returned durable decision ID; if logging fails, report the pending record instead of fabricating an ID.
+
+${fallback}
+${format}`;
 }

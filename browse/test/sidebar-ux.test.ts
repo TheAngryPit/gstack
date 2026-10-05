@@ -23,6 +23,8 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import { stubRouteContext, callRoute, routeEntry } from './route-test-harness';
 import { EventEmitter } from 'node:events';
 import { BrowserManager } from '../src/browser-manager';
 
@@ -676,29 +678,37 @@ describe('welcome page', () => {
 });
 
 describe('server /welcome endpoint', () => {
-  const serverSrc = fs.readFileSync(path.join(ROOT, 'src', 'server.ts'), 'utf-8');
+  // Resolve against empty HOME / skill-root dirs so neither the project
+  // welcome page nor the installed one exists.
+  async function welcomeWithoutPages(): Promise<Response> {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-welcome-empty-'));
+    const saved = { HOME: process.env.HOME, GSTACK_SKILL_ROOT: process.env.GSTACK_SKILL_ROOT };
+    try {
+      process.env.HOME = empty;
+      process.env.GSTACK_SKILL_ROOT = empty;
+      return await callRoute('GET', '/welcome', stubRouteContext());
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  }
 
-  test('/welcome endpoint exists in server.ts', () => {
-    expect(serverSrc).toContain("url.pathname === '/welcome'");
+  test('/welcome endpoint exists in the route table', () => {
+    expect(routeEntry('GET', '/welcome')).toMatchObject({ path: '/welcome', auth: 'none', surfaces: ['local'] });
   });
 
-  test('/welcome serves HTML content type', () => {
-    const welcomeSection = serverSrc.slice(
-      serverSrc.indexOf("url.pathname === '/welcome'"),
-      serverSrc.indexOf("url.pathname === '/health'"),
-    );
-    expect(welcomeSection).toContain("'Content-Type': 'text/html");
+  test('/welcome serves HTML content type', async () => {
+    expect((await welcomeWithoutPages()).headers.get('content-type')).toBe('text/html; charset=utf-8');
   });
 
-  test('/welcome serves fallback HTML if no welcome file found', () => {
-    const welcomeSection = serverSrc.slice(
-      serverSrc.indexOf("url.pathname === '/welcome'"),
-      serverSrc.indexOf("url.pathname === '/health'"),
-    );
+  test('/welcome serves fallback HTML if no welcome file found', async () => {
     // Changed from 302 redirect to about:blank (ERR_UNSAFE_REDIRECT on Windows)
     // to inline HTML fallback page (PR #822)
-    expect(welcomeSection).toContain('GStack Browser ready');
-    expect(welcomeSection).toContain('status: 200');
+    const resp = await welcomeWithoutPages();
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toContain('GStack Browser ready');
   });
 });
 

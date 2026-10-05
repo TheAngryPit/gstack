@@ -3,8 +3,8 @@
  *
  * Two invariants:
  *   1. The env matrix — including the tierless-run trap: EVALS=1 with
- *      EVALS_TIER unset must SKIP both tiers (that is how `test:evals` /
- *      `eval:bg:all` have always treated whole-file tier gates; per-test
+ *      EVALS_TIER unset must SKIP both tiers (that is how a bare
+ *      `EVALS=1 bun test` treats whole-file tier gates; per-test
  *      diff selection covers those runs instead).
  *   2. Module purity — e2e-gate.ts is imported at module scope by every
  *      tier-gated paid test file, one-process-each under the sharded
@@ -61,6 +61,19 @@ describe('e2e-gate: env matrix (read at call time)', () => {
 
     process.env.EVALS_TIER = 'gate';
     expect(e2eTierEnabled('periodic')).toBe(false);
+    expect(describeE2ETier('periodic')).toBe(describe.skip);
+  });
+
+  test('marathon runs only in its own lane; gate and periodic lanes skip it', () => {
+    process.env.EVALS = '1';
+    for (const lane of ['gate', 'periodic']) {
+      process.env.EVALS_TIER = lane;
+      expect(e2eTierEnabled('marathon')).toBe(false);
+      expect(describeE2ETier('marathon')).toBe(describe.skip);
+    }
+    process.env.EVALS_TIER = 'marathon';
+    expect(describeE2ETier('marathon')).toBe(describe);
+    expect(describeE2ETier('gate')).toBe(describe.skip);
     expect(describeE2ETier('periodic')).toBe(describe.skip);
   });
 

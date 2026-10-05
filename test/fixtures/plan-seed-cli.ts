@@ -85,8 +85,10 @@ process.stdin.on('data',chunk=>{
    const current=scenario==='prose-question'?'\r\nWhich option do you prefer?\r\nA) Full review (recommended)\r\nB) Skip review\r\n❯ '
     :scenario.endsWith('multiline-current')?'\r\n  keep this draft'
     :scenario.endsWith('typed-current')?'keep this draft':'';
-   frame(current,history,scenario.endsWith('missing-current-top')||scenario==='unframed-current'?'':rule,
+   // The native CLI can write end_turn before it repaints; the stale empty box must not count.
+   const paint=()=>frame(current,history,scenario.endsWith('missing-current-top')||scenario==='unframed-current'?'':rule,
     scenario.endsWith('missing-current-bottom')||scenario==='unframed-current'?'':scenario==='mismatched-current-rules'?rule.slice(1):rule);
+   if(scenario==='late-repaint-typed-current')setTimeout(paint,60);else paint();
    if(scenario==='stray-prompt-after-current')process.stdout.write('\r❯ keep this later draft');
   },180);return;
  }

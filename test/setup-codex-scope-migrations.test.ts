@@ -1,8 +1,11 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { owned, fixtureWriteFileSync, fixtureCopyFileSync, fixtureMkdirSync, fixtureUtimesSync, tree, fixture, install } from './helpers/setup-codex-scope-fixture';
+import { cleanupFixtures, cleanupSeed, owned, fixtureWriteFileSync, fixtureCopyFileSync, fixtureMkdirSync, fixtureUtimesSync, tree, fixture, install } from './helpers/install-fixture';
+
+afterEach(cleanupFixtures);
+afterAll(cleanupSeed);
 
 describe.skipIf(process.platform === 'win32')('setup Codex destination follows recognized source scope', () => {
   for (const localLegacy of [false, true]) for (const marker of ['current', '1.85.0.0']) test(`excluded global legacy render survives local migration=${localLegacy}, marker=${marker} and generation`, () => {
@@ -30,7 +33,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     install(f);
     expect(tree(f.global)).toEqual(before);
     expect(readFileSync(join(f.global, 'gstack-claude/SKILL.md'), 'utf8')).toBe(oldBytes);
-    expect(realpathSync(join(local, 'gstack-claude-code/SKILL.md'))).toBe(join(f.source, '.agents/skills/gstack-claude-code/SKILL.md'));
+    expect(realpathSync(join(local, 'gstack-claude-code/SKILL.md'))).toBe(realpathSync(join(f.source, '.agents/skills/gstack-claude-code/SKILL.md')));
     expect(lstatSync(join(local, 'gstack-claude'), { throwIfNoEntry: false })).toBeUndefined();
   }, 90_000);
 
@@ -176,7 +179,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     install(f);
     expect(existsSync(join(runtime, 'prior-asset'))).toBe(false);
     expect(readFileSync(join(runtime, 'SKILL.md'), 'utf8')).toContain('<!-- AUTO-GENERATED from');
-    expect(realpathSync(join(runtime, 'bin'))).toBe(join(f.source, 'bin'));
+    expect(realpathSync(join(runtime, 'bin'))).toBe(realpathSync(join(f.source, 'bin')));
   }, 90_000);
 
   test('Claude-only setup leaves a global handwritten runtime untouched', () => {

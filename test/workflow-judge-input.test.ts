@@ -4,8 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readWorkflowJudgeInput, buildWorkflowJudgePrompt, QA_DISCOVERY_REFERENCES } from './helpers/workflow-judge-input';
-import { ENG_REVIEW_EXCERPT } from './helpers/workflow-excerpt';
+import { readWorkflowJudgeInput, buildWorkflowJudgePrompt, QA_DISCOVERY_REFERENCES, WORKFLOW_JUDGE_RESPONSE_SCHEMA, WORKFLOW_JUDGE_REASONING_WORD_LIMIT } from './helpers/workflow-judge-input';
+import { ASK_QUESTIONS_HEADING, ENG_REVIEW_EXCERPT } from './helpers/workflow-excerpt';
 
 const ROOT = resolve(import.meta.dir, '..');
 const scratchRoots: string[] = [];
@@ -41,10 +41,18 @@ test.each(['ship', 'review'])('%s clarity targets frontier readers without excus
 test('frontier calibration bounds reporting without reducing the evaluated source bundle', () => {
   const input = { files: [], text: 'Entire source bundle remains present.' };
   const prompt = buildWorkflowJudgePrompt({ judgeContext: 'a workflow', judgeGoal: 'how to finish', agentCapability: 'frontier' }, input);
-  expect(prompt).toContain('Evaluate the whole workflow, but keep the JSON reasoning under 150 words with at most two decisive examples');
+  expect(prompt).toContain('Evaluate the whole workflow, but keep the JSON reasoning under 120 words with at most two decisive examples');
   expect(prompt).toContain('For a clarity defect, cite the specific file/step and explain the competing actions or missing decision');
   expect(prompt).not.toContain('For each clarity defect');
   expect(prompt.endsWith(input.text)).toBe(true);
+});
+
+test('judges are asked for 120 words while the enforced reasoning limit stays below 150', () => {
+  const prompt = buildWorkflowJudgePrompt({ judgeContext: 'a workflow', judgeGoal: 'how to finish', agentCapability: 'frontier' }, { files: [], text: '' });
+  expect(prompt).toContain('keep the JSON reasoning under 120 words');
+  expect(prompt).not.toContain('150 words');
+  expect(WORKFLOW_JUDGE_RESPONSE_SCHEMA.properties.reasoning.description).toStartWith('Under 120 words');
+  expect(WORKFLOW_JUDGE_REASONING_WORD_LIMIT).toBe(150);
 });
 
 afterEach(() => {
@@ -316,8 +324,9 @@ describe('workflow judge file bundle', () => {
     expect(entrypoint.content).toContain('## Scope gate');
     expect(entrypoint.content.indexOf('## Scope gate')).toBeLessThan(entrypoint.content.indexOf('### Step 0: Scope Challenge'));
     expect(entrypoint.content).toContain('## Web research runs in Aside');
-    expect(entrypoint.content).toContain('echo "READY: aside');
-    expect(input.text.indexOf('echo "READY: aside')).toBeLessThan(input.text.indexOf('- **Search check:**'));
+    // E7: the readiness probe prints the resolved Aside path (READY: $_A).
+    expect(entrypoint.content).toContain('echo "READY: $_A');
+    expect(input.text.indexOf('echo "READY: $_A')).toBeLessThan(input.text.indexOf('- **Search check:**'));
     expect(entrypoint.content).not.toContain('- **Search check:**');
     expect(occurrences(input.text, '- **Search check:**')).toBe(1);
     expect(occurrences(input.text, '## Scope gate')).toBe(1);
@@ -355,14 +364,14 @@ describe('workflow judge file bundle', () => {
 
   test('generated plan-design passes retain their full section without duplicating Pass 1', () => {
     const input = readWorkflowJudgeInput({
-      root: ROOT, skillPath: 'plan-design-review/SKILL.md', startMarker: '## Review Sections', endMarker: '## CRITICAL RULE',
+      root: ROOT, skillPath: 'plan-design-review/SKILL.md', startMarker: '## Review Sections', endMarker: ASK_QUESTIONS_HEADING,
     });
     expect(input.files.filter(file => file.kind === 'entrypoint')).toHaveLength(0);
     expect(input.files.map(file => file.path)).toEqual(sectionPaths('plan-design-review'));
     const section = input.files.find(file => file.path === 'plan-design-review/sections/review-sections.md');
     expect(section?.content).toBe(readFileSync(join(ROOT, 'plan-design-review/sections/review-sections.md'), 'utf8'));
     expect(section?.content).toStartWith('<!-- AUTO-GENERATED');
-    expect(section?.content).toContain('## CRITICAL RULE');
+    expect(section?.content).toMatch(ASK_QUESTIONS_HEADING);
     expect(section?.content).toContain('## Formatting Rules');
     expect(occurrences(input.text, '### Pass 1: Information Architecture')).toBe(1);
   });

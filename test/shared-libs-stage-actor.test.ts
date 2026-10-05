@@ -56,7 +56,7 @@ function runner(f: fixtures.SharedLibsFixture, mode: string, observations: any[]
       events.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'written' }] } });
     };
     const actor = session.stageActor;
-    await invoke(`cat ${fixtures.shellQuote(path.join(fixtures.SHARED_LIBS_ROOT, 'review/checklist.md'))} src/retry-worker.ts src/retry-route.ts lib/retry-after.ts`);
+    await invoke(`cat ${fixtures.shellQuote(path.join(fixtures.SHARED_LIBS_ROOT, 'review/checklist.md'))}${mode === 'unread observation' ? '' : ' ' + fixtures.shellQuote(path.join(f.root, 'pass1-observation.md'))}`);
     const initial = mode === 'missing' ? undefined : await invoke(actor.actorCommand, true);
     const question = mode === 'post-fix verification' ? structuredClone(stageScope.decision.call.input) : { questions: [{ question: 'Apply the supported shared-code advisory?', options: [
       { label: 'Fix as recommended', description: 'Replace both inline parsers with the existing helper.' },
@@ -76,7 +76,8 @@ function runner(f: fixtures.SharedLibsFixture, mode: string, observations: any[]
       expect(verification).toContain('0 fail');
       expect(verification).toContain(`worker===lib ${approved} route===lib ${approved} sample 42 5`);
     }
-    const token = await invoke(`${fixtures.shellQuote(path.join(fixtures.SHARED_LIBS_ROOT, 'bin/gstack-review-log'))} --start review`);
+    const started = await invoke(`${fixtures.shellQuote(path.join(fixtures.SHARED_LIBS_ROOT, 'bin/gstack-review-log'))} --start review`);
+    const token = mode === 'seeded token' ? fs.readFileSync(path.join(f.root, 'pass1-observation.md'), 'utf8').match(/pass 1 REVIEW_START ([0-9a-f-]{36})/)![1] : started;
     await invoke('git diff origin/main && cat src/retry-worker.ts src/retry-route.ts lib/retry-after.ts');
     const finding = { severity: 'INFORMATIONAL', confidence: 9, advisory: true, category: 'shared-libs',
       path: 'src/retry-worker.ts', line: 1, summary: 'Use the established retry contract',
@@ -155,7 +156,7 @@ function lifecycle(mode: string) {
   let registered: () => Promise<void>;
   new Function('deps', `const { test, captures, fs, path, expect, CAPTURE_LONG_MS, createHash, sharedLibsFingerprint,
     createSharedLibsFixture, seedReviewSources, reviewLifecycleInstructions, specialistFixture, createLifecyclePrerequisiteActor,
-    reviewPrompt, runSharedInteractive, reviewRecords, toolCommandTrace } = deps;
+    seedLifecycleFirstPass, reviewPrompt, runSharedInteractive, reviewRecords, toolCommandTrace } = deps;
     ${transpile(record + '\n' + registration)}`)({
     ...fixtures, createHash, sharedLibsFingerprint, path, expect, CAPTURE_LONG_MS, createLifecyclePrerequisiteActor,
     fs: { ...fs, rmSync: (root: string) => { expect(roots).toContain(root); } },
@@ -168,7 +169,12 @@ function lifecycle(mode: string) {
     } },
     createSharedLibsFixture: (name: string) => { const f = fixtures.createSharedLibsFixture(name); roots.push(f.root); return f; },
     runSharedInteractive: async (f: fixtures.SharedLibsFixture, name: string, prompt: string, choose: string, options: any) => {
-      expect(prompt).toBe(fixtures.reviewPrompt(f, path.join(f.root, 'review-lifecycle.md'), path.join(f.root, 'specialist-input.jsonl'), options.stageActor));
+      const start = fs.readFileSync(path.join(f.root, 'pass1-observation.md'), 'utf8').match(/REVIEW_START ([0-9a-f-]{36}) \(started_at ([^)]+)\)/)!;
+      const seed = { token: start[1], startedAt: start[2], observation: path.join(f.root, 'pass1-observation.md'),
+        startWtree: JSON.parse(fs.readFileSync(path.join(f.state, 'projects/fixture-shared-libs/.review-starts', `${start[1]}.json`), 'utf8')).wtree,
+        diffBase: fixtures.fixtureGit(f, 'rev-parse', 'origin/main') };
+      expect(prompt).toBe(fixtures.reviewPrompt(f, path.join(f.root, 'review-lifecycle.md'), path.join(f.root, 'specialist-input.jsonl'), options.stageActor, seed));
+      expect(prompt).toContain(`pass 1 REVIEW_START ${seed.token}`);
       if (mode === 'post-fix verification') {
         expect(prompt).toContain('replaces the entire Step 4.7 QA and Step 4.8 native adversarial stages');
         expect(prompt).toContain('Existing tests and caller/import checks needed to verify your source fixes still run');
@@ -227,6 +233,49 @@ test.each(['missing', 'no-call', 'stale', 'relabeled old', 'late edit', 'edited 
       expect(row.transcript.at(-1)).toMatchObject({ prerequisite_source: 'synthetic-fixture-stage-actor', prerequisite_native_coverage: false });
     }
   }, 30_000);
+
+test.each([['seeded token', '"changed"'], ['unread observation', 'toBe(expected)']])(
+  'the registered lifecycle callbacks reject a final record that relies on the %s', async (mode, message) => {
+    const adapter = lifecycle(mode);
+    await expect(adapter.invoke()).rejects.toThrow(message);
+    expect(adapter.rows).toHaveLength(2);
+    for (const { row } of adapter.rows) expect(row.passed).toBe(false);
+  }, 30_000);
+
+test('the seeded first pass takes a real unused start before its reads and cannot finish an edited candidate', () => {
+  const f = fixtures.createSharedLibsFixture('seeded-pass');
+  roots.push(f.root);
+  fixtures.seedReviewSources(f);
+  const source = () => Object.fromEntries(Object.entries(fixtures.snapshotFixture(f.repo)).filter(([file]) => !file.startsWith('.git/objects')));
+  const repoBefore = source();
+  const seed = fixtures.seedLifecycleFirstPass(f);
+  expect(source()).toEqual(repoBefore);
+  const start = JSON.parse(fs.readFileSync(path.join(f.state, 'projects/fixture-shared-libs/.review-starts', `${seed.token}.json`), 'utf8'));
+  expect(start).toMatchObject({ skill: 'review', branch: 'feature/a', wtree: fixtures.fixtureWorkingTree(f), started_at: seed.startedAt });
+  expect(seed.diffBase).toBe(fixtures.fixtureGit(f, 'rev-parse', 'origin/main'));
+  const observation = fs.readFileSync(seed.observation, 'utf8');
+  expect(fs.statSync(seed.observation).mode & 0o777).toBe(0o600);
+  expect(observation.indexOf(`pass 1 REVIEW_START ${seed.token}`)).toBeLessThan(observation.indexOf('## git diff'));
+  expect(observation).toContain('+const unusedRetryDiagnostic = "unused";');
+  expect(observation).toContain('NO_REVIEWS');
+  for (const relative of ['src/retry-worker.ts', 'src/retry-route.ts', 'lib/retry-after.ts', 'src/scheduler.ts', 'test/retry-after.test.ts']) {
+    expect(observation).toContain(`### ${relative} (`);
+    expect(observation).toContain(createHash('sha256').update(fs.readFileSync(path.join(f.repo, relative))).digest('hex'));
+  }
+  expect(() => fixtures.seedLifecycleFirstPass(f)).toThrow('already seeded');
+  const instructions = path.join(f.root, 'review-lifecycle.md'), input = path.join(f.root, 'specialist-input.jsonl');
+  expect(() => fixtures.reviewPrompt(f, instructions, input, undefined, seed)).toThrow('edit-capable lifecycle replay');
+  const seeded = fixtures.reviewPrompt(f, instructions, input, { actorCommand: 'cat /fx/current.json' }, seed);
+  for (const value of [seed.observation, seed.token, seed.diffBase, 'never finish it', 'Pass 2 executes Step 3 itself',
+    'run --start as the sole command', 'supplies the replaced Step 4.7 QA and Step 4.8 native adversarial prerequisites']) expect(seeded).toContain(value);
+  expect(fixtures.reviewPrompt(f, instructions, input, { actorCommand: 'cat /fx/current.json' })).not.toContain('Fixture-seeded pass 1');
+  fixtures.fixtureWrite(f, 'src/retry-worker.ts', fs.readFileSync(path.join(f.repo, 'src/retry-worker.ts'), 'utf8').replace('const unusedRetryDiagnostic = "unused";\n', ''));
+  const env = { ...process.env, ...f.env, PATH: process.env.PATH, GSTACK_HOME: f.state };
+  execFileSync(path.join(fixtures.SHARED_LIBS_ROOT, 'bin/gstack-review-log'), [JSON.stringify({ skill: 'review', status: 'clean',
+    issues_found: 0, critical: 0, informational: 0, findings: [], completed: true, converged: true }), '--finish', seed.token],
+  { cwd: f.repo, env, encoding: 'utf8', timeout: 30_000 });
+  expect(fixtures.reviewRecords(f).at(-1).review_binding).toMatchObject({ state: 'changed', started_at: seed.startedAt, start_wtree: seed.startWtree });
+});
 
 test('the actor helper selects both existing neighboring native bodies', () => {
   for (const file of ['test/helpers/shared-libs-path-fixture.ts']) {

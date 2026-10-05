@@ -152,9 +152,9 @@ function protocol(fault?: Fault, billing?: Array<number | undefined>, controls: 
   return { provider, directory: () => directory, calls: () => calls, sessions };
 }
 
-test('one bounded native case preserves the existing whole-file retry allowance', () => {
+test('one bounded native case fits the whole-file wall and never retries', () => {
   const retries = retriesForFiles(['test/skill-e2e-ship-skip.test.ts']);
-  expect(retries).toBe(1);
+  expect(retries).toBe(0);
   expect(CAPTURE_MS * (retries + 1) + 120000).toBeLessThanOrEqual(DEFAULT_SHARD_TIMEOUT_MS);
 });
 

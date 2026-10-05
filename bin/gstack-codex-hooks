@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Reconcile the user-level Codex hooks.json lifecycle bridge.
+HERE="$(cd "$(dirname "$0")" && pwd)" || exit 2
+exec bun "$HERE/gstack-codex-hooks.ts" "$@"

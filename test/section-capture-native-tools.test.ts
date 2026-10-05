@@ -76,10 +76,11 @@ mock.module(${JSON.stringify(source)},()=>({...capture,captureSectionReads:async
     return successful;
   } finally { fs.rmSync(opts.planDir,{recursive:true,force:true}); }
 }}));
-await import(${JSON.stringify(path.join(root,'test/carve-section-loading-plan-eng-review.test.ts'))});
+const { registerCarveSectionCase } = await import(${JSON.stringify(path.join(root,'test/helpers/carve-section-case.ts'))});
+registerCarveSectionCase('plan-eng-review');
 `);
-  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir,
-    GSTACK_HOME: operatorState, GSTACK_STATE_ROOT: operatorState, EVALS_HERMETIC: '1', EVALS: '', EVALS_ALL: '', GSTACK_CARVE_SKILL: '' };
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir,
+    GSTACK_HOME: operatorState, GSTACK_STATE_ROOT: operatorState, EVALS_HERMETIC: '1', EVALS: '', EVALS_ALL: '' };
   delete env.CI;
   const child = Bun.spawn([process.execPath, 'test', script], { env, cwd: dir, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
   const timer = setTimeout(() => child.kill(), 20_000);
@@ -156,7 +157,7 @@ for(const scenario of ['delivery','timeout','timeout-partial','synthetic-success
 }
 console.log(JSON.stringify(results));
 `);
-  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir, EVALS_HERMETIC: '1' };
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir, EVALS_HERMETIC: '1' };
   delete env.CI;
   const child = Bun.spawn([process.execPath, script], { env, cwd: dir, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
   const timer = setTimeout(() => child.kill(), 15_000);
@@ -197,7 +198,7 @@ test('CEO section caller supplies the author scope instead of blanket recommenda
   const caller = fs.readFileSync(path.join(import.meta.dir, 'skill-e2e-plan-ceo-review-section-loading.test.ts'), 'utf8');
   expect(caller).toContain('decisionPolicy: CEO_SECTION_DECISION_POLICY');
   expect(caller).toContain('validateCeoReviewCompletion(capture)');
-  expect(caller).toContain('expect(hasStaleFillRaceFinding(output)).toBe(true)');
+  expect(caller).toContain('expect(hasApprovedStaleFillDecision(output) || hasStaleFillRaceFinding(output)).toBe(true)');
   expect(caller).toContain('timeout: LONG_SECTION_CAPTURE_MS');
   expect(caller).toContain('CAPTURE_LONG_MS');
 });
@@ -224,7 +225,7 @@ await Bun.write('PLAN.md',CEO_SECTION_CACHE_PLAN);
 const capture=await captureSectionReads({planDir:${JSON.stringify(dir)},skillName:'plan-ceo-review',scenario:'Review PLAN.md. Consider weaker consistency, a new alert project, or full implementation code.',decisionPolicy:CEO_SECTION_DECISION_POLICY,reportFile:'PLAN.md',reportMarker:/^## GSTACK REVIEW REPORT\\s*$/m,nativeReviewOnly:true,testName:'ceo-scope-delivery',timeout:LONG_SECTION_CAPTURE_MS,model:'fake-model'});
 console.log(JSON.stringify({reads:[...capture.readSections],report:capture.reportProduced,written:capture.reportWritten,exit:capture.exitReason}));
 `);
-  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir, EVALS_HERMETIC: '1' };
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir, EVALS_HERMETIC: '1' };
   delete env.CI;
   const child = Bun.spawn([process.execPath, script], { env, cwd: dir, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
   const timer = setTimeout(() => child.kill(), 15_000);
@@ -283,7 +284,7 @@ const started=Date.now();
 const deadline=await runSkillTest({...base,prompt:'deadline',appendSystemPrompt:${JSON.stringify(literal)},timeout:200,startupGraceMs:200});
 console.log(JSON.stringify({plain:plain.exitReason,literal:literal.exitReason,section:{reads:[...section.readSections],report:section.reportProduced},shell:{reads:[...shell.readSections],report:shell.reportProduced},deadline:{reason:deadline.exitReason,wall:Date.now()-started}}));
 `);
-  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir, EVALS_HERMETIC: '1' };
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, TMPDIR: dir, TMP: dir, TEMP: dir, EVALS_HERMETIC: '1' };
   delete env.CI;
   const child = Bun.spawn([process.execPath, script], { env, cwd: dir, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
   const timer = setTimeout(() => child.kill(), 15_000);
@@ -303,9 +304,9 @@ console.log(JSON.stringify({plain:plain.exitReason,literal:literal.exitReason,se
     expect(added).toBeGreaterThan(-1); expect(args(1)[added + 1]).toBe(literal);
     expect(args(1).filter((_, i) => i !== added && i !== added + 1)).toEqual(args(0));
     const sectionArgs = args(2);
-    const instruction = launches[2].prompt.split('\n').find((line: string) => line.includes('with the Read tool BEFORE'));
+    const instruction = launches[2].prompt.split('\n').find((line: string) => /with the Read tool before/i.test(line));
     expect(sectionArgs).not.toContain('--append-system-prompt');
-    expect(instruction).toContain('you MUST actually Read that sections/ file with the Read tool BEFORE doing the work it covers');
+    expect(instruction).toMatch(/read that sections\/ file with the Read tool before doing the work it covers/i);
     expect(instruction).not.toContain('actual.md'); expect(instruction).not.toContain(dir);
     expect(sectionArgs.slice(sectionArgs.indexOf('--allowed-tools') + 1, sectionArgs.indexOf('--allowed-tools') + 8))
       .toEqual(['Read', 'Grep', 'Glob', 'Write', 'Edit', 'Agent', 'Bash']);
@@ -464,22 +465,58 @@ console.log(JSON.stringify(observed));`);
         expect(request).not.toHaveProperty('appendSystemPrompt');
         const skill=['fixture','ship','office-hours'][Math.floor((i-4)/2)]!;
         const skillPath=path.join(dir,skill,'SKILL.md');
-        const expected=`You are running an automated skill-execution test. No human is present, so AskUserQuestion is unavailable. The ONLY skill file you may read is this absolute path: ${skillPath}. Do NOT Glob/find/search for any other SKILL.md anywhere — especially nothing under ~/.claude or /Users.
-
-Read ${skillPath} and EXECUTE its workflow for this scenario:
-
-Complete the supplied scenario.
-
-Rules for this run:
-- Skip system-audit, environment-setup, telemetry, and unrelated codebase exploration. Read the supplied plan's referenced fixture files when its review requires them.
-- At any decision point that would call AskUserQuestion, silently pick the skill's recommended option and continue. Do NOT stop to ask.
-- This skill's body has been carved into on-demand sections/. When the skill gives a STOP-Read directive (for example "Read \`.../sections/<file>\` and execute it in full"), you MUST actually Read that sections/ file with the Read tool BEFORE doing the work it covers. Do not work from memory.
-- Resolve installed-root paths for section and companion Markdown files under ${dir}, where this fixture's skill package is copied.
-- Do NOT run git, gh, commit, push, or any mutating command.
-- When the workflow is complete, write the skill's final output (the full review report / ship plan, including any required report table) to ${path.join(dir,'REPORT.md')}.
-- After all required writes are complete, return a brief completion message and STOP. Do not reproduce the full report in the final response.`;
-        expect(request.prompt).toBe(expected);
+        // Harness properties, not its wording: the one allowed skill path, the
+        // scenario, AskUserQuestion fallback, section Read rule, no mutation,
+        // and the report destination.
+        expect(request.prompt.match(/\/[^\s]*SKILL\.md/g)?.every((file: string)=>file===skillPath)).toBe(true);
+        expect(request.prompt).toContain(`Read ${skillPath} and EXECUTE its workflow`);
+        expect(request.prompt).toContain('Complete the supplied scenario.');
+        expect(request.prompt).toMatch(/AskUserQuestion is unavailable/i);
+        expect(request.prompt).toMatch(/read that sections\/ file with the Read tool before/i);
+        expect(request.prompt).toMatch(/do not run git, gh, commit, push, or any mutating command/i);
+        expect(request.prompt).toContain(path.join(dir,'REPORT.md'));
       }
     }
   }finally{if(child.exitCode===null)child.kill();await child.exited;fs.rmSync(dir,{recursive:true,force:true});}
 },10000);
+
+// Run 36776104571: the agent printed the whole carved section with Bash sed ranges.
+test('section detection credits a complete Bash print of the section, never a partial one', async () => {
+  const { detectSectionReads } = await import('./helpers/auq-sdk-capture');
+  const file = path.resolve(import.meta.dir, '..', 'plan-ceo-review/sections/review-sections.md');
+  const content = fs.readFileSync(file, 'utf-8'), lines = content.split('\n');
+  const sed = (from: number, to: number, extra = '') => ({ tool: 'Bash',
+    input: { command: `sed -n ${from},${to}p /fixture/plan-ceo-review/sections/review-sections.md${extra}` },
+    output: lines.slice(from - 1, to).join('\n') });
+  const sections = new Map([['review-sections.md', content]]);
+  const ranges = [[1, 330], [330, 660], [660, 1100], [1100, lines.length]].map(([a, b]) => sed(a!, b!));
+  const read = (calls: Array<{ tool: string; input: any; output: string }>) => [...detectSectionReads(calls, sections)];
+  expect(read(ranges)).toEqual(['review-sections.md']);
+  expect(read([{ tool: 'Bash', input: { command: 'cat sections/review-sections.md' }, output: content }])).toEqual(['review-sections.md']);
+  expect(read(ranges.filter((_, i) => i !== 2))).toEqual([]);
+  expect(read([{ ...ranges[0]!, input: { command: 'head -330 PLAN.md' } }, ...ranges.slice(1)])).toEqual([]);
+  expect(read([{ tool: 'Bash', input: { command: 'cat sections/review-sections.md' }, output: '' }])).toEqual([]);
+  expect(read(ranges.map(call => ({ ...call, tool: 'Grep' })))).toEqual([]);
+  expect(read([{ tool: 'Read', input: { file_path: '/fixture/plan-ceo-review/sections/review-sections.md' }, output: '' }])).toEqual(['review-sections.md']);
+});
+
+// Census 37178143007: the agent printed the section in byte ranges that split
+// lines at their edges (head -c, then tail -c +N | head -c, one-byte overlaps).
+test('section detection credits complete byte-range prints and still refuses a gap', async () => {
+  const { detectSectionReads } = await import('./helpers/auq-sdk-capture');
+  const file = path.resolve(import.meta.dir, '..', 'plan-ceo-review/sections/review-sections.md');
+  const content = fs.readFileSync(file, 'utf-8'), bytes = Buffer.from(content);
+  const sections = new Map([['review-sections.md', content]]);
+  const chunk = (command: string, from: number, length?: number) => ({ tool: 'Bash', input: { command },
+    output: bytes.subarray(from, length === undefined ? undefined : from + length).toString('utf8') });
+  const calls = [
+    chunk('wc -c plan-ceo-review/sections/review-sections.md && head -c 16000 plan-ceo-review/sections/review-sections.md', 0, 16000),
+    ...[16000, 33000, 50000].map(start => chunk(`tail -c +${start} plan-ceo-review/sections/review-sections.md | head -c 17000`, start - 1, 17000)),
+    chunk('tail -c +67000 plan-ceo-review/sections/review-sections.md', 66999),
+  ];
+  const read = (list: typeof calls) => [...detectSectionReads(list, sections)];
+  expect(bytes.length).toBeGreaterThan(67000);
+  expect(read(calls)).toEqual(['review-sections.md']);
+  expect(read(calls.filter((_, i) => i !== 2))).toEqual([]);
+  expect(read(calls.slice(0, -1))).toEqual([]);
+});

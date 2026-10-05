@@ -43,6 +43,23 @@ export function scoreAuqFormat(text: string): { present: number; total: number; 
 }
 
 /**
+ * Format problems that fail a first-question matrix run: only the fields
+ * software reads. The question text needs a `Recommendation:` line, and
+ * exactly one option label ends in `(recommended)`, the suffix the AUTO_DECIDE
+ * hook parses from labels (hosts/claude/hooks/question-preference-hook.ts).
+ * The format's `Pros / cons:` block in the question text repeats the marker
+ * by design, so it is not counted. ELI10, Pros / cons, ✅/❌ and Net: are
+ * reported, not failed.
+ */
+export function auqMachineFormatProblems(question: NativePlanQuestion): string[] {
+  const problems: string[] = [];
+  if (!/^[*_]*[ \t]*recommendation[ \t]*[*_]*[ \t]*:[*_ \t]*\S/im.test(question.question)) problems.push('missing Recommendation: line');
+  const recommended = question.options.filter(option => /\(recommended\)\s*$/i.test(option.label)).length;
+  if (recommended !== 1) problems.push(`expected exactly one (recommended) option label, found ${recommended}`);
+  return problems;
+}
+
+/**
  * Grade recommendation substance ROBUST to the connective. judgeRecommendation()
  * keys on the literal "because" (correct for the spec, pinned by
  * llm-judge-recommendation.test.ts), but skills routinely write equally
@@ -53,7 +70,8 @@ export function scoreAuqFormat(text: string): { present: number; total: number; 
  * whether the ORIGINAL used the literal "because" — a soft style signal, since
  * the format spec prefers it and the voice rule forbids the em-dash form.
  *
- * This does NOT touch judgeRecommendation or its pinned fixtures.
+ * This does NOT touch judgeRecommendation or its pinned fixtures. A judge
+ * failure propagates with its cause; it is never reported as substance 0.
  */
 export async function gradeAuqRecommendation(
   text: string,
@@ -75,12 +93,8 @@ export async function gradeAuqRecommendation(
     }
   }
 
-  try {
-    const r = await judgeRecommendation(graded);
-    return { substance: r.reason_substance, present: r.present, hadLiteralBecause, reason: r.reason_text };
-  } catch {
-    return { substance: 0, present: !!recLine, hadLiteralBecause, reason: '' };
-  }
+  const r = await judgeRecommendation(graded);
+  return { substance: r.reason_substance, present: r.present, hadLiteralBecause, reason: r.reason_text };
 }
 
 /**
@@ -212,6 +226,36 @@ export function hasDisabledOutsideReview(output: string): boolean {
   return false;
 }
 
+/**
+ * Sections a capture loaded: a Read of the section file, or a Bash print of it
+ * (cat/sed ranges, as in run 36776104571; byte ranges such as head -c/tail -c,
+ * as in census 37178143007) whose outputs together contain every line of the
+ * section as it stood before the run. Byte ranges split lines at their edges,
+ * so consecutive outputs are also joined on their overlap. A command without
+ * that printed content, such as head or grep, is not a read.
+ */
+export function detectSectionReads(toolCalls: SkillTestResult['toolCalls'], sections: Map<string, string>): Set<string> {
+  const readSections = new Set<string>();
+  for (const c of toolCalls) {
+    if (c.tool !== 'Read') continue;
+    const fp = String(c.input?.file_path ?? '');
+    const m = fp.match(/(?:^|[\\/])sections[\\/]([A-Za-z0-9._-]+\.md)(?=$|[?#])/);
+    if (m) readSections.add(m[1]);
+  }
+  for (const [name, content] of sections) {
+    const lines = content.split('\n').map(line => line.trimEnd()).filter(Boolean);
+    const outputs = toolCalls.filter(c => c.tool === 'Bash' && String(c.input?.command ?? '').includes(`sections/${name}`)).map(c => c.output);
+    const printed = new Set(outputs.flatMap(output => output.split('\n').map(line => line.trimEnd())));
+    const joined = outputs.reduce((text, next) => {
+      let overlap = Math.min(text.length, next.length, 256);
+      while (overlap > 0 && !text.endsWith(next.slice(0, overlap))) overlap--;
+      return text + next.slice(overlap);
+    }, '');
+    if (lines.length && lines.every(line => printed.has(line) || joined.includes(line))) readSections.add(name);
+  }
+  return readSections;
+}
+
 export async function captureSectionReads(opts: {
   planDir: string;
   skillName: string;
@@ -233,7 +277,7 @@ export async function captureSectionReads(opts: {
   nativeReviewOnly?: boolean;
 }): Promise<{ readSections: Set<string>; reportProduced: boolean; reportWritten: boolean;
   exitReason: SkillTestResult['exitReason']; toolCalls: SkillTestResult['toolCalls'];
-  transcript: SkillTestResult['transcript']; output: string }> {
+  transcript: SkillTestResult['transcript']; output: string; result: SkillTestResult }> {
   const outFile = path.join(opts.planDir, opts.reportFile ?? 'REPORT.md');
   const timeout = opts.timeout ?? 300_000;
   const fullPlanReview = opts.skillName === 'plan-ceo-review' || opts.skillName === 'plan-eng-review';
@@ -269,6 +313,9 @@ export async function captureSectionReads(opts: {
   };
   const beforeReport = readReport();
   const skillPath = path.join(opts.planDir, opts.skillName, 'SKILL.md');
+  const sectionsDir = path.join(opts.planDir, opts.skillName, 'sections');
+  const sections = new Map(fs.existsSync(sectionsDir) ? fs.readdirSync(sectionsDir)
+    .filter(name => name.endsWith('.md')).map(name => [name, fs.readFileSync(path.join(sectionsDir, name), 'utf-8')]) : []);
   // Outside-review dispatch has separate behavioral coverage. Native-only
   // captures use the real supported control in state owned by this call;
   // never mutate the operator's or another capture's gstack configuration.
@@ -323,13 +370,7 @@ ${fullPlanReview ? `- Save the evolving plan and review outputs to ${outFile} wi
     if (stateDir) fs.rmSync(stateDir, { recursive: true, force: true });
   }
 
-  const readSections = new Set<string>();
-  for (const c of result.toolCalls) {
-    if (c.tool !== 'Read') continue;
-    const fp = String(c.input?.file_path ?? '');
-    const m = fp.match(/(?:^|[\\/])sections[\\/]([A-Za-z0-9._-]+\.md)(?=$|[?#])/);
-    if (m) readSections.add(m[1]);
-  }
+  const readSections = detectSectionReads(result.toolCalls, sections);
 
   const afterReport = readReport();
   const reportWritten = afterReport !== undefined
@@ -341,7 +382,7 @@ ${fullPlanReview ? `- Save the evolving plan and review outputs to ${outFile} wi
 
   // Keep successful terminal-output captures, but a draft left by a failed run
   // must never satisfy callers that use reportProduced as their completion gate.
-  return { readSections, reportProduced, reportWritten, exitReason: result.exitReason, toolCalls: result.toolCalls, transcript: result.transcript, output };
+  return { readSections, reportProduced, reportWritten, exitReason: result.exitReason, toolCalls: result.toolCalls, transcript: result.transcript, output, result };
 }
 
 /** A completed CEO review needs its artifact and every summary outcome. */

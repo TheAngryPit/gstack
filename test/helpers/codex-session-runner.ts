@@ -133,6 +133,7 @@ export function installSkillToTempHome(
   skillName: string,
   tempHome?: string,
   sections?: string[],
+  runtimeRoot?: string,
 ): string {
   const home = tempHome || fs.mkdtempSync(path.join(os.tmpdir(), 'codex-e2e-'));
   const destDir = path.join(home, '.codex', 'skills', skillName);
@@ -148,6 +149,11 @@ export function installSkillToTempHome(
     // Preserve copyFileSync's filesystem diagnostic; an agent can mention a
     // nonexistent skill in its response and otherwise pass discovery checks.
     fs.copyFileSync(srcSkill, path.join(destDir, 'SKILL.md'));
+  }
+  if (runtimeRoot) {
+    // The temp HOME has no installed gstack runtime; point runtime helpers at the one under test.
+    const installed = path.join(destDir, 'SKILL.md');
+    fs.writeFileSync(installed, fs.readFileSync(installed, 'utf8').replaceAll('~/.codex/skills/gstack', runtimeRoot));
   }
 
   const srcOpenAIYaml = path.join(skillDir, 'agents', 'openai.yaml');
@@ -180,6 +186,7 @@ export async function runCodexSkill(opts: {
   configOverrides?: string[]; // TOML key=value overrides (passed with -c)
   ignoreUserConfig?: boolean; // Add --ignore-user-config; auth still comes from CODEX_HOME
   signal?: AbortSignal;     // Abort the process group when an enclosing eval expires
+  runtimeRoot?: string;     // gstack runtime that ~/.codex/skills/gstack helper paths resolve to
 }): Promise<CodexResult> {
   const {
     skillDir,
@@ -193,6 +200,7 @@ export async function runCodexSkill(opts: {
     configOverrides = [],
     ignoreUserConfig = false,
     signal,
+    runtimeRoot,
   } = opts;
 
   const startTime = Date.now();
@@ -223,7 +231,7 @@ export async function runCodexSkill(opts: {
   const realHome = os.homedir();
 
   try {
-    installSkillToTempHome(skillDir, name, tempHome, sections);
+    installSkillToTempHome(skillDir, name, tempHome, sections, runtimeRoot);
 
     // Copy authentication only. Copying the whole operator ~/.codex tree leaks
     // plugins, MCP servers, rules, memories, and skills into a supposedly
@@ -262,12 +270,17 @@ export async function runCodexSkill(opts: {
     // itself; command subprocesses codex spawned survived as orphans holding
     // our pipes open (the same blocked-drain hang the claude runner fixed —
     // this copy never inherited that fix until now).
+    // Codex refuses to create its PATH aliases (codex-linux-sandbox among
+    // them) when CODEX_HOME sits under its temp dir, so the child gets a temp
+    // dir beside CODEX_HOME instead of the shard TMPDIR that holds tempHome.
+    const tempTmpDir = path.join(tempHome, 'tmp');
+    fs.mkdirSync(tempTmpDir, { recursive: true });
     const proc = spawn('codex', args, {
       cwd: cwd || skillDir,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
       env: hermeticChildEnv(
-        { HOME: tempHome, CODEX_HOME: tempCodexDir },
+        { HOME: tempHome, CODEX_HOME: tempCodexDir, TMPDIR: tempTmpDir },
         { extraAllow: ['OPENAI_API_KEY', 'CODEX_*'] },
       ),
     });

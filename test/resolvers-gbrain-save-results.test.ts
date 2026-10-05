@@ -22,12 +22,12 @@ import {
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import type { TemplateContext } from '../scripts/resolvers/types';
 
-function buildCtx(skillName: string): TemplateContext {
+function buildCtx(skillName: string, host: 'claude' | 'codex' = 'claude'): TemplateContext {
   return {
     skillName,
     tmplPath: `/tmp/${skillName}/SKILL.md.tmpl`,
-    host: 'claude',
-    paths: HOST_PATHS.claude,
+    host,
+    paths: HOST_PATHS[host],
   };
 }
 
@@ -64,6 +64,7 @@ describe('generateGBrainSaveResults — wiring + compression pin', () => {
 
       // Compact: points to docs/gbrain-write-surfaces.md for full template.
       expect(out).toContain('docs/gbrain-write-surfaces.md');
+      expect(out).toContain('Read the saved page back before claiming persistence.');
     },
   );
 
@@ -113,7 +114,8 @@ describe('generateGBrainContextLoad — compression pin', () => {
     expect(out).toContain('Skip this entire section if `gbrain` is not on PATH');
     expect(out).toContain('docs/gbrain-write-surfaces.md');
     expect(out).toContain('gbrain search');
-    expect(out).toContain('gbrain get_page');
+    expect(out).toContain('gbrain get "<slug>"');
+    expect(out).not.toContain('gbrain get_page');
     if (out.length > 500) {
       throw new Error(
         `generateGBrainContextLoad emitted ${out.length} chars (~${Math.round(out.length / 4)} tokens), ` +
@@ -133,5 +135,19 @@ describe('generateGBrainContextLoad — compression pin', () => {
       const out = generateGBrainContextLoad(buildCtx(skill));
       expect(out).not.toContain('data-research');
     }
+  });
+});
+
+describe('generateGBrainSaveResults — native Codex writeback contract', () => {
+  test('uses the guarded caller and requires source-bound readback after put', () => {
+    const out = generateGBrainSaveResults(buildCtx('plan-ceo-review', 'codex'));
+
+    expect(out).toContain('gstack-gbrain-codex" --authorized-write --request-stdin');
+    expect(out).toContain('{"op":"put","slug":"ceo-plans/<feature-slug>"');
+    expect(out).toContain('{"op":"get","slug":"<same slug>"}');
+    expect(out).toContain('allocate a fresh read request');
+    expect(out).toContain('source-bound readback');
+    expect(out).not.toContain('gbrain put');
+    expect(out).not.toContain('call get_page');
   });
 });

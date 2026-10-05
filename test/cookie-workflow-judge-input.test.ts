@@ -11,7 +11,7 @@ import { selectTests } from './helpers/test-selection';
 import { E2E_TOUCHFILES, LLM_JUDGE_TOUCHFILES } from './helpers/touchfiles-data';
 import { selectPrProfile } from '../scripts/test-pr-profile';
 import { JUDGE_MS } from './helpers/eval-budgets';
-import { JudgeRefusalError, DEFAULT_JUDGE_MAX_TOKENS } from './helpers/llm-judge';
+import { JudgeRefusalError, DEFAULT_JUDGE_MAX_TOKENS, judgePanel, judgePanelMean, judgePanelReasoning, JUDGE_SCORE_DIMENSIONS, JUDGE_PANEL_SAMPLES } from './helpers/llm-judge';
 import { COOKIE_MANUAL_REVIEW_FILE, getCookieWorkflowManualReview, isManualReviewEntry } from './helpers/cookie-workflow-manual-review';
 
 const ROOT = resolve(import.meta.dir, '..');
@@ -70,7 +70,7 @@ function actualCookieCallback(root: string, overrides: {
   const records: EvalTestEntry[] = [];
   const attempts = new Map<string, { attempt: number }>();
   let callback: () => Promise<void> = async () => { throw new Error('Judge callback was not registered'); };
-  new Function('describeIfSelected', 'testIfSelected', 'ROOT', 'buildCookieWorkflowJudgeInput', 'resolveEvalModel', 'callJudge', 'COOKIE_WORKFLOW_JUDGE', 'JUDGE_MS', 'WORKFLOW_JUDGE_TEST_MS', 'WORKFLOW_JUDGE_RECORD_MS', 'evalCollector', 'expect', 'console', 'readWorkflowJudgeInput', 'buildWorkflowJudgePrompt', 'prepareWorkflowJudgeCache', 'workflowJudgeAttempts', 'performance', 'setTimeout', 'clearTimeout', 'JudgeRefusalError', 'getCookieWorkflowManualReview', 'DEFAULT_JUDGE_MAX_TOKENS', 'WORKFLOW_JUDGE_RESPONSE_SCHEMA', 'validWorkflowJudgeScore', registration)(
+  new Function('describeIfSelected', 'testIfSelected', 'ROOT', 'buildCookieWorkflowJudgeInput', 'resolveEvalModel', 'callJudge', 'COOKIE_WORKFLOW_JUDGE', 'JUDGE_MS', 'WORKFLOW_JUDGE_TEST_MS', 'WORKFLOW_JUDGE_RECORD_MS', 'evalCollector', 'expect', 'console', 'readWorkflowJudgeInput', 'buildWorkflowJudgePrompt', 'prepareWorkflowJudgeCache', 'workflowJudgeAttempts', 'performance', 'setTimeout', 'clearTimeout', 'JudgeRefusalError', 'getCookieWorkflowManualReview', 'DEFAULT_JUDGE_MAX_TOKENS', 'WORKFLOW_JUDGE_RESPONSE_SCHEMA', 'validWorkflowJudgeScore', 'judgePanel', 'judgePanelMean', 'judgePanelReasoning', 'JUDGE_SCORE_DIMENSIONS', registration)(
     (_suite: string, names: string[], run: () => void) => { expect(names).toEqual([NAME]); run(); },
     (name: string, run: () => Promise<void>, budget: number) => { expect(name).toBe(NAME); expect(budget).toBe(JUDGE_MS + 10_000); callback = run; },
     root, buildCookieWorkflowJudgeInput, (_kind: string, explicit?: string) => explicit ?? 'fixture-model',
@@ -85,7 +85,7 @@ function actualCookieCallback(root: string, overrides: {
     attempts, overrides.clock ? { now: overrides.clock } : performance,
     overrides.setTimer ?? setTimeout, overrides.clearTimer ?? clearTimeout,
     JudgeRefusalError, getCookieWorkflowManualReview, DEFAULT_JUDGE_MAX_TOKENS,
-    WORKFLOW_JUDGE_RESPONSE_SCHEMA, validWorkflowJudgeScore,
+    WORKFLOW_JUDGE_RESPONSE_SCHEMA, validWorkflowJudgeScore, judgePanel, judgePanelMean, judgePanelReasoning, JUDGE_SCORE_DIMENSIONS,
   );
   return { run: () => callback(), requests, records, attempts };
 }
@@ -96,7 +96,7 @@ describe('cookie workflow judge input', () => {
     approveFixture(root);
     const h = actualCookieCallback(root, { judge: async () => { throw refusal(); } });
     await h.run();
-    expect(h.requests).toHaveLength(1);
+    expect(h.requests).toHaveLength(JUDGE_PANEL_SAMPLES);
     expect(h.records).toHaveLength(1);
     expect(h.records[0]).toMatchObject({ passed: false, execution: 'executed', exit_reason: 'provider_refusal' });
     expect(isManualReviewEntry(h.records[0])).toBe(true);
@@ -161,7 +161,7 @@ describe('cookie workflow judge input', () => {
     const root = fixture(); approveFixture(root);
     let calls = 0;
     const h = actualCookieCallback(root, { judge: async () => {
-      if (++calls === 1) return { ...passingScore, clarity: 1 };
+      if (++calls <= JUDGE_PANEL_SAMPLES) return { ...passingScore, clarity: 1 };
       throw refusal();
     } });
     await expect(h.run()).rejects.toThrow();
@@ -275,7 +275,7 @@ describe('cookie workflow judge input', () => {
     let scores = passingScore;
     const h = actualCookieCallback(root, { judge: async () => scores });
     await h.run();
-    expect(h.requests).toHaveLength(1);
+    expect(h.requests).toHaveLength(JUDGE_PANEL_SAMPLES);
     expect(h.requests[0].prompt).toBe(input.prompt);
     expect(h.requests[0].model).toBe(COOKIE_WORKFLOW_JUDGE.model);
     expect(h.requests[0].signal).toBeInstanceOf(AbortSignal);
@@ -283,7 +283,7 @@ describe('cookie workflow judge input', () => {
     expect(existsSync(join(root, 'cache'))).toBe(false);
     const fresh = actualCookieCallback(root);
     await fresh.run();
-    expect(fresh.requests).toHaveLength(1);
+    expect(fresh.requests).toHaveLength(JUDGE_PANEL_SAMPLES);
     for (const dimension of ['clarity', 'completeness', 'actionability'] as const) {
       scores = { ...COOKIE_WORKFLOW_JUDGE.thresholds, [dimension]: COOKIE_WORKFLOW_JUDGE.thresholds[dimension] - 1, reasoning: 'Synthetic failing fixture score' };
       await expect(h.run()).rejects.toThrow();

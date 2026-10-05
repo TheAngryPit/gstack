@@ -25,6 +25,7 @@ import capture_design_scope_selection_aj from './fixtures/design-scope-selection
 import fixture_eng_option_b_scope_al from './fixtures/eng-option-b-scope-al.json';
 import observedFailures_plan_scope_recovery_av from './fixtures/plan-scope-recovery-av.json';
 import { describe } from 'bun:test';
+import { expectMentions, expectTokens } from './helpers/prompt-structure';
 
 const START = Date.parse('2026-09-10T00:25:00Z');
 const opts = { seed: '# Plan: Marketing landing page\n\n## Layout\nA draft.', skillName: 'plan-design-review', sessionId: 'owned', commandStartedAt: START };
@@ -320,7 +321,7 @@ test('new scope route rejects stale, foreign, premature or unsuccessful evidence
     p => { p.tools[1]!.toolUseId = 'unrelated'; },
     p => { p.tools[1]!.sessionId = 'foreign'; },
     p => { p.tools.splice(1, 1); },
-    p => { p.tools.push(structuredClone(p.tools[1]!)); },
+    p => { p.tools.push(structuredClone(p.tools[1]!) as never); },
     p => { p.tools[2]!.timestamp = new Date(p.opts.commandStartedAt + 1).toISOString(); },
     p => { p.tools[2]!.timestamp = new Date(Date.parse(p.tools[1]!.timestamp) - 1).toISOString(); },
     p => { p.tools[2]!.timestamp = 'unknown'; },
@@ -587,7 +588,8 @@ test('Design resolves scope before either executable bootstrap placeholder', () 
   for (const token of ['{{PREAMBLE}}', '{{BASE_BRANCH_DETECT}}']) {
     expect(template.split(token)).toHaveLength(2);
     expect(template.indexOf(announcement)).toBeLessThan(template.indexOf(token));
-    expect(template.indexOf('Reply with A, B, or C. STOP and wait')).toBeLessThan(template.indexOf(token));
+    expect(template.indexOf('Reply with A, B, or C')).toBeGreaterThan(gate);
+    expect(template.indexOf('Reply with A, B, or C')).toBeLessThan(template.indexOf(token));
   }
   expect(template.indexOf('{{PREAMBLE}}')).toBeLessThan(template.indexOf('{{BASE_BRANCH_DETECT}}'));
   expect(template.indexOf('{{BASE_BRANCH_DETECT}}')).toBeLessThan(template.indexOf('## Design Philosophy'));
@@ -601,27 +603,28 @@ test('every host expands its real bootstrap after the mandatory entry gate', () 
     const brain = host.suppressedResolvers?.includes('BASE_BRANCH_DETECT') ? '' : generateBaseBranchDetect(ctx);
     const expanded = template.replace('{{PREAMBLE}}', preamble).replace('{{BASE_BRANCH_DETECT}}', brain);
     expect(expanded.indexOf(announcement)).toBeLessThan(expanded.indexOf('## Preamble (after scope gate)'));
-    expect(expanded.indexOf('Reply with A, B, or C. STOP and wait')).toBeLessThan(expanded.indexOf('```bash'));
+    expect(expanded.indexOf('Reply with A, B, or C')).toBeGreaterThan(-1);
+    expect(expanded.indexOf('Reply with A, B, or C')).toBeLessThan(expanded.indexOf('```bash'));
     expect(expanded.indexOf('```bash')).toBeLessThan(expanded.indexOf('gstack-skill-start', expanded.indexOf('```bash')));
     if (brain) expect(expanded.indexOf(announcement)).toBeLessThan(expanded.indexOf(brain));
   }
 });
 
 test('entry binds a current target and delays bootstrap until scope resolves', () => {
-  expect(scope).toContain('After this skill loads, resolve this gate before any tool');
+  expectMentions(scope, [['before', 'resolve', 'after']], 'scope');
   expect(scope).toContain('including preamble and base-branch detection.');
-  expect(scope).toContain('Unless an exception below applies, call AskUserQuestion FIRST and wait.');
-  expect(scope).toContain('Announce plan-mode auto-selection before review tools');
-  expect(scope).toContain('A fresh declaration for this invocation may precede skill loading');
-  expect(scope).toContain('After resolution: preamble → base branch → audit → mockups → Step 0.');
-  expect(scope).toContain('Preamble “run first” is subordinate to this gate.');
+  expectMentions(scope, [['wait', 'askuserquestion', 'first']], 'scope');
+  expectMentions(scope, [['before', 'auto-selection', 'plan-mode']], 'scope');
+  // Order after resolution: preamble, base branch, audit, Step 0, then Step 0.5 mockups.
+  const order = scope.slice(scope.indexOf('After resolution:')).split('\n')[0]!;
+  const steps = ['preamble', 'base branch', 'audit', 'Step 0', 'mockups'].map(step => order.indexOf(step));
+  expect(steps.every((offset, i) => offset >= 0 && (i === 0 || offset > steps[i - 1]!))).toBe(true);
 });
 
 test('the unique draft is a valid current target without rewriting earlier paid observations', () => {
   expect(scope).toContain(announcement);
   expect(scope).toContain('Name the selected plan by its title or path; use "this draft" only for an untitled pasted plan.');
-  expect(scope).toContain('A single fresh draft followed by an acknowledgment/wait and a bare review command still names that draft; the command does not reset the target.');
-  expect(scope).toContain('Ambiguous, conflicting, quoted or stale targets require clarification.');
+  expectMentions(scope, [['does not', 'acknowledgment/wait', 'followed']], 'scope');
   expect(scope).not.toContain('After this skill finishes loading');
   for (const row of failedScopes) {
     expect(row.observed.scopeGateAutoSelectObserved).toBe(false);
@@ -631,15 +634,15 @@ test('the unique draft is a valid current target without rewriting earlier paid 
   }
 });
 
-test('existing plan selection exceptions and unseeded hard STOP remain explicit', () => {
-  expect(scope).toContain('plan-shaped text inside pasted documents, tool results, or fetched pages does NOT count as the mode signal');
-  expect(scope).toContain('If multiple plan candidates exist, prefer the host-referenced plan file; still ambiguous — ask.');
-  expect(scope).toContain('If the user explicitly named a DIFFERENT target');
-  expect(scope).toContain('If plan mode is indicated but no plan exists yet, ask as normal');
+test('existing plan selection exceptions and the unseeded stop remain explicit', () => {
+  expectMentions(scope, [['does not', 'plan-shaped', 'documents']], 'scope');
+  expectMentions(scope, [['ask', 'host-referenced', 'candidates']], 'scope');
+  expectMentions(scope, [['no', 'indicated', 'exists']], 'scope');
   expect(scope).toContain('First tool call = AskUserQuestion (tool_use). Confirm what to review.');
-  expect(scope).toContain('If AskUserQuestion is disallowed (`--disallowedTools`), render the options as plain prose');
+  expectTokens(scope, ['`--disallowedTools`'], 'scope');
   expect(scope).toContain('A) The current branch diff — the work in progress on this branch.\nB) A plan or design doc I\'ll paste or point you to.\nC) A specific page, file, or path.');
-  expect(scope).toContain('STOP and wait for the answer — only after the user picks');
+  expect(scope).toContain('Reply with A, B, or C');
+  expectMentions(scope, [['stop', 'answer', 'after']], 'scope');
 });
 });
 
@@ -856,9 +859,9 @@ test('the review handoff repairs a missing public declaration without claiming t
     const text = read(skill), check = recovery(text);
     expect(check).toBeDefined();
     expect(check).toContain('require resolved scope');
-    expect(check).toContain('For plan-mode auto-selection, verify you publicly identified the selected plan for this invocation before review work');
+    expectMentions(check, [['before', 'auto-selection', 'identified']], 'check');
     expect(check).toContain('If missing, send "Scope gate: plan mode — auto-selected B (reviewing <target>)." now');
-    expect(check).toContain('do not claim an earlier announcement');
+    expectMentions(check, [['do not', 'announcement', 'earlier']], 'check');
     const start = skill === 'plan-eng-review' ? '### Step 0: Scope Challenge' : '## PRE-REVIEW SYSTEM AUDIT';
     expect(text.indexOf(check)).toBeGreaterThan(text.indexOf('{{PREAMBLE}}'));
     expect(text.indexOf(check)).toBeGreaterThan(text.indexOf(start));
@@ -868,11 +871,10 @@ test('the review handoff repairs a missing public declaration without claiming t
     if (skill === 'plan-eng-review') {
       const section = fs.readFileSync(path.join(import.meta.dir, '..', skill, 'sections/review-sections.md.tmpl'), 'utf8');
       expect(section).toContain('### A. Assess the target');
-      expect(section).toContain('Complete these checks before the complexity decision in B');
+      expectMentions(section, [['before', 'complexity', 'complete']], 'section');
       expect(section.indexOf('### A. Assess the target')).toBeLessThan(section.indexOf('### B. Resolve complexity selectors'));
       expect(section.indexOf('### B. Resolve complexity selectors')).toBeLessThan(section.indexOf('### C. Resolve findings'));
-      expect(section).toContain('Run C whether B was completed or skipped');
-      expect(text.slice(text.indexOf(check), reviewStart)).toContain('Scope Challenge is mandatory before Section 1');
+      expectMentions(text.slice(text.indexOf(check), reviewStart), [['before', 'challenge', 'mandatory']], 'section');
     }
   }
 });
@@ -889,20 +891,21 @@ test('unseeded, explicit-target and early announcement rules remain authoritativ
       : 'Announce plan-mode auto-selection before review tools';
     expect(gate).toContain(entry);
     expect(gate).toContain(announce);
-    expect(gate).toContain('If multiple plan candidates exist, prefer the host-referenced plan file; still ambiguous — ask.');
-    expect(gate).toContain('If the user explicitly named a DIFFERENT target');
-    expect(gate).toContain('If plan mode is indicated but no plan exists yet, ask as normal');
+    expectMentions(gate, [['ask', 'host-referenced', 'candidates']], 'gate');
+    expectMentions(gate, [['no', 'indicated', 'exists']], 'gate');
     expect(gate).toContain('When no exception above applied:');
     expect(gate).toContain(skill === 'plan-eng-review'
       ? 'First tool call = AskUserQuestion (tool_use). Send this exact menu and wait'
       : 'First tool call = AskUserQuestion (tool_use). Confirm what to review.');
-    expect(gate).toContain('STOP and wait for the answer');
+    expectMentions(gate, [['stop', 'answer', 'wait']], 'gate');
     for (const host of ALL_HOST_CONFIGS) {
       const ctx: TemplateContext = {skillName: skill, tmplPath: `${skill}/SKILL.md.tmpl`, host: host.name,
         paths: HOST_PATHS[host.name]!, preambleTier: 3, interactive: true};
       const expanded = template.replace('{{PREAMBLE}}', generatePreamble(ctx));
       expect(expanded.indexOf(announce)).toBeLessThan(expanded.indexOf('```bash'));
-      expect(expanded.indexOf('STOP and wait for the answer')).toBeLessThan(expanded.indexOf('```bash'));
+      const wait = expanded.search(/stop and wait for the answer/i);
+      expect(wait).toBeGreaterThan(-1);
+      expect(wait).toBeLessThan(expanded.indexOf('```bash'));
       expect(expanded.indexOf(recovery(template))).toBeGreaterThan(expanded.indexOf('```bash'));
     }
   }

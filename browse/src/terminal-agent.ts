@@ -29,6 +29,7 @@ import { safeUnlink } from './error-handling';
 import { writeAgentRecord, readAgentRecord, clearAgentRecord, readAgentStartTime, acquireAgentStateLock } from './terminal-agent-control';
 import { findAvailablePort } from './port-allocator';
 import { extractPtyCookie } from './pty-session-cookie';
+import { allowedExtensionOrigin } from './extension-id';
 import {
   createPtyLifecycle, disposePtyProcess, ptyCompletionReason,
   type PtyCompletion, type PtyLifecycle,
@@ -43,7 +44,6 @@ const OWNER_WATCHDOG_MS = parseInt(
   process.env.GSTACK_TERMINAL_OWNER_WATCHDOG_MS || '15000',
   10,
 );
-const EXTENSION_ID = process.env.BROWSE_EXTENSION_ID || ''; // optional: tighten Origin check
 const INTERNAL_TOKEN = crypto.randomBytes(32).toString('base64url'); // shared with parent server via env at spawn
 /**
  * Per-boot generation identifier. Loopback /internal/* callers include
@@ -301,11 +301,12 @@ function buildTabAwarenessHint(stateDir: string): string {
     'You are running inside the gstack browser sidebar with live access to the user\'s browser tabs.',
     '',
     'Tab state files (kept fresh automatically by the extension):',
-    `  ${tabsFile}        — all open tabs (id, url, title, active, pinned)`,
-    `  ${activeFile}    — the currently active tab`,
-    'Read these any time the user asks about "tabs", "the current page", or anything multi-tab. Do NOT shell out to $B tabs just to learn what\'s open — read the file.',
+    `  ${tabsFile}        — all open tabs: tabs[] of {tabId, url, title, active, pinned, windowId}`,
+    `  ${activeFile}    — the currently active tab: {tabId, url, title}`,
+    'Read these any time the user asks about "tabs", "the current page", or anything multi-tab. They\'re kept current, so read them instead of running $B tabs when you only need to know what\'s open.',
     '',
     'Tab manipulation commands (via $B):',
+    '  ($B is the gstack browse CLI. This shell does not set it, so resolve it the way the /browse skill does: the project\'s .claude/skills/gstack/browse/dist/browse if present, else ~/.claude/skills/gstack/browse/dist/browse.)',
     '  $B tab <id>                 — switch to a tab',
     '  $B newtab [url]             — open a new tab',
     '  $B closetab [id]            — close a tab (current if no id)',
@@ -516,8 +517,13 @@ function maybeSpawnPty(ws: any, session: PtySession): boolean {
   return true;
 }
 
+interface TerminalAgentWsData {
+  cookie: string;
+  sessionId: string | null;
+}
+
 function buildServer(port: number) {
-  return Bun.serve({
+  return Bun.serve<TerminalAgentWsData>({
     hostname: '127.0.0.1',
     // #2314: allocated from the SAME fixed 10000-60000 scan range the main
     // server uses (port-allocator.ts, decision 8) — never `port: 0`. Binding
@@ -614,8 +620,8 @@ function buildServer(port: number) {
       }
 
       // /ws — WebSocket upgrade. CRITICAL gates:
-      //   (1) Origin must be chrome-extension://<id>. Cross-site WS hijacking
-      //       defense — required, not optional.
+      //   (1) Origin must be exactly the pinned (or gstack-config configured)
+      //       extension. Any other origin, other extensions included, is 403.
       //   (2) Token must be in validTokens. We accept the token via two
       //       transports for compatibility:
       //         - Sec-WebSocket-Protocol (preferred for browsers — the only
@@ -628,12 +634,7 @@ function buildServer(port: number) {
       //       validTokens Set, populated by the parent server's
       //       authenticated /pty-session → /internal/grant chain.
       if (url.pathname === '/ws') {
-        const origin = req.headers.get('origin') || '';
-        const isExtensionOrigin = origin.startsWith('chrome-extension://');
-        if (!isExtensionOrigin) {
-          return new Response('forbidden origin', { status: 403 });
-        }
-        if (EXTENSION_ID && origin !== `chrome-extension://${EXTENSION_ID}`) {
+        if (req.headers.get('origin') !== allowedExtensionOrigin()) {
           return new Response('forbidden origin', { status: 403 });
         }
 
@@ -695,8 +696,8 @@ function buildServer(port: number) {
        * after `spawned: true` is a no-op.
        */
       open(ws) {
-        const sessionId = (ws.data as any)?.sessionId ?? null;
-        const cookie = (ws.data as any)?.cookie || '';
+        const sessionId = ws.data?.sessionId ?? null;
+        const cookie = ws.data?.cookie || '';
 
         // Commit 3 re-attach: if this sessionId already has a detached
         // PtySession in sessionsById, REPLACE its liveWs ref and replay
@@ -770,9 +771,9 @@ function buildServer(port: number) {
             proc: null,
             cols: 80,
             rows: 24,
-            cookie: (ws.data as any)?.cookie || '',
+            cookie: ws.data?.cookie || '',
             liveWs: ws,
-            sessionId: (ws.data as any)?.sessionId ?? null,
+            sessionId: ws.data?.sessionId ?? null,
             spawned: false,
             pingInterval: null,
             ringBuffer: [],
@@ -850,7 +851,7 @@ function buildServer(port: number) {
         // Always drop the WS-keyed map entry and the per-attach
         // attachToken — the attach grant was single-use.
         sessions.delete(ws);
-        const cookie = (ws.data as any)?.cookie;
+        const cookie = ws.data?.cookie;
         if (cookie) validTokens.delete(cookie);
         // A reattach can replace liveWs before the old socket's close arrives.
         // That stale callback must not retire the new socket, grant or child.

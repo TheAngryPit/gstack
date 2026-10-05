@@ -15,6 +15,8 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { ROUTES } from '../src/routes';
+import { makeServer } from './route-test-harness';
 
 const HTML = fs.readFileSync(path.join(import.meta.dir, '../../extension/sidepanel.html'), 'utf-8');
 const JS = fs.readFileSync(path.join(import.meta.dir, '../../extension/sidepanel.js'), 'utf-8');
@@ -174,13 +176,22 @@ describe('sidepanel-terminal.js: eager auto-connect + injection API', () => {
 describe('server.ts: chat / sidebar-agent endpoints are gone', () => {
   const SERVER_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/server.ts'), 'utf-8');
 
-  test('No /sidebar-command, /sidebar-chat, /sidebar-agent/* routes', () => {
-    expect(SERVER_SRC).not.toMatch(/url\.pathname === ['"]\/sidebar-command['"]/);
-    expect(SERVER_SRC).not.toMatch(/url\.pathname === ['"]\/sidebar-chat['"]/);
-    expect(SERVER_SRC).not.toMatch(/url\.pathname\.startsWith\(['"]\/sidebar-agent\//);
-    expect(SERVER_SRC).not.toMatch(/url\.pathname === ['"]\/sidebar-agent\/event['"]/);
-    expect(SERVER_SRC).not.toMatch(/url\.pathname === ['"]\/sidebar-tabs['"]/);
-    expect(SERVER_SRC).not.toMatch(/url\.pathname === ['"]\/sidebar-session['"]/);
+  test('No /sidebar-command, /sidebar-chat, /sidebar-agent/* routes', async () => {
+    // Routes are dispatched only through the route table, so absence from
+    // the table plus the unmatched 404 with the root token is the contract.
+    const gone = ['/sidebar-command', '/sidebar-chat', '/sidebar-agent/event', '/sidebar-agent/x', '/sidebar-tabs', '/sidebar-session'];
+    for (const p of gone) {
+      expect(ROUTES.some(r => r.prefix ? p.startsWith(r.path) : r.path === p), p).toBe(false);
+    }
+    const server = makeServer();
+    try {
+      for (const p of gone) {
+        for (const method of ['GET', 'POST']) {
+          const resp = await server.local(p, { method, headers: { Authorization: `Bearer ${server.rootToken}` } });
+          expect([p, method, resp.status, await resp.text()]).toEqual([p, method, 404, 'Not found']);
+        }
+      }
+    } finally { server.cleanup(); }
   });
 
   test('No chat-related state declarations or helpers', () => {
@@ -222,7 +233,7 @@ describe('cli.ts: sidebar-agent is no longer spawned', () => {
       'utf-8',
     );
     expect(CONTROL_SRC).toContain('terminal-agent.ts');
-    expect(CONTROL_SRC).toMatch(/\.spawn\(\['bun',\s*'run',\s*script,\s*`--agent-gen=\$\{gen\}`\]/);
+    expect(CONTROL_SRC).toMatch(/\.spawn\(\['bun',\s*'run',\s*\.\.\.BUN_CHILD_FLAGS,\s*script,\s*`--agent-gen=\$\{gen\}`\]/);
     expect(CONTROL_SRC).toContain('BROWSE_OWNER_PID: String(opts.ownerPid)');
   });
 });

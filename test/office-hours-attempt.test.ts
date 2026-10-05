@@ -176,6 +176,7 @@ describe('Office Hours deadlines', () => {
       const started = Date.now();
       const { records } = await runFixture({
         budgetMs: 5,
+        recordGraceMs: 200,
         run: async abortSignal => {
           signal = abortSignal;
           if (stage === 'runner') await pending;
@@ -183,6 +184,7 @@ describe('Office Hours deadlines', () => {
         },
         validate: async () => { validations++; await pending; },
       });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(200);
       expect(Date.now() - started).toBeLessThan(OFFICE_HOURS_BUN_GRACE_MS);
       expect(signal?.aborted).toBe(true);
       expect(records).toHaveLength(1);
@@ -422,6 +424,7 @@ await import(join(root, 'test/skill-e2e-office-hours-brain-writeback.test.ts'));
         EVALS: mode === 'disabled' ? '' : '1', EVALS_ALL: '', EVALS_TIER: 'periodic',
         EVALS_SELECTION_JSON: JSON.stringify({ selected: mode === 'unselected' ? [] : null, reason: 'free fixture' }),
         EVALS_PREFLIGHT_OK: '1', GSTACK_EVAL_DIR: evalDir, GSTACK_CLAUDE_CLI_VERSION: 'free fixture',
+        GSTACK_HOME: path.join(dir, 'state'),
       },
       stdout: 'pipe', stderr: 'pipe',
     });
@@ -606,7 +609,7 @@ const fakeJudgeRequest = async (body, options) => {
   const id = attempt;
   await new Promise(resolve => setTimeout(resolve, scenario === 'late-judge' ? 130 : 10));
   event({ kind: 'judge-ready', id, aborted: options?.signal?.aborted ?? false });
-  return { content: [{ type: 'text', text: JSON.stringify({ reason_substance: scenario === 'bad-score' ? 3 : 5, reasoning: 'fixture specific tradeoff' }) }] };
+  return { stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ reason_substance: scenario === 'bad-score' ? 3 : 5, reasoning: 'fixture specific tradeoff' }) }] };
 };
 mock.module('@anthropic-ai/sdk', () => ({ default: class { messages = { create: fakeJudgeRequest }; } }));
 globalThis.fetch = () => { throw new Error('No network is permitted in this free lifecycle fixture'); };
@@ -629,7 +632,7 @@ await import(path.join(root, 'test', ${JSON.stringify(file)}));
       env: {
         ...process.env, EVALS: '1', EVALS_ALL: '', EVALS_TIER: 'periodic', EVALS_PREFLIGHT_OK: '1',
         EVALS_SELECTION_JSON: JSON.stringify({ selected: [id], reason: 'free format lifecycle' }),
-        GSTACK_EVAL_DIR: evalDir, GSTACK_CLAUDE_CLI_VERSION: 'free fixture',
+        GSTACK_EVAL_DIR: evalDir, GSTACK_CLAUDE_CLI_VERSION: 'free fixture', GSTACK_HOME: path.join(dir, 'state'),
         ANTHROPIC_API_KEY: 'free-fixture', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1',
       },
     });

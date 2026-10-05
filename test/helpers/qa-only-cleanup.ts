@@ -7,7 +7,8 @@ import { isAgentRecordGone, isOurAgent, readAgentRecord } from '../../browse/src
 
 export async function stopQaOnlyBrowser(directory: string, timeoutMs: number): Promise<void> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 100) throw new Error('QA-only browser cleanup: no settlement budget remains; retaining fixture');
-  const worker = Bun.spawn([process.execPath, import.meta.path, directory, String(timeoutMs - 100)], {
+  // An absolute deadline keeps worker startup inside its own budget, so it reports its reason before the kill.
+  const worker = Bun.spawn([process.execPath, import.meta.path, directory, String(Date.now() + timeoutMs - 100)], {
     stdout: 'ignore', stderr: 'pipe',
   });
   let timedOut = false;
@@ -21,8 +22,9 @@ export async function stopQaOnlyBrowser(directory: string, timeoutMs: number): P
   } finally { clearTimeout(timer); }
 }
 
-async function settleOwnedBrowser(directory: string, timeoutMs: number): Promise<void> {
+async function settleOwnedBrowser(directory: string, deadlineEpochMs: number): Promise<void> {
   const started = performance.now();
+  const timeoutMs = deadlineEpochMs - Date.now();
   const deadline = started + timeoutMs;
   let pending = ['identity verification'];
   const fail = (message: string): never => { throw new Error(`QA-only browser cleanup: ${message}`); };

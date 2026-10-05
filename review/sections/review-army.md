@@ -78,19 +78,20 @@ so they run in parallel. Each subagent has fresh context — no prior review bia
 
 Construct the prompt for each specialist. The prompt includes:
 
-1. The specialist's checklist content (you already read the file above)
+1. The specialist's checklist path from the selection above (the subagent reads it; never paste its content)
 2. Stack context: "This is a {STACK} project."
 3. Past learnings for this domain (if any exist):
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-learnings-search --type pitfall --query "{specialist domain}" --limit 5 2>/dev/null || true
+{ _LE=$(~/.claude/skills/gstack/bin/gstack-learnings-search --type pitfall --query "{specialist domain}" --limit 5 2>&1 >&3 3>&-); _LR=$?; } 3>&1
+[ "$_LR" = 0 ] || { _LE=${_LE%%$'\n'*}; echo "LEARNINGS: unavailable (${_LE:-exit $_LR})"; }
 ```
 
 If learnings are found, include them: "Past learnings for this domain: {learnings}"
 
 4. Instructions:
 
-"You are a specialist code reviewer. Read the checklist below, then run
+"You are a specialist code reviewer. Read the checklist at {checklist path}, then run
 `DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"` to get the full diff. Apply the checklist against the diff.
 
 For each finding, output a JSON object on its own line:
@@ -109,10 +110,7 @@ If no findings: output `NO FINDINGS` and nothing else.
 Do not output anything else — no preamble, no summary, no commentary.
 
 Stack context: {STACK}
-Past learnings: {learnings or 'none'}
-
-CHECKLIST:
-{checklist content}"
+Past learnings: {learnings or 'none'}"
 
 **Subagent configuration:**
 - Use `subagent_type: "general-purpose"`
@@ -178,9 +176,11 @@ Core findings keep the core Confidence Calibration gates.
 #### 5. Score and present specialists
 
 Only specialist findings enter this header and `quality_score`; core findings do not.
-Use the merged NON-advisory specialist findings for both counts and score:
+Use the merged NON-advisory specialist findings for both counts and score;
+the header's N is X + Y, so advisory findings never add to it:
 `quality_score = max(0, 10 - (critical_count * 2 + informational_count * 0.5))`
 Cap at 10 and retain for the review-log entry in Step 5.8. These are not final unresolved-defect totals.
+Print only this block: the stage 6 activity object and `test_stub` bodies are log and Fix-First data.
 Validated `"advisory": true` findings from any source are excluded from score,
 header, unresolved-defect totals and clean-status blockers. Show them separately;
 they remain ASK-only, never auto-applied. Real defects follow normal Fix-First.
@@ -239,13 +239,13 @@ completion. Advice never permits edits while readers are active or replaces a re
 If activated, dispatch one more subagent via the Agent tool (pass `run_in_background: false` — foreground; subagents default to background since Claude Code v2.1.198).
 
 The Red Team subagent receives:
-1. The red-team checklist from `~/.claude/skills/gstack/review/specialists/red-team.md`
-2. The merged specialist findings from Step 4.6 (so it knows what was already caught)
+1. The red-team checklist path `~/.claude/skills/gstack/review/specialists/red-team.md` (it reads the file)
+2. The merged specialist findings from Step 4.6, one line each (so it knows what was already caught)
 3. The git diff command
 
 Prompt: "You are a red team reviewer. The code has already been reviewed by N specialists
 who found the following issues: {merged findings summary}. Your job is to find what they
-MISSED. Read the checklist, run `DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"`, and look for gaps.
+MISSED. Read the checklist at {red-team checklist path}, run `DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"`, and look for gaps.
 Output findings as JSON objects (same schema as the specialists). Focus on cross-cutting
 concerns, integration boundary issues, and failure modes that specialist checklists
 don't cover."

@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 const ROOT = path.resolve(import.meta.dir, '..');
-type Event = { event: string; at: number; invocation: number; pid?: number; start?: string; cwd?: string; data?: string; elapsed?: number; outcome?: string; fixtureGone?: boolean };
+type Event = { event: string; at: number; invocation: number; pid?: number; start?: string; cwd?: string; data?: string; elapsed?: number; outcome?: string; summary?: string; fixtureGone?: boolean };
 
 function ownedFake(event: Event, fake: string): boolean {
   if (!event.pid) return false;
@@ -55,7 +55,7 @@ test('owned counting timeout', async () => {
       reviewCountCeiling:8, timeoutMs:8000, startupReadyMarker:'COUNT_TIMEOUT_FIXTURE_READY',
       env:{TIMEOUT_INVOCATION:String(invocation),TIMEOUT_EVENTS:process.env.TIMEOUT_EVENTS}});
     const ready = fs.readFileSync(process.env.TIMEOUT_EVENTS,'utf8').trim().split('\n').map(line=>JSON.parse(line)).find(e=>e.event==='ready'&&e.invocation===invocation);
-    log('returned', invocation, {elapsed:Date.now()-start,outcome:observation.outcome,fixtureGone:!fs.existsSync(ready.cwd)});
+    log('returned', invocation, {elapsed:Date.now()-start,outcome:observation.outcome,summary:observation.summary,fixtureGone:!fs.existsSync(ready.cwd)});
     throw new Error('HELPER_TIMEOUT_'+invocation);
   } finally { log('finally', invocation); }
 }, 8000);
@@ -90,6 +90,10 @@ test('owned counting timeout', async () => {
     expect(finished[0]!.at).toBeLessThanOrEqual(starts[1]!.at);
     for (const event of returned) {
       expect(event.outcome).toBe('timeout');
+      // The silent fixture stops writing after its ready marker: the summary names that idle time.
+      const idle = /; idleFor=(\d+)ms$/.exec(event.summary ?? '');
+      expect(idle, event.summary).not.toBeNull();
+      expect(Number(idle![1])).toBeGreaterThanOrEqual(1000);
       expect(event.elapsed).toBeLessThan(8000);
       expect(event.fixtureGone).toBe(true);
     }
@@ -127,7 +131,7 @@ test.skipIf(process.platform === 'win32')('deadline boundaries stop boot, late s
   const fake = path.join(dir, 'fake-claude');
   const worker = path.join(dir, 'worker.ts');
   const helper = pathToFileURL(path.join(ROOT, 'test/helpers/claude-pty-runner.ts')).href;
-  const screenModule = pathToFileURL(path.join(ROOT, 'test/helpers/pty-screen.ts')).href;
+  const screenModule = pathToFileURL(path.join(ROOT, 'test/helpers/pty/screen.ts')).href;
   fs.writeFileSync(fake, `#!${process.execPath}\n` + String.raw`
 import * as fs from 'node:fs';
 const log = (event, extra={}) => fs.appendFileSync(process.env.BOUNDARY_EVENTS,JSON.stringify({event,at:Date.now(),invocation:1,...extra})+'\n');

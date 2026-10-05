@@ -15,7 +15,7 @@ export interface NativeAutoDecision {
 }
 
 const plain = (text: string) => text.replace(/\*\*([^*]+)\*\*/g, '$1').trim();
-const annotationLine = /^Auto-decided ([^\r\n→]{1,240}) → ([^\r\n→]{1,200}) \(your (?:preference|saved preference on `([a-z][a-z0-9-]*)`)\)\. Change with \/plan-tune\.$/;
+const annotationLine = /^Auto-decided ([^\r\n→]{1,240}) → ([^\r\n→]{1,200}) \(your (?:preference|saved preference on `([a-z][a-z0-9-]*)`)\)\. Change with \/plan-tune\.(?: Approved decisions: [^\r\n]+)?$/;
 
 /** Asserted prose only; later quoted examples cannot retract a current decision. */
 function publicProse(text: string): string {
@@ -47,11 +47,12 @@ function modeField(line: string): { value: string; completed: boolean } | null {
   const match = /^(?:(?:Correction|Actually|Update):\s*)?(?<label>(?:Review )?Mode(?: decision)?|Decision)(?: (?<status>[^:\r\n]+))?:\s*(?<value>.*)$/i.exec(line.replace(/^\s*[-*+]\s+/, '').trim());
   if (!match) return null;
   // "Mode" and "Mode decision" are both field labels. If an explicit status
-  // follows, only the completion class is supported. Pending, cancelled,
+  // follows, only the completion class (including decided/selected/chosen) is
+  // supported. Pending, cancelled,
   // unfinished and unknown statuses also invalidate an earlier declaration.
   const { label, status, value: rawValue } = match.groups!;
-  const completeStatus = !status || /^(?:done|complete|completed)$/i.test(status.trim());
-  const explicitMode = /^(?:the )?(?:review )?mode\b(?:\s+is\b|:)?\s*/i;
+  const completeStatus = !status || /^(?:done|complete|completed|decided|selected|chosen)$/i.test(status.trim());
+  const explicitMode = /^(?:the )?(?:review )?mode\b(?:\s+is\b|:|\s*=(?!=))?\s*/i;
   // An unqualified Decision field owns a review mode only when its value
   // names that vocabulary. Keep unrelated decisions out of withdrawal checks;
   // partial/negated mode names still own a field and therefore fail closed.
@@ -229,13 +230,43 @@ const modeNames = ['HOLD SCOPE', 'SCOPE EXPANSION', 'SELECTIVE EXPANSION', 'SCOP
 const modeValue = (value: unknown) => typeof value === 'string' && modeNames.includes(value.replaceAll('_', ' '))
   ? value.replaceAll('_', ' ') : null;
 
+export interface CeoModeHandoff { sessionId: string; toolUseId: string; timestamp: string; option: string; auto: boolean; line: string }
+
+/** Successful `gstack-ceo-mode-handoff` runs whose single output line is exactly what that invocation prints. */
+export function ceoModeHandoffs(tools: ReadonlyArray<NativePublicToolEvent>, sessionId: string): CeoModeHandoff[] {
+  return tools.flatMap(use => {
+    if (use.kind !== 'use' || use.name !== 'Bash' || use.sessionId !== sessionId || !use.toolUseId ||
+        typeof use.input?.command !== 'string') return [];
+    const args = cliArgs((use.input.command as string).trim(), 'gstack-ceo-mode-handoff');
+    const option = modeValue(args?.[0]);
+    if (!args || !option) return [];
+    let auto = false, decisions = 'none';
+    for (let i = 1; i < args.length; i++) {
+      if (args[i] === '--auto' && !auto) auto = true;
+      else if (args[i] === '--decisions' && i + 1 < args.length) decisions = args[++i]!.replace(/\n/g, ' ').replace(/\.$/, '') || 'none';
+      else return [];
+    }
+    if (!decisions.trim()) decisions = 'none';
+    const line = auto
+      ? `Auto-decided review mode → ${option} (your preference). Change with /plan-tune. Approved decisions: ${decisions}.`
+      : `Mode: ${option}; approved decisions: ${decisions}.`;
+    const results = tools.filter(e => e.kind === 'result' && e.sessionId === sessionId && e.toolUseId === use.toolUseId);
+    const result = results.length === 1 ? results[0]! : null;
+    if (!result || result.isError !== false || typeof result.content !== 'string' || result.content.trim() !== line ||
+        !(Date.parse(result.timestamp) >= Date.parse(use.timestamp))) return [];
+    return [{ sessionId, toolUseId: use.toolUseId, timestamp: result.timestamp, option, auto, line }];
+  });
+}
+
 function currentModeStatement(text: string, questionSummary?: string): { option: string; statement: string } | null {
   const prose = publicProse(text);
   const lines = prose.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const statement = lines[i]!.replace(/^\s*[-*+]\s+/, '').trim();
     const field = modeField(statement);
-    const option = field?.completed ? selectedMode(field.value, questionSummary) : null;
+    // Step 0E's documented AUTO_DECIDE handoff line declares the mode it names.
+    const handoff = /^Auto-decided review mode → ([A-Z ]+) \(your preference\)\. Change with \/plan-tune\. Approved decisions: \S/.exec(statement);
+    const option = handoff ? handoff[1]! : field?.completed ? selectedMode(field.value, questionSummary) : null;
     if (!option || !modeNames.includes(option)) continue;
     // Source/example introductions and conditional selections cannot supply
     // a current declaration merely by putting a Mode field on the next line.
@@ -286,6 +317,18 @@ function structuredModeDecision(transcript: PlanCountTranscript, tools: NativePu
   });
   if (starts.length !== 1) return null;
   const start = starts[0]!, questionId = `${opts.skillName}-mode`;
+  // The handoff helper's printed AUTO_DECIDE line is the current declaration
+  // when it follows the preference check and nothing later withdraws or changes
+  // it. Step 0E records provenance after the handoff, so the log may follow it.
+  const autoHandoff = (after: number, option: string, summary: string) => {
+    const handoff = ceoModeHandoffs(owned, opts.sessionId).find(h => h.auto && h.option === option &&
+      timely(h.timestamp) && time(h.timestamp) >= after);
+    if (!handoff) return null;
+    const later = current.filter(m => time(m.timestamp) >= time(handoff.timestamp));
+    if (withdrawn(later.map(m => m.text).join('\n\n'), option, summary) ||
+        later.some(m => { const other = currentModeStatement(m.text, summary)?.option; return other !== undefined && other !== option; })) return null;
+    return { sessionId: opts.sessionId, timestamp: handoff.timestamp, option, annotation: handoff.line };
+  };
   // Opt-in fixture evidence bypasses no failed shell ACK: the owned file is
   // the completed write. The preamble, record and current public declaration
   // must all agree in this native session, after invocation and before now.
@@ -298,6 +341,8 @@ function structuredModeDecision(transcript: PlanCountTranscript, tools: NativePu
           row.auto_decided === true && modeValue(row.user_choice) && modeValue(row.user_choice) === modeValue(row.recommended) &&
           typeof row.question_summary === 'string' && row.question_summary.trim() &&
           loggedAt >= time(start.result.timestamp) && loggedAt <= opts.now) {
+        const handoff = autoHandoff(time(start.result.timestamp), modeValue(row.user_choice)!, row.question_summary);
+        if (handoff) return { ...handoff, summary: row.question_summary, preambleToolUseId: start.use.toolUseId, stateRecord: row };
         for (const message of current) {
           const declared = currentModeStatement(message.text, row.question_summary);
           if (time(message.timestamp) < loggedAt || !declared || declared.option !== modeValue(row.user_choice)) continue;
@@ -346,6 +391,9 @@ function structuredModeDecision(transcript: PlanCountTranscript, tools: NativePu
   });
   if (logs.length !== 1 || !logs[0]!.result) return null;
   const logged = logs[0]!;
+  const handoff = autoHandoff(time(check.result!.timestamp), modeValue(logged.log.user_choice)!, logged.log.question_summary);
+  if (handoff) return { ...handoff, summary: logged.log.question_summary, preambleToolUseId: start.use.toolUseId,
+    preferenceToolUseId: check.use.toolUseId, questionLogToolUseId: logged.use.toolUseId };
   for (const message of current) {
     if (time(message.timestamp) < time(logged.result!.timestamp)) continue;
     const declared = currentModeStatement(message.text, logged.log.question_summary);
@@ -383,6 +431,13 @@ export function findNativeAutoDecision(
   const messages = transcript.assistantMessages.filter(m => m.sessionId === opts.sessionId);
   if (messages.some(m => !Number.isFinite(at(m.timestamp)) || at(m.timestamp) > opts.now)) return null;
   const loadedAt = at(results[0]!.timestamp);
+  for (const handoff of ceoModeHandoffs(tools, opts.sessionId)) {
+    if (!handoff.auto || !timely(handoff.timestamp) || at(handoff.timestamp) < loadedAt) continue;
+    const later = messages.filter(m => at(m.timestamp) >= at(handoff.timestamp)).map(m => m.text).join('\n\n');
+    if (withdrawn(later, handoff.option)) continue;
+    return { sessionId: opts.sessionId, skillToolUseId: use.toolUseId, timestamp: handoff.timestamp,
+      summary: 'review mode', option: handoff.option, annotation: handoff.line };
+  }
   for (const message of messages) {
     if (at(message.timestamp) < loadedAt) continue;
     const match = assertedAnnotation(message.text, opts.skillName);

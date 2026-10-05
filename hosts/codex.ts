@@ -3,6 +3,8 @@ import { defineHost, GBRAIN_RESOLVERS } from './define-host';
 const codex = defineHost({
   name: 'codex',
   displayName: 'OpenAI Codex CLI',
+  tier: 'experimental',
+  capabilities: { toolExecution: true, questions: 'prose', planMode: false, delegation: false, browser: true, safetyHooks: 'advisory' },
   cliAliases: ['agents'],
   defaultModel: 'gpt',
 
@@ -18,8 +20,9 @@ const codex = defineHost({
 
   // generateMetadata emits agents/openai.yaml (the format is hardcoded in
   // gen-skill-docs.ts). Codex also gets a repo-local sidecar at
-  // .agents/skills/gstack (symlinked runtime assets: bin, browse, review, qa,
-  // ETHOS.md) — that behavior lives in setup's create_agents_sidecar, not here.
+  // .agents/skills/gstack (symlinked runtime assets: bin, lib, browse, review,
+  // qa, design/dist, make-pdf/dist, ETHOS.md) — that behavior lives in setup's
+  // create_agents_sidecar, not here.
   generation: {
     generateMetadata: true,
     skipSkills: ['codex'],
@@ -36,11 +39,22 @@ const codex = defineHost({
     { from: 'CLAUDE.md', to: 'AGENTS.md' },
   ],
 
-  // Outside-review resolvers route to Claude Code; Review Army has its own restriction.
-  suppressedResolvers: ['REVIEW_ARMY', ...GBRAIN_RESOLVERS],
+  // Mirrors create_codex_runtime_root in setup. design/dist and make-pdf/dist
+  // back $GSTACK_DESIGN and $GSTACK_MAKE_PDF (#2891).
+  runtimeRoot: {
+    globalSymlinks: ['bin', 'lib', 'browse/dist', 'browse/bin', 'design/dist', 'make-pdf/dist', 'gstack-upgrade', 'ETHOS.md'],
+    globalFiles: {
+      'review': ['checklist.md', 'design-checklist.md', 'greptile-triage.md', 'TODOS-format.md'],
+    },
+  },
+
+  // Codex review adapters and Review Army dispatch use native bounded
+  // contexts. GBrain remains suppressed until the generator validates the
+  // explicit binding.
+  suppressedResolvers: [...GBRAIN_RESOLVERS],
 
   coAuthorTrailer: 'Co-Authored-By: OpenAI Codex <noreply@openai.com>',
-  boundaryInstruction: 'IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.',
+  boundaryInstruction: 'IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. Do not invoke any installed skill (Codex home skills/, .agents/); answer directly. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.',
 });
 
 export default codex;

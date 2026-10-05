@@ -2,6 +2,14 @@
 import { describe, expect, test } from 'bun:test';
 import { createSharedPlanReuseSelector } from './helpers/shared-libs-plan-actor';
 import { createSharedInteractiveToolHandler } from './helpers/shared-libs-eval-fixture';
+import capturedNoHardening from './fixtures/shared-libs-plan-callers-no-hardening-36633323521.json';
+import capturedParity from './fixtures/shared-libs-plan-callers-parity-36776104571.json';
+import capturedOutOfScope from './fixtures/shared-libs-plan-callers-out-of-scope-37151477069.json';
+import capturedSlashScope from './fixtures/shared-libs-plan-callers-slash-scope-37174266054.json';
+import capturedVerbless from './fixtures/shared-libs-plan-callers-verbless-scope-37186854666.json';
+import capturedFutureRisk from './fixtures/shared-libs-plan-callers-future-risk-37195203538.json';
+import passingCensuses from './fixtures/shared-libs-plan-callers-passing-censuses.json';
+import capturedFixesBehavior from './fixtures/shared-libs-plan-callers-fixes-behavior-local.json';
 
 // Exact native R1 from the September 22 timeout. R2 was saved in an Edit, but
 // never sent as a native AUQ; its public draft fields are reconstructed below.
@@ -287,6 +295,29 @@ describe('bounded shared-code planning actor', () => {
     expect(await actor().callback('AskUserQuestion', input)).toMatchObject({ behavior: 'allow' });
   });
 
+  // Census 36633323521 refused this exact public question on "(no hardening)".
+  test('actual native parenthetical exclusion keeps unchanged-helper reuse answerable', async () => {
+    const run = actor();
+    expect(await run.callback('AskUserQuestion', capturedNoHardening)).toEqual({ behavior: 'allow', updatedInput: {
+      ...capturedNoHardening, answers: { [capturedNoHardening.questions[0].question]: capturedNoHardening.questions[0].options[0].label },
+    } });
+    expect(run.refusals).toEqual([]);
+  });
+
+  test.each([
+    ['(no hardening)', '(hardening included)'],
+    ['(no hardening)', '(with hardening)'],
+    ['(no hardening)', '(no migration); harden helper parsing'],
+    ['(no hardening)', '(not migrated) and tighten helper validation'],
+  ] as const)('parenthetical exclusions do not hide a behavioral change: %s -> %s', async (from, to) => {
+    const input = structuredClone(capturedNoHardening);
+    input.questions[0].options[0].description = input.questions[0].options[0].description.replace(from, to);
+    const run = actor();
+    await expect(run.callback('AskUserQuestion', input)).rejects.toThrow('question expands');
+    expect(run.answers).toEqual([]);
+    expect(run.controller.signal.aborted).toBe(true);
+  });
+
   const expansions = [
     'Harden malformed-header parsing.',
     'Add a validation guard to the existing helper.',
@@ -324,4 +355,108 @@ describe('bounded shared-code planning actor', () => {
     expect(run.answers).toEqual([]);
     expect(run.controller.signal.aborted).toBe(true);
   });
+
+  test('actual census parity wording preserves the contract; an unchanged-scope list is an exclusion', async () => {
+    // Exact native question from census 36776104571: "behaving exactly like the scheduler",
+    // "scheduler parity holds by construction", "Existing copies and helper hardening stay unchanged".
+    const run = actor();
+    const result = await run.callback('AskUserQuestion', capturedParity);
+    expect(result.updatedInput.answers).toEqual({ [capturedParity.questions[0].question]: capturedParity.questions[0].options[0].label });
+    expect(run.refusals).toEqual([]);
+  });
+
+  test.each([
+    ['exactly like the scheduler', 'not exactly like the scheduler', 'scheduler parity holds', 'breaks scheduler parity'],
+    ['exactly as src/scheduler.ts does', 'differently from src/scheduler.ts', 'scheduler parity holds', 'without scheduler parity'],
+  ] as const)('negated parity wording cannot supply preservation: %s', async (a, b, c, d) => {
+    const input = structuredClone(capturedParity);
+    const q = input.questions[0];
+    q.question = q.question.replaceAll('behaving exactly like the scheduler', 'behaving ' + b.replace('exactly as src/scheduler.ts does', '')).replaceAll(a, b).replaceAll(c, d).replaceAll('guaranteed scheduler parity', 'lost scheduler parity');
+    for (const option of q.options) option.description = option.description.replaceAll(a, b).replaceAll(c, d);
+    const run = actor();
+    await expect(run.callback('AskUserQuestion', input)).rejects.toThrow('shared-libs-plan-callers actor:');
+    expect(run.answers).toEqual([]);
+  });
+
+  // Census 37151477069 refused this exact public question: "Existing-caller migration
+  // and helper hardening stay out of scope" excludes work; it does not propose it.
+  test('actual native out-of-scope exclusion keeps unchanged-helper reuse answerable', async () => {
+    const run = actor();
+    const result = await run.callback('AskUserQuestion', capturedOutOfScope);
+    expect(result.updatedInput.answers).toEqual({ [capturedOutOfScope.questions[0].question]: capturedOutOfScope.questions[0].options[0].label });
+    expect(run.refusals).toEqual([]);
+  });
+
+  // Census 37174266054 refused this exact question: every option ends "Scheduler semantics,
+  // existing callers and helper hardening stay unchanged/out of scope", a combined exclusion.
+  test('actual native combined exclusion keeps unchanged-helper reuse answerable', async () => {
+    const run = actor();
+    const result = await run.callback('AskUserQuestion', capturedSlashScope);
+    expect(result.updatedInput.answers).toEqual({ [capturedSlashScope.questions[0].question]: 'Reuse shared helper' });
+    expect(run.refusals).toEqual([]);
+  });
+
+  // Controls: the questions this actor answered in passing censuses stay answerable.
+  test.each(passingCensuses.map(entry => [entry.census, entry.input] as const))('passing census %s question is still answered', async (_census, input) => {
+    const run = actor();
+    const result = await run.callback('AskUserQuestion', structuredClone(input));
+    expect(Object.keys(result.updatedInput.answers)).toEqual([input.questions[0].question]);
+    expect(run.refusals).toEqual([]);
+  });
+
+  // Local paid trial on the redesign refused this exact question over its
+  // recommendation rationale: "the plan fixes behavior to the existing helper".
+  test('actual native recommendation rationale is explanation, not a commitment', async () => {
+    const run = actor();
+    const result = await run.callback('AskUserQuestion', capturedFixesBehavior);
+    expect(result.updatedInput.answers).toEqual({ [capturedFixesBehavior.questions[0].question]: capturedFixesBehavior.questions[0].options[0].label });
+    expect(run.refusals).toEqual([]);
+  });
+
+  test('an expansion stated as its own brief line is still refused', async () => {
+    const input = structuredClone(capturedFixesBehavior);
+    input.questions[0].question += '\nThis also hardens the parser against malformed headers.';
+    const run = actor();
+    await expect(run.callback('AskUserQuestion', input)).rejects.toThrow('question expands');
+  });
+
+  // Census 37195203538 refused this exact question over a risk bullet: "a future
+  // helper bug or hardening change reaches scheduler ...". Naming work is not proposing it.
+  test('actual native risk wording that names hardening keeps unchanged-helper reuse answerable', async () => {
+    const run = actor();
+    const result = await run.callback('AskUserQuestion', capturedFutureRisk);
+    expect(result.updatedInput.answers).toEqual({ [capturedFutureRisk.questions[0].question]: capturedFutureRisk.questions[0].options[0].label });
+    expect(run.refusals).toEqual([]);
+  });
+
+  // Census 37186854666 refused this exact question: options end "Scheduler semantics,
+  // existing callers and helper hardening unchanged", the same exclusion without a verb.
+  test('actual native verbless exclusion keeps unchanged-helper reuse answerable', async () => {
+    const run = actor();
+    const result = await run.callback('AskUserQuestion', capturedVerbless);
+    expect(result.updatedInput.answers).toEqual({ [capturedVerbless.questions[0].question]: capturedVerbless.questions[0].options[0].label });
+    expect(run.refusals).toEqual([]);
+  });
+
+  test.each([
+    'Harden helper parsing so behavior stays unchanged.',
+    'Harden helper parsing unchanged.',
+    'Helper hardening unchanged and tighten helper validation.',
+    'Also hardening the parser against malformed headers.',
+    'Use stricter parsing for numeric values.',
+    'Sanitize header values before calling retrySeconds.',
+    'Existing callers stay unchanged/harden the helper.',
+    'Helper hardening stays unchanged or tighten helper validation.',
+    'Existing copies stay unchanged and tighten helper validation.',
+    'Migrate existing retry-worker.ts; helper hardening stays unchanged.',
+    'Existing-caller migration stays out of scope and harden the helper.',
+    'Helper hardening is out of scope, but tighten helper validation.',
+  ])('an unchanged-scope clause cannot hide an expansion: %s', async extra => {
+    const input = structuredClone(capturedParity);
+    input.questions[0].options[0].description += '\n' + extra;
+    const run = actor();
+    await expect(run.callback('AskUserQuestion', input)).rejects.toThrow('question expands');
+    expect(run.answers).toEqual([]);
+  });
 });
+

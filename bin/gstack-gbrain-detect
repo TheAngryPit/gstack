@@ -18,7 +18,7 @@
  *     "gstack_brain_sync_mode": "off"|"artifacts-only"|"full",
  *     "gstack_brain_git": true|false,
  *     "gstack_artifacts_remote": "https://..." | "",
- *     "gbrain_local_status": "ok"|"no-cli"|"missing-config"|"broken-config"|"broken-db"|"engine-locked"|"timeout"|"thin-client",
+ *     "gbrain_local_status": "ok"|"no-cli"|"missing-config"|"broken-config"|"broken-db"|"engine-locked"|"timeout"|"db-unreachable"|"thin-client",
  *     "gbrain_pooler_mode": "transaction"|"session"|null
  *   }
  *
@@ -31,6 +31,9 @@
  *   GSTACK_HOME      — override ~/.gstack for state lookups (used by tests).
  *   HOME             — effective user home (drives ~/.gbrain/config.json path).
  *   GSTACK_DETECT_NO_CACHE=1 — bypass the 60s local-status cache.
+ *
+ * --host codex uses the explicitly saved native binding; --is-ok can be
+ * combined with it. Its MCP mode is registration evidence, not a live MCP test.
  */
 
 import { execFileSync } from "child_process";
@@ -40,12 +43,46 @@ import { join } from "path";
 
 import {
   localEngineStatus,
+  localEngineStatusDetail,
   resolveGbrainBin,
   readGbrainVersion,
 } from "../lib/gbrain-local-status";
 import { gbrainConfigDir, isTransactionModePooler } from "../lib/gbrain-exec";
+import { loadCodexBrain, codexBrainProbeEnv } from "../lib/gbrain-codex-binding";
 
-const STATE_DIR = process.env.GSTACK_HOME || join(userHome(), ".gstack");
+// The selected Codex binding is opt-in, not a machine-wide brain default.
+// Re-exec with an explicit environment: Bun's implicit child env does not
+// reliably inherit later process.env mutations.
+if (process.argv.includes('--host')) {
+  const index=process.argv.indexOf('--host');
+  if (process.argv[index+1] !== 'codex') {
+    console.error('Supported explicit host: codex');
+    process.exit(1);
+  }
+  try {
+    const binding=loadCodexBrain();
+    const args=process.argv.slice(2).filter((_,i)=>i!==index-2 && i!==index-1);
+    const output=execFileSync(process.execPath,[process.argv[1],...args],{
+      env:codexBrainProbeEnv(binding),
+      cwd:binding.home,
+      encoding:'utf8',stdio:['ignore','pipe','ignore'],timeout:30_000,
+    });
+    if (output) {
+      const result=JSON.parse(output);
+      result.gbrain_binding_host='codex';
+      result.gbrain_mcp_mode='local-stdio';
+      result.gbrain_mcp_mode_source='codex-registration';
+      process.stdout.write(JSON.stringify(result,null,2)+'\n');
+    }
+    process.exit(0);
+  } catch {
+    console.error('Selected Codex GBrain binding or health probe unavailable. Refresh explicitly.');
+    process.exit(1);
+  }
+}
+import { resolveStateRoot } from "../lib/state-root";
+
+const STATE_DIR = resolveStateRoot();
 const SCRIPT_DIR = __dirname;
 const CONFIG_BIN = join(SCRIPT_DIR, "gstack-config");
 // Honors GBRAIN_HOME with gbrain's own configDir() semantics (#2521:
@@ -116,18 +153,25 @@ function detectPoolerMode(): "transaction" | "session" | "unknown" | null {
   return isTransactionModePooler(parsed.database_url) ? "transaction" : "session";
 }
 
-// --- gbrain doctor health (any nonzero exit or non-"ok"/"warnings" status → false) ---
+// --- gbrain doctor health (any nonzero exit or non-healthy status → false) ---
 //
 // Uses --fast to avoid hanging on a dead DB. Per the local-status classifier
 // (which probes DB directly via `gbrain sources list`), gbrain_doctor_ok is a
 // coarse health summary, not engine-reachability — that's gbrain_local_status.
 function detectDoctor(onPath: boolean): boolean {
   if (!onPath) return false;
-  const out = tryExec("gbrain", ["doctor", "--json", "--fast"], 3_000);
+  // The detector only needs brain-engine health. `--scope=brain` keeps the
+  // coarse health probe from walking an unrelated caller's skills directory
+  // (which may legitimately have no RESOLVER.md/AGENTS.md) while preserving
+  // the full unscoped resolver check for operators who explicitly run doctor.
+  const out = tryExec("gbrain", ["doctor", "--json", "--fast", "--scope=brain"], 3_000);
   if (!out) return false;
   try {
     const parsed = JSON.parse(out) as { status?: string };
-    return parsed.status === "ok" || parsed.status === "warnings";
+    // GBrain DoctorReport uses healthy|warnings|unhealthy. Keep accepting
+    // legacy "ok" reports from older CLIs so the detector remains backward
+    // compatible while correctly accepting the current healthy status.
+    return parsed.status === "healthy" || parsed.status === "warnings" || parsed.status === "ok";
   } catch {
     return false;
   }
@@ -280,13 +324,16 @@ function main(): void {
   const withThinClient =
     out.gbrain_local_status === "thin-client"
       ? { ...out, gbrain_thin_client: { probed: false } }
-      : out;
+      : out.gbrain_local_status === "db-unreachable"
+        ? { ...out, gbrain_local_status_detail: localEngineStatusDetail() }
+        : out;
 
   process.stdout.write(JSON.stringify(withThinClient, null, 2) + "\n");
 }
 
 // --is-ok: live engine-status gate. Exits 0 iff gbrain is usable ("ok";
-// "timeout" — a slow-but-healthy engine, #1964; "thin-client" — remote-HTTP
+// "timeout" — a slow-but-healthy engine, #1964; "db-unreachable" — a network
+// error reaching a configured DB, transient like timeout; "thin-client" — remote-HTTP
 // MCP brain with no local engine by design, #2051; or "engine-locked" —
 // PGLite is single-writer, so a live `gbrain serve` (typically an MCP
 // server) holds the embedded DB, #2456 — gbrain is installed and healthy in
@@ -299,7 +346,8 @@ if (process.argv.includes("--is-ok")) {
   const noCache = process.env.GSTACK_DETECT_NO_CACHE === "1";
   const status = localEngineStatus({ noCache });
   process.exit(
-    status === "ok" || status === "timeout" || status === "thin-client" || status === "engine-locked"
+    status === "ok" || status === "timeout" || status === "db-unreachable" ||
+      status === "thin-client" || status === "engine-locked"
       ? 0
       : 1,
   );

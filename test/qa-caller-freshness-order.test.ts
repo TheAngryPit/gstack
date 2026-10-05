@@ -70,7 +70,7 @@ describe('review and ship completion freshness contracts', () => {
         expect(gate).toContain('Reporting reserves cannot stop required revalidation within the caller\'s deadline');
         expect(body).toContain('Await clock/guard results before acting');
         expect(body).toContain('Smoke: 5 minutes/12 probes');
-        expect(body).toContain('Then run required plan checks, even after smoke expires');
+        expect(body).toContain('Then run required plan checks and revalidation, even after smoke expires');
         expect(body).toContain('no smoke guard; never reset the clock');
         expect(body).toContain('Use finite command timeouts, capped at the caller\'s remaining time if it has a deadline');
       });

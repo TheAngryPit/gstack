@@ -15,6 +15,7 @@ import { selectTests, detectBaseBranch, getChangedFiles, E2E_TOUCHFILES, E2E_TIE
 import { WorktreeManager } from '../../lib/worktree';
 import type { HarvestResult } from '../../lib/worktree';
 import { preflightAnthropicApi } from './anthropic-preflight';
+import { isHermeticEnabled } from './hermetic-env';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -116,9 +117,10 @@ export let selectedTests: string[] | null = resolveModuleSelection(
 // EVALS_TIER: filter tests by tier after diff-based selection.
 // 'gate' = gate tests only (CI default — blocks merge)
 // 'periodic' = periodic tests only (weekly cron / manual)
+// 'marathon' = full end-to-end flows only (non-blocking marathon lane)
 // not set = run all selected tests (local dev default, backward compat)
 if (evalsEnabled && process.env.EVALS_TIER) {
-  const tier = process.env.EVALS_TIER as 'gate' | 'periodic';
+  const tier = process.env.EVALS_TIER as 'gate' | 'periodic' | 'marathon';
   const tierTests = Object.entries(E2E_TIERS)
     .filter(([, t]) => t === tier)
     .map(([name]) => name);
@@ -228,6 +230,18 @@ export function createEvalCollector(suite: string): EvalCollector | null {
 }
 
 /** DRY helper to record an E2E test result into the eval collector. */
+/** Exit reasons for an API or transport failure (session-runner.ts). */
+const INFRA_EXIT_REASONS = new Set(['error_api', 'timeout_startup', 'error_output_stream']);
+
+/** API/transport error or CLI crash before the first model turn: INFRA, never a
+ *  verdict on the product. Any assistant event or counted turn means the model
+ *  ran, so its refusal, timeout or wrong answer stays an ordinary failure. */
+export function isPreTurnInfraFailure(result: Pick<SkillTestResult, 'exitReason' | 'transcript' | 'costEstimate'>): boolean {
+  return result.costEstimate.turnsUsed === 0
+    && (INFRA_EXIT_REASONS.has(result.exitReason) || /^exit_code_\d+$/.test(result.exitReason))
+    && !result.transcript.some(event => event?.type === 'assistant');
+}
+
 export function recordE2E(
   evalCollector: EvalCollector | null,
   name: string,
@@ -240,9 +254,11 @@ export function recordE2E(
     ? `${result.toolCalls[result.toolCalls.length - 1].tool}(${JSON.stringify(result.toolCalls[result.toolCalls.length - 1].input).slice(0, 60)})`
     : undefined;
 
+  const passed = extra?.passed ?? (result.exitReason === 'success' && result.browseErrors.length === 0);
   evalCollector?.addTest({
     name, suite, tier: 'e2e',
-    passed: result.exitReason === 'success' && result.browseErrors.length === 0,
+    passed,
+    ...(!passed && isPreTurnInfraFailure(result) ? { failure_class: 'infra' as const } : {}),
     duration_ms: result.duration,
     cost_usd: result.costEstimate.estimatedCost,
     transcript: result.transcript,
@@ -327,7 +343,7 @@ export async function finalizeEvalCollector(evalCollector: EvalCollector | null)
 // NOTE: since gstack-skill-start honors GSTACK_HOME (EOV7), hermetic children read the
 // temp GSTACK_HOME that hermetic-env.ts seeds (the canonical marker list lives there);
 // this operator-HOME seeding only serves EVALS_HERMETIC=0 debug runs.
-if (evalsEnabled) {
+if (evalsEnabled && !isHermeticEnabled()) {
   const gstackDir = path.join(os.homedir(), '.gstack');
   fs.mkdirSync(gstackDir, { recursive: true });
   // Marker list kept at parity with hermetic-env.ts's child-GSTACK_HOME seed

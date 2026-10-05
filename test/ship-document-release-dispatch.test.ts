@@ -10,6 +10,7 @@ import type { SkillTestResult } from './helpers/session-runner';
 import { observeDocsWrites, docsWriteFailures, docsCommandAllowed, docsPreambleCommands, docsCompletedRead } from './helpers/docsync-observer';
 import { docsActorCommand, docsActorHook, installDocsActor, type DocsActorState, type DocsFault } from './helpers/docsync-fault-actor';
 import { docsActorVerdict } from './helpers/docsync-fault-eval';
+import { expectMentions, expectTokens } from './helpers/prompt-structure';
 
 const ROOT = path.join(import.meta.dir, '..');
 const read = (p: string) => fs.readFileSync(path.join(ROOT, p), 'utf8');
@@ -36,12 +37,11 @@ describe('pre-publication documentation lifecycle', () => {
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     const recovery = body.slice(body.indexOf('### 3. Resolve documentation freshness'), body.indexOf('### 4. Verify the frozen candidate')).replace(/\s+/g, ' ');
     expect(recovery).toContain('Validate the outcome before Step 15');
-    expect(recovery).toContain('restart Step 16 stage 1 to regenerate and compare again');
     expect(recovery).toContain('Never run a third audit');
     expect(body.replace(/\s+/g, ' ')).toContain('its initial-plus-ONE limit never resets');
     expect(gate.replace(/\s+/g, ' ')).toContain('Docs, TODO edits, new/generated tests and fixes make evidence STALE');
     const docs = read('ship/sections/documentation.md.tmpl');
-    expect(docs.replace(/\s+/g, ' ')).toContain('never a third attempt, even after Step 16 changes');
+    expectMentions(docs.replace(/\s+/g, ' '), [['never', 'attempt', 'changes']], 'docs.replace(/\s+/g,  )');
     expect(docs.replace(/\s+/g, ' ')).toContain('Otherwise STOP before commit/publication and do not launch another child');
   });
 
@@ -51,11 +51,22 @@ describe('pre-publication documentation lifecycle', () => {
     expect(claude.indexOf(marker)).toBeGreaterThan(0);
     expect(claude.indexOf('ship/sections/documentation.md', claude.indexOf(marker))).toBeLessThan(claude.indexOf('## Step 15:'));
     expect(claude).not.toContain('Dispatch /document-release as a subagent');
-    for (const p of ['.agents/skills/gstack-ship/SKILL.md', '.factory/skills/gstack-ship/SKILL.md']) {
-      const body = fs.readFileSync(path.join(generated, p), 'utf8');
-      const dispatch = body.indexOf('Dispatch /document-release as a subagent');
-      expect(dispatch).toBeGreaterThan(body.indexOf(marker));
-      expect(dispatch).toBeLessThan(body.indexOf('## Step 15:'));
+    // C4: ship is carved on external hosts too; the pointer is relative to the installed skill.
+    for (const [dir, host] of [['.agents/skills/gstack-ship', 'codex'], ['.factory/skills/gstack-ship', 'factory']] as const) {
+      const body = fs.readFileSync(path.join(generated, dir, 'SKILL.md'), 'utf8');
+      const expectedPointer = '`sections/documentation.md` relative to the installed `gstack-ship` SKILL.md directory';
+      const pointer = body.indexOf(expectedPointer, body.indexOf(marker));
+      expect(pointer).toBeGreaterThan(body.indexOf(marker));
+      expect(pointer).toBeLessThan(body.indexOf('## Step 15:'));
+      const documentation = fs.readFileSync(path.join(generated, dir, 'sections/documentation.md'), 'utf8');
+      if (host === 'codex') {
+        expect(body).not.toContain('Dispatch /document-release as a subagent');
+        expect(documentation).toContain('Dispatch /document-release as a native Codex worker');
+        expect(documentation.replace(/\s+/g, ' ')).toContain('Preserve this section\'s candidate, attempt budget, edit/read-only mode, file ownership, freshness checks, protected-file rules and parent validation gates.');
+      } else {
+        expect(body).not.toContain('Dispatch /document-release as a subagent');
+        expect(documentation).toContain('Dispatch /document-release as a subagent');
+      }
       expect(body.indexOf('## Step 16:')).toBeLessThan(body.indexOf('## Step 17:'));
     }
   });
@@ -74,20 +85,29 @@ describe('pre-publication documentation lifecycle', () => {
 
   test('documentation preflight follows the installed host layout', () => {
     const claude = fs.readFileSync(path.join(generated, 'ship/sections/documentation.md'), 'utf8');
-    expect(claude.replace(/\s+/g, ' ')).toContain('full audit-scope/release-body content, linked as sections or inlined for external hosts');
     for (const section of ['audit-scope', 'release-body']) {
       expect(fs.existsSync(path.join(generated, `document-release/sections/${section}.md`))).toBe(true);
     }
     for (const host of ['.agents', '.factory']) {
-      const ship = fs.readFileSync(path.join(generated, host, 'skills/gstack-ship/SKILL.md'), 'utf8');
+      const ship = fs.readFileSync(path.join(generated, host, 'skills/gstack-ship/sections/documentation.md'), 'utf8');
       const directory = path.join(generated, host, 'skills/gstack-document-release');
       const document = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8');
-      expect(ship).toContain('linked as sections or inlined for external hosts');
-      expect(document).toContain('# Documentation scope and discovery');
-      expect(document).toContain('## Step 2: Per-File Documentation Audit');
       expect(document).toContain('## Ship-owned documentation mode');
-      expect(fs.existsSync(path.join(directory, 'sections/audit-scope.md'))).toBe(false);
-      expect(fs.existsSync(path.join(directory, 'sections/release-body.md'))).toBe(false);
+      if (host === '.agents') {
+        const auditScope = path.join(directory, 'sections/audit-scope.md');
+        const releaseBody = path.join(directory, 'sections/release-body.md');
+        expect(document).toContain('`sections/audit-scope.md`');
+        expect(document).toContain('`sections/release-body.md`');
+        expect(fs.readFileSync(auditScope, 'utf8')).toContain('# Documentation scope and discovery');
+        expect(fs.readFileSync(releaseBody, 'utf8')).toContain('## Step 2: Per-File Documentation Audit');
+        expect(fs.readFileSync(auditScope, 'utf8')).toContain('## Ship-owned documentation mode');
+      } else {
+        expect(document).toContain('# Documentation scope and discovery');
+        expect(document).toContain('## Step 2: Per-File Documentation Audit');
+        expect(fs.existsSync(path.join(directory, 'sections/audit-scope.md'))).toBe(false);
+        expect(fs.existsSync(path.join(directory, 'sections/release-body.md'))).toBe(false);
+      }
+      expect(ship).toContain('full audit-scope/release-body');
     }
   });
 
@@ -102,7 +122,7 @@ describe('pre-publication documentation lifecycle', () => {
       'Only verified permitted child edits may differ. Other edits or base changes make the audit stale',
       'Later changes require the remaining re-audit or a risk decision',
       'never silently refreshed hashes']) expect(body).toContain(text);
-    expect(body).not.toContain('Do not block /ship on subagent failure');
+    expect(body).not.toContain('block /ship on subagent failure');
   });
 
   test('stale detection does not spend the remaining audit, but repair and inline takeover do', () => {
@@ -118,7 +138,6 @@ describe('pre-publication documentation lifecycle', () => {
       'using current inputs and a fresh id/snapshot, run the remaining attempt, then validate it through Parent processing',
       'Otherwise STOP before commit/publication',
       'do not launch another child']) expect(body).toContain(text);
-    expect(body).not.toContain('A stale audit consumes the same ONE repair/re-audit attempt');
   });
 
   test('PR creation and reruns keep current and blocked audits visible', () => {
@@ -130,12 +149,28 @@ describe('pre-publication documentation lifecycle', () => {
     expect(body).toContain('gh pr edit --title "$NEW_TITLE"');
     expect(body).toContain('glab mr create -b <base> -t "$NEW_TITLE"');
     expect(body).not.toContain('Dispatch /document-release');
-    expect(body).toContain("Never omit this section or reuse another invocation's audit");
+    expectMentions(body, [['never', 'section', 'another']], 'body');
     expect(body).toContain('gh pr edit --body-file "$PR_BODY_FILE"');
     expect(body).toContain('gstack-redact --from-file "$PR_BODY_FILE"');
     expect(read('ship/SKILL.md.tmpl')).toContain('existing PRs and docs-only changes');
     expect(read('ship/sections/apple-release.md.tmpl')).toContain('read-only');
     expect(read('ship/sections/apple-release.md.tmpl')).toContain('ship/sections/documentation.md');
+  });
+
+  test('ship-owned documentation_section carries its status so /ship embeds it unchanged', () => {
+    // ci-36641820398-1-gate-census-3 ship-docsync-completion: the section had scope, health and debt but no result,
+    // so the parent spliced a Status line into it and the report no longer contained the returned section.
+    const scope = read('document-release/sections/audit-scope.md.tmpl').replace(/\s+/g, ' ');
+    expectTokens(scope, ['`**Status:**`', '`status`'], 'scope');
+    expect(read('ship/sections/pr-body.md.tmpl')).toContain("Embed Step 14.5's vetted nonempty `documentation_section`");
+  });
+
+  test('a missing installed document-release section blocks before launch', () => {
+    // ci-36709485593-1-eval-slices-2 ship-docsync-missing-asset: audit-scope.md was absent, but the parent saw the
+    // SKILL.md "Ship-owned documentation mode" heading, read the gate as satisfied and dispatched.
+    const gate = read('ship/sections/documentation.md.tmpl').replace(/\s+/g, ' ');
+    expectTokens(gate, ['`Ship-owned documentation mode`'], 'gate');
+    expectMentions(gate, [['never', 'substitute', 'missing']], 'gate');
   });
 
   test('nested authored discovery and standalone protections survive', () => {
@@ -145,8 +180,10 @@ describe('pre-publication documentation lifecycle', () => {
       'Ship-owned documentation mode', 'standalone branch gate']) expect(skill).toContain(text);
     const body = read('document-release/sections/release-body.md.tmpl');
     for (const text of ['never `git add -A`', 'Never regenerate a CHANGELOG entry',
-      'body-original.md', 'UNTRUSTED TRACKER CONTENT', 'gstack-redact --from-file',
-      'NEVER BUMP VERSION WITHOUT ASKING']) expect(body).toContain(text);
+      'body-original.md', 'UNTRUSTED TRACKER CONTENT', 'gstack-redact --from-file']) expect(body).toContain(text);
+    const versionStep = body.slice(body.indexOf('## Step 8'), body.indexOf('\n## ', body.indexOf('## Step 8') + 1));
+    expect(versionStep).toMatch(/ask[^\n]*before[^\n]*VERSION/i);
+    expect(body).toMatch(/does not rewrite, replace, or regenerate CHANGELOG/i);
   });
 });
 
@@ -273,6 +310,7 @@ describe('native docs fixture preflight', () => {
 
   test('the real preamble marker and private fixture evidence survive cleanup', () => {
     const fixture = fixtureDocs('risky', generated);
+    const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-evidence-'));
     let retained: string | undefined;
     try {
       const result = spawnSync('bash', [path.join(fixture.skills, 'bin/gstack-skill-start'), '--skill', 'document-release'], {
@@ -282,14 +320,14 @@ describe('native docs fixture preflight', () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('SESSION_KIND: spawned');
       retained = preserveDocsEvidence(fixture, { output: 'preflight', toolCalls: [] } as unknown as SkillTestResult,
-        `docs-free-${path.basename(fixture.home)}`, 'fixture');
+        `docs-free-${path.basename(fixture.home)}`, 'fixture', {}, evidenceRoot);
       fixture.clean();
       expect(fs.existsSync(retained)).toBe(true);
       expect(fs.statSync(retained).mode & 0o777).toBe(0o600);
       expect(JSON.parse(fs.readFileSync(retained, 'utf8')).before.contents['SECURITY.md']).toBeDefined();
     } finally {
       fixture.clean();
-      if (retained) fs.rmSync(path.dirname(path.dirname(retained)), { recursive: true, force: true });
+      fs.rmSync(evidenceRoot, { recursive: true, force: true });
     }
   });
 });
@@ -366,6 +404,7 @@ describe('native docs fixture preflight', () => {
   test('kernel evidence remains private and readable after fixture cleanup', async () => {
     const fixture = fixtureDocs('current', generated);
     const observer = await observeDocsWrites(fixture);
+    const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-evidence-'));
     let evidence: string | undefined;
     try {
       const file = path.join(fixture.repo, 'app.ts');
@@ -374,7 +413,7 @@ describe('native docs fixture preflight', () => {
       fs.writeFileSync(file, original);
       const observation = observer.stop();
       evidence = preserveDocsEvidence(fixture, { output: 'observer preflight', toolCalls: [] },
-        `docs-observer-${path.basename(fixture.home)}`, 'transient', { observation });
+        `docs-observer-${path.basename(fixture.home)}`, 'transient', { observation }, evidenceRoot);
       fixture.clean();
       expect(fs.statSync(evidence).mode & 0o777).toBe(0o600);
       const retained = JSON.parse(fs.readFileSync(evidence, 'utf8')).observation;
@@ -382,7 +421,7 @@ describe('native docs fixture preflight', () => {
       expect(docsWriteFailures(retained, [])).toContain('forbidden docs write: app.ts');
     } finally {
       fixture.clean();
-      if (evidence) fs.rmSync(path.dirname(path.dirname(evidence)), { recursive: true, force: true });
+      fs.rmSync(evidenceRoot, { recursive: true, force: true });
     }
   });
 

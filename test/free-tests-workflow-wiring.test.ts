@@ -46,8 +46,18 @@ describe('free-tests workflow wiring', () => {
     const planner = workflow.jobs['free-plan'];
     const suite = workflow.jobs['free-suite'];
     const aggregate = workflow.jobs['free-tests'];
+    const macosRegressions = workflow.jobs['macos-named-regressions'];
+    expect(macosRegressions.steps.some((step: any) => step.run?.includes('test/ios-qa-regen.test.ts'))).toBe(true);
     expect(planner.steps.find((step: any) => step.id === 'plan').run).toContain('--ci-plan');
     expect(suite.needs).toBe('free-plan');
+    expect(suite['runs-on']).toBe("${{ github.repository == 'garrytan/gstack' && 'ubicloud-standard-8' || 'ubuntu-24.04' }}");
+    const checkout = suite.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+    expect(checkout.with['fetch-depth']).toBe("${{ github.repository == 'garrytan/gstack' && 1 || 0 }}");
+    const windows = Bun.YAML.parse(fs.readFileSync(path.resolve(import.meta.dir, '..', '.github/workflows/windows-free-tests.yml'), 'utf8')) as any;
+    const windowsCheckout = windows.jobs['windows-free-shard'].steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+    expect(windowsCheckout.with['fetch-depth']).toBe("${{ github.repository == 'garrytan/gstack' && 1 || 0 }}");
+    const windowsBun = windows.jobs['windows-free-shard'].steps.find((step: any) => step.uses?.startsWith('oven-sh/setup-bun@'));
+    expect(windowsBun.with['bun-version']).toBe("${{ github.repository == 'garrytan/gstack' && '1.4.0' || '1.4.2' }}");
     expect(suite.strategy.matrix).toBe('${{ fromJSON(needs.free-plan.outputs.matrix) }}');
     expect(suite.strategy['fail-fast']).toBe(false);
     expect(suite.strategy['max-parallel']).toBe(20);
@@ -56,7 +66,41 @@ describe('free-tests workflow wiring', () => {
     expect(aggregate.if).toBe('always()');
     expect(aggregate.needs).toContain('free-suite');
     expect(aggregate.steps.some((step: any) => step.run?.includes('--ci-verify'))).toBe(true);
+    expect(aggregate.needs).toContain('typecheck');
+    const gate = aggregate.steps.find((step: any) => step.env?.TYPECHECK_RESULT);
+    expect(gate.env.TYPECHECK_RESULT).toBe('${{ needs.typecheck.result }}');
+    expect(gate.run).toContain('test "$TYPECHECK_RESULT" = success');
+    const typecheck = workflow.jobs.typecheck.steps.map((step: any) => step.run).filter(Boolean);
+    expect(typecheck).toEqual(expect.arrayContaining(['bun run typecheck', 'bun run typecheck:test', 'bun run format:cso:check']));
     expect(source).not.toContain('--quick');
+  });
+
+  test('zsh is installed so the bash+zsh portability arms run instead of skipping (#2669)', () => {
+    const suite = (Bun.YAML.parse(source) as any).jobs['free-suite'];
+    const apt = suite.steps.find((step: any) => step.name === 'Install Xvfb + X11 utilities + gate tools').run;
+    expect(apt.split(/\s+/)).toContain('zsh');
+    const ubicloud = fs.readFileSync(path.resolve(import.meta.dir, '..', 'scripts', 'ubicloud', 'setup-free-suite.sh'), 'utf-8');
+    const ubicloudApt = ubicloud.match(/apt-get install(?:[^\n]*\\\n)*[^\n]*/)![0];
+    expect(ubicloudApt.split(/\s+/)).toContain('zsh');
+  });
+
+  test('the aggregate summarizes every shard flake ledger before strict verification (W7a)', () => {
+    const steps = (Bun.YAML.parse(source) as any).jobs['free-tests'].steps;
+    const download = steps.findIndex((step: any) => step.with?.pattern === 'flake-ledger-*');
+    const summary = steps.findIndex((step: any) => step.run?.includes('scripts/test-health-report.ts flake-summary "$RUNNER_TEMP/flake-ledgers" >> "$GITHUB_STEP_SUMMARY"'));
+    const verify = steps.findIndex((step: any) => step.run?.includes('--ci-verify'));
+    expect(steps[download].with.path).toBe('${{ runner.temp }}/flake-ledgers');
+    expect(steps[download].with['merge-multiple']).toBeUndefined();
+    expect(download).toBeLessThan(summary);
+    expect(summary).toBeLessThan(verify);
+  });
+
+  test('the plan job runs the seed ratchet against the merge-base with full history', () => {
+    const planner = (Bun.YAML.parse(source) as any).jobs['free-plan'];
+    expect(planner.steps[0].with['fetch-depth']).toBe(0);
+    const ratchet = planner.steps.find((step: any) => step.name?.startsWith('Seed growth ratchet'));
+    expect(ratchet.run).toContain('GSTACK_FREE_SEED_BASE="$(git merge-base HEAD origin/main)"');
+    expect(ratchet.run).toContain('test/free-seed-ratchet.test.ts');
   });
 
   test('flake telemetry stays wired: retry flag, single-writer ledger, unconditional artifact', () => {

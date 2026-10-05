@@ -10,40 +10,43 @@
  * invariants codex's plan review specifically called out.
  */
 
-import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { makeServer, routeEntry, type TestServer } from './route-test-harness';
 
 const SERVER_SRC = readFileSync(
   join(import.meta.dir, '..', 'src', 'server.ts'),
   'utf-8',
 );
+const PTY_ROUTES_SRC = readFileSync(join(import.meta.dir, '..', 'src', 'routes', 'pty.ts'), 'utf-8');
 
-describe('/pty-inject-scan — server.ts static invariants', () => {
-  test('endpoint is defined as a POST handler', () => {
-    expect(SERVER_SRC).toContain(
-      "url.pathname === '/pty-inject-scan' && req.method === 'POST'",
-    );
+describe('/pty-inject-scan — route invariants', () => {
+  let server: TestServer;
+  beforeAll(() => { server = makeServer(); });
+  afterAll(() => server.cleanup());
+  const post = (headers: Record<string, string>, body?: string) =>
+    server.local('/pty-inject-scan', { method: 'POST', headers, body });
+
+  test('endpoint is defined as a local-only POST route', () => {
+    expect(routeEntry('POST', '/pty-inject-scan')).toMatchObject({ method: 'POST', surfaces: ['local'] });
   });
 
-  test('endpoint requires auth (validateAuth gate)', () => {
-    // Find the endpoint block, verify it calls validateAuth before doing
-    // any work.
-    const start = SERVER_SRC.indexOf("'/pty-inject-scan'");
-    expect(start).toBeGreaterThan(-1);
-    const blockEnd = SERVER_SRC.indexOf("\n      // ─", start);
-    const block = SERVER_SRC.slice(start, blockEnd > start ? blockEnd : start + 5000);
-    expect(block).toContain('validateAuth(req)');
-    expect(block).toContain('401');
+  test('endpoint requires auth (root bearer gate)', async () => {
+    for (const headers of [{}, { Authorization: 'Bearer not-the-root-token-0123456789' }]) {
+      const resp = await post(headers, JSON.stringify({ text: 'hi' }));
+      expect(resp.status).toBe(401);
+      expect(await resp.json()).toEqual({ error: 'Unauthorized' });
+    }
+    expect(routeEntry('POST', '/pty-inject-scan').auth).toBe('root-bearer');
   });
 
-  test('endpoint caps payload at 64KB', () => {
-    const start = SERVER_SRC.indexOf("'/pty-inject-scan'");
-    const block = SERVER_SRC.slice(start, start + 5000);
-    expect(block).toContain('64 * 1024');
-    expect(block).toContain('payload-too-large');
-    expect(block).toContain('413');
+  test('endpoint caps payload at 64KB', async () => {
+    const auth = { Authorization: `Bearer ${server.rootToken}`, 'Content-Length': String(64 * 1024 + 1) };
+    const resp = await post(auth, JSON.stringify({ text: 'x'.repeat(64 * 1024) }));
+    expect(resp.status).toBe(413);
+    expect(await resp.json()).toEqual({ error: 'payload-too-large', limit: 65536 });
   });
 
   test('endpoint is NOT in the tunnel listener allowlist', () => {
@@ -54,24 +57,27 @@ describe('/pty-inject-scan — server.ts static invariants', () => {
     expect(tunnelAllowlist).not.toContain('/pty-inject-scan');
   });
 
+  // Source checks re-pointed to routes/pty.ts: a lone surrogate cannot reach
+  // this response through its public inputs without the mocked sidecar below,
+  // and module-import rules have no runtime seam.
   test('response goes through sanitizeReplacer (Unicode egress hardening)', () => {
-    const start = SERVER_SRC.indexOf("'/pty-inject-scan'");
-    const block = SERVER_SRC.slice(start, start + 5000);
-    expect(block).toContain('sanitizeReplacer');
+    const block = PTY_ROUTES_SRC.slice(PTY_ROUTES_SRC.indexOf("path: '/pty-inject-scan'"));
+    expect(block).toContain('replacer: sanitizeReplacer');
   });
 
   test('endpoint surfaces l4 availability shape for D7 degrade-to-WARN path', () => {
-    const start = SERVER_SRC.indexOf("'/pty-inject-scan'");
-    const block = SERVER_SRC.slice(start, start + 5000);
+    const block = PTY_ROUTES_SRC.slice(PTY_ROUTES_SRC.indexOf("path: '/pty-inject-scan'"));
     expect(block).toContain('isSidecarAvailable');
     expect(block).toContain('available');
   });
 
   test('endpoint uses the sidecar client, not direct security-classifier import', () => {
-    // Static check that server.ts imports from security-sidecar-client.ts,
-    // NOT from security-classifier.ts directly (would brick the compiled
-    // binary per CLAUDE.md).
-    expect(SERVER_SRC).toContain("from './security-sidecar-client'");
+    // The route imports security-sidecar-client.ts, NOT security-classifier.ts
+    // directly (would brick the compiled binary per CLAUDE.md).
+    expect(PTY_ROUTES_SRC).toContain("from '../security-sidecar-client'");
+    for (const file of readdirSync(join(import.meta.dir, '..', 'src', 'routes'))) {
+      expect(readFileSync(join(import.meta.dir, '..', 'src', 'routes', file), 'utf-8')).not.toContain('security-classifier');
+    }
     expect(SERVER_SRC).not.toContain("from './security-classifier'");
   });
 });

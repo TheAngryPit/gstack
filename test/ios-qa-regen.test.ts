@@ -48,6 +48,8 @@ function copyIntoFakeInstall(workDir: string): { root: string; launcher: string 
   copyFileSync(join(ROOT, 'bin', 'gstack-ios-qa-regen'), launcher);
   chmodSync(launcher, 0o755);
   copyFileSync(join(ROOT, 'ios-qa', 'scripts', 'gen-accessors.ts'), join(scriptsDir, 'gen-accessors.ts'));
+  mkdirSync(join(root, 'lib'), { recursive: true });
+  copyFileSync(join(ROOT, 'lib', 'state-root.ts'), join(root, 'lib', 'state-root.ts'));
   for (const [template] of SAFE_TEMPLATE_MAP) {
     copyFileSync(join(ROOT, 'ios-qa', 'templates', template), join(templatesDir, template));
   }
@@ -233,13 +235,16 @@ final class AppState {
     expect(installedContents).not.toContain('FORBIDDEN-STATE-SENTINEL');
     expect(installedContents).not.toContain('OBSOLETE-HARNESS-SENTINEL');
 
-    const swiftAvailable = spawnSync('swift', ['--version'], { encoding: 'utf8', timeout: 30_000 }).status === 0;
+    // Validate the generated Swift manifest on the supported macOS host.
+    // The named macOS CI lane runs this regeneration suite as well.
+    const swiftAvailable = process.platform === 'darwin'
+      && spawnSync('swift', ['--version'], { encoding: 'utf8', timeout: 30_000 }).status === 0;
     if (swiftAvailable) {
       const dump = spawnSync('swift', ['package', 'dump-package', '--package-path', bridgeDir], {
         encoding: 'utf8',
         timeout: 30_000,
       });
-      expect(dump.status).toBe(0);
+      expect(dump.status, `${dump.error ?? ""}\n${dump.stderr}`).toBe(0);
       const manifest = JSON.parse(dump.stdout) as { targets: Array<{ name: string }> };
       expect(manifest.targets.map(target => target.name).sort()).toEqual([
         'DebugBridgeCore',
@@ -256,5 +261,5 @@ final class AppState {
     expect(second.stdout).toContain('gen-accessors: cache hit');
     expect(treeHash(bridgeDir, generatedDir)).toBe(firstHash);
     expect(readFileSync(accessorPath, 'utf8').match(/accessorHash: "([a-f0-9]+)"/)?.[1]).toBe(firstAccessorHash);
-  });
+  }, 150_000);
 });

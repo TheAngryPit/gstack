@@ -66,8 +66,9 @@ test('every host exposes the DX per-call rule before the pre-review audit and St
       const mode = content.slice(content.indexOf('### 0E. Mode Selection'), content.indexOf('Context-dependent defaults:'));
       expect(mode).toContain('Use the mode the user explicitly requested for this review.');
       expect(mode).toContain('skip the mode question and continue to 0F. Otherwise, ask below.');
+      const sectionPrefix = `${path.posix.dirname(artifact.relativePath)}/sections/`;
       const sectionText = generated.artifacts.filter(item => item.kind === 'section'
-        && item.host === artifact.host && item.relativePath.startsWith('plan-devex-review/'))
+        && item.host === artifact.host && item.relativePath.startsWith(sectionPrefix))
         .map(item => fs.readFileSync(path.join(outputRoot, item.relativePath), 'utf8')).join('\n');
       const allContent = content + '\n' + sectionText;
       expect(allContent).toContain('if viable, split them before asking');
@@ -80,8 +81,9 @@ test('every host exposes the DX per-call rule before the pre-review audit and St
       const options = beforeAudit.indexOf('4. **Draft and answer one decision.**', gate);
       expect([gate, ground, classify, scope, options].every((offset, i, offsets) =>
         offset >= 0 && (i === 0 || offset > offsets[i - 1]!))).toBe(true);
-      const localRule = allContent.slice(allContent.indexOf('## CRITICAL RULE — How to ask questions'),
-        allContent.indexOf('## Required Outputs', allContent.indexOf('## CRITICAL RULE — How to ask questions')));
+      const askHeading = allContent.search(/^## .*How to ask questions$/im);
+      expect(askHeading).toBeGreaterThanOrEqual(0);
+      const localRule = allContent.slice(askHeading, allContent.indexOf('## Required Outputs', askHeading));
       expect(localRule).toContain('Run the Decision gate before drafting options.');
       expect(localRule).not.toContain('use AskUserQuestion for each gap');
       expect(allContent).toContain('Record observed human onboarding separately from automated execution');
@@ -108,17 +110,47 @@ test('every host exposes the DX per-call rule before the pre-review audit and St
       expect(allContent).toContain('If a necessary remedy crosses an explicit scope boundary, name that boundary');
       expect(allContent).toContain('obtain scope approval before choosing or applying the remedy');
       expect(allContent).toContain('Implementation details and proof of one chosen behavior\nstay together; independent policies each need their own decision');
-      if (!getHostConfig(artifact.host!).suppressedResolvers.includes('CODEX_PLAN_REVIEW')) {
-        const outside = allContent.slice(allContent.indexOf('## Outside Voice — Independent Plan Challenge'));
-        const context = outside.indexOf('REVIEW CONTEXT (from the full working list, outside the truncated plan body)');
-        const planBody = outside.indexOf('THE PLAN:\n<plan content>');
-        expect(context).toBeGreaterThan(0);
-        expect(planBody).toBeGreaterThan(context);
-        expect(outside.slice(context, planBody)).toContain('selected option, answer reference and exact scope');
-        expect(outside.slice(context, planBody)).toContain('including any explicitly approved exception');
-        expect(outside.slice(context, planBody)).toContain('Missing implementation remains a verification');
-        expect(outside.slice(context, planBody)).toContain('concrete new evidence or a changed assumption');
-        expect(outside).toContain("Apply the Decision gate's distinction between routine review work and a new choice.");
+      const suppressesPlanReview = getHostConfig(artifact.host!).suppressedResolvers.includes('CODEX_PLAN_REVIEW');
+      if (artifact.host === 'codex') {
+        // Codex carries the same review policy in its native anti-shortcut rubric.
+        expect(allContent).toContain('Necessary code, tests and docs for an exact previously selected contract do not reopen it');
+        expect(allContent).toContain('A broad approach or recommendation does not approve independent remedies or optional verification depth');
+      } else if (!suppressesPlanReview) {
+        expect(allContent).toContain("Apply the Decision gate's distinction between routine review work and a new choice.");
+      }
+      if (!suppressesPlanReview) {
+        const reviewStart = allContent.indexOf(artifact.host === 'codex'
+          ? '## Native Codex independent plan challenge (default-on)'
+          : '## Outside Voice — Independent Plan Challenge');
+        expect(reviewStart).toBeGreaterThanOrEqual(0);
+        const review = allContent.slice(reviewStart);
+        if (artifact.host === 'codex') {
+          // Codex carries the full DX working-list context in its native packet
+          // instead of embedding the legacy external-CLI review body.
+          const contextStart = review.indexOf('**DX working-list context:**');
+          expect(contextStart).toBeGreaterThanOrEqual(0);
+          const dispatchStart = review.indexOf('## Codex independent review:');
+          expect(dispatchStart).toBeGreaterThan(0);
+          const context = review.slice(contextStart, dispatchStart);
+          expect(context).toContain('DX working-list context');
+          expect(context).toContain('from the full working list before preparing');
+          expect(context).toContain('selected option, answer reference and exact scope');
+          expect(context).toContain('including any explicitly approved exception');
+          expect(context).toMatch(/Missing implementation\s+remains a verification gap/);
+          expect(context).toMatch(/concrete new evidence\s+or a changed assumption/);
+          expect(review).toContain('Prepare a bounded review packet');
+          expect(review).toContain('approved document or minimum relevant excerpts');
+          expect(review).toContain('Plan truncated for size');
+        } else {
+          const context = review.indexOf('REVIEW CONTEXT (from the full working list, outside the truncated plan body)');
+          const planBody = review.indexOf('THE PLAN:\n<plan content>');
+          expect(context).toBeGreaterThan(0);
+          expect(planBody).toBeGreaterThan(context);
+          expect(review.slice(context, planBody)).toContain('selected option, answer reference and exact scope');
+          expect(review.slice(context, planBody)).toContain('including any explicitly approved exception');
+          expect(review.slice(context, planBody)).toContain('Missing implementation remains a verification');
+          expect(review.slice(context, planBody)).toContain('concrete new evidence or a changed assumption');
+        }
       } else {
         expect(allContent).not.toContain('REVIEW CONTEXT (from the full working list, outside the truncated plan body)');
       }

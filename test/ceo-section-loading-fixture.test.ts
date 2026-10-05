@@ -1,5 +1,7 @@
 import lifetimeFixture from './fixtures/ceo-fill-lifetime.json';
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   CACHE_READ_WRITE_SKETCH,
   CEO_SECTION_CACHE_PLAN,
@@ -1884,4 +1886,25 @@ test('table rows cannot borrow an ordering defect from another issue or from quo
  expect(found('> '+originalFailure+'\n\n'+missing)).toBe(false);
  expect(found('```text\n'+originalFailure+'\n```\n\n'+missing)).toBe(false);
 });
+});
+
+// Census 36597762183 slice 3: the final PLAN.md (rebuilt from the captured Edits)
+// traced the race as an arrow-ordered execution in its WR-1 ledger row.
+describe('arrow-ordered stale-fill execution', () => {
+  const report = readFileSync(join(import.meta.dir, 'fixtures/ceo-section-loading-36597762183-report.md'), 'utf8');
+  const trace = 'R1 miss -> R1 store read (v1) -> W commit v2 -> W cache.delete -> W fulfills -> R1 cache.set(v1) -> R2 (begun after W) hits v1.';
+  test('the captured report identifies the seeded race', () => {
+    expect(report).toContain(trace);
+    expect(hasStaleFillRaceFinding(report)).toBe(true);
+  });
+  test.each([
+    ['fill before invalidation', trace.replace('W cache.delete -> W fulfills -> R1 cache.set(v1)', 'R1 cache.set(v1) -> W cache.delete -> W fulfills')],
+    ['later reader is the filling reader', trace.replace('R2 (begun after W)', 'R1 (begun after W)')],
+    ['later reader began before the write', trace.replace('begun after W', 'begun before W')],
+    ['fill stores the committed version', trace.replace('R1 cache.set(v1)', 'R1 cache.set(v2)')],
+    ['later reader sees the committed version', trace.replace('hits v1.', 'hits v2.')],
+    ['trace declared impossible', trace + ' This order is impossible here.'],
+  ])('%s is not the seeded race', (_name, mutated) => {
+    expect(hasStaleFillRaceFinding(report.replace(trace, mutated))).toBe(false);
+  });
 });

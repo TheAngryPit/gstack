@@ -223,7 +223,7 @@ test('a timed-out registered spool retains the complete byte prefix, never a pas
   let release: (() => void) | undefined;
   try {
     writeFileSync(source, `process.stdout.write(${JSON.stringify(payload)})`);
-    const result = await runShardChild({ ...options,
+    const result = await runShardChild({ ...options, timeoutMs: 3000,
       args: [source],
       hookStreams: child => {
         const sink = { write: (chunk: Buffer | string) => { writeSync(fd, Buffer.from(chunk)); return true; } } as NodeJS.WriteStream;

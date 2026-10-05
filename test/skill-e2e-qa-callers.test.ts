@@ -79,10 +79,17 @@ async function capture(caseId: QaCallerCase) {
   }
 }
 
-describeIfSelected('Automatic parent exploratory QA', [...QA_CALLER_CASES], () => {
-  for (const caseId of QA_CALLER_CASES) {
-    testConcurrentIfSelected(caseId, () => capture(caseId), QA_CALLER_TEST_MS);
-  }
+const LITERAL_CASES = ['review-exploratory-small-cli', 'ship-exploratory-small-cli', 'ship-exploratory-unavailable',
+  'ship-exploratory-plan-checks', 'ship-exploratory-late-input'] as const;
+if (LITERAL_CASES.join() !== QA_CALLER_CASES.join()) throw new Error('qa-callers literal registration drifted from QA_CALLER_CASES');
+
+describeIfSelected('Automatic parent exploratory QA', ['review-exploratory-small-cli', 'ship-exploratory-small-cli',
+  'ship-exploratory-unavailable', 'ship-exploratory-plan-checks', 'ship-exploratory-late-input'], () => {
+  testConcurrentIfSelected('review-exploratory-small-cli', () => capture('review-exploratory-small-cli'), QA_CALLER_TEST_MS);
+  testConcurrentIfSelected('ship-exploratory-small-cli', () => capture('ship-exploratory-small-cli'), QA_CALLER_TEST_MS);
+  testConcurrentIfSelected('ship-exploratory-unavailable', () => capture('ship-exploratory-unavailable'), QA_CALLER_TEST_MS);
+  testConcurrentIfSelected('ship-exploratory-plan-checks', () => capture('ship-exploratory-plan-checks'), QA_CALLER_TEST_MS);
+  testConcurrentIfSelected('ship-exploratory-late-input', () => capture('ship-exploratory-late-input'), QA_CALLER_TEST_MS);
 });
 
 afterAll(() => finalizeEvalCollector(collector));

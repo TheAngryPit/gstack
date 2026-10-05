@@ -19,7 +19,6 @@ import { resolveEvalModel } from '../../lib/eval-model';
 
 const GSTACK_DEV_DIR = path.join(os.homedir(), '.gstack-dev');
 const HEARTBEAT_PATH = path.join(GSTACK_DEV_DIR, 'e2e-live.json'); // heartbeat stays global
-const PROJECT_DIR = path.dirname(getProjectEvalDir()); // ~/.gstack/projects/$SLUG/
 
 /** Sanitize test name for use as filename: strip leading slashes, replace / with - */
 export function sanitizeTestName(name: string): string {
@@ -293,7 +292,7 @@ Runner entry UTC: ${new Date(startTime).toISOString()}
 Hard deadline UTC: ${new Date(deadline).toISOString()}
 Completion reserve starts UTC: ${new Date(deadline - reserve).toISOString()}
 Setup, CLI startup and API queueing consume this same window; it never resets.
-Before source Reads and after each saved checkpoint, use Bash to run exactly \`date -u +%Y-%m-%dT%H:%M:%SZ\`. Compare that observed UTC time with the times above. When remaining time is at most ${reserve / 1000} seconds, prioritize the remaining required completion outputs and verification. No required content or gate may be skipped. If the clock read fails, report timing unavailable; do not invent remaining time or restart the deadline.`;
+Before source Reads, use Bash to run exactly \`date -u +%Y-%m-%dT%H:%M:%SZ\`. After each saved checkpoint, compare the latest evidence capture's printed completedAt with the times above; run that clock read again only when no capture has completed since your last clock read. When remaining time is at most ${reserve / 1000} seconds, prioritize the remaining required completion outputs and verification. No required content or gate may be skipped. If the clock read fails, report timing unavailable; do not invent remaining time or restart the deadline.`;
     systemPrompt = systemPrompt ? `${systemPrompt}\n\n${notice}` : notice;
   }
 
@@ -302,7 +301,7 @@ Before source Reads and after each saved checkpoint, use Bash to run exactly \`d
   const safeName = testName ? sanitizeTestName(testName) : null;
   if (runId) {
     try {
-      runDir = path.join(PROJECT_DIR, 'e2e-runs', runId);
+      runDir = path.join(path.dirname(getProjectEvalDir()), 'e2e-runs', runId);
       fs.mkdirSync(runDir, { recursive: true });
     } catch { /* non-fatal */ }
   }
@@ -696,7 +695,8 @@ Before source Reads and after each saved checkpoint, use Bash to run exactly \`d
   }
 
   // Cost from result line (exact) or estimate from chars
-  const turnsUsed = resultLine?.num_turns || 0;
+  const turnsUsed = resultLine?.num_turns
+    || new Set(transcript.filter(event => event?.type === 'assistant' && !event.parent_tool_use_id).map(event => event.message?.id)).size;
   const estimatedCost = resultLine?.total_cost_usd || 0;
   const inputChars = prompt.length;
   const outputChars = (resultLine?.result || '').length;

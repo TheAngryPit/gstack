@@ -3,7 +3,8 @@
  *
  * Pins three contracts:
  * 1. Allowlist semantics: contamination vars dropped, basics/auth/network
- *    kept, overrides merge last, EVALS_HERMETIC=0 is byte-identical legacy.
+ *    kept, overrides merge last, EVALS_HERMETIC=0 is the legacy env plus the
+ *    DISABLE_AUTOUPDATER pin.
  * 2. Seed-config shape: 20-char key suffix, trusted dirs, undefined-key safe.
  * 3. Dir lifecycle: /.claude suffix (extractPlanFilePath contract —
  *    claude-pty-runner.ts:191), sync singleton reuse, pid-aware GC.
@@ -143,6 +144,28 @@ describe('buildHermeticEnv allowlist', () => {
     ]) expect(result[name]).toBe(base[name]);
   });
 
+  test('a trailing qualifier does not carry a credential past the prefix rule (#2949)', () => {
+    const qualified = {
+      GITHUB_APP_PRIVATE_KEY_BASE64: 'synthetic-pem-base64',
+      GITHUB_PRIVATE_KEY_PEM: 'synthetic-pem',
+      GITHUB_TOKEN_1: 'synthetic-first-token',
+      GITHUB_TOKEN_GHES: 'synthetic-enterprise-token',
+      GITHUB_CLIENT_SECRET_VALUE: 'synthetic-client-secret',
+      EVALS_API_KEY_FALLBACK: 'synthetic-eval-key',
+    };
+    const result = buildHermeticEnv({ ...CONTAMINATED, ...qualified }, HERMETIC_VARS);
+    for (const name of Object.keys(qualified)) expect(result[name]).toBeUndefined();
+    const serialized = JSON.stringify(result);
+    for (const value of Object.values(qualified)) expect(serialized.includes(value)).toBe(false);
+
+    // Segments, not substrings: names that merely contain a credential word
+    // stay metadata, and an explicit runner admission still wins.
+    const metadata = { GITHUB_PATH: '/tmp/p', GITHUB_TOKENIZER: 't', GITHUB_KEYRING: 'k', GITHUB_REF_PROTECTED: 'false', EVALS_RUN_ID: 'r' };
+    const kept = buildHermeticEnv({ ...CONTAMINATED, ...metadata, ...qualified }, HERMETIC_VARS, undefined, { extraAllow: ['GITHUB_TOKEN_1'] });
+    for (const [name, value] of Object.entries(metadata)) expect(kept[name]).toBe(value);
+    expect(kept.GITHUB_TOKEN_1).toBe(qualified.GITHUB_TOKEN_1);
+  });
+
   test('explicit provider auth, runner admissions, and overrides still win', () => {
     const base = {
       ...CONTAMINATED,
@@ -167,7 +190,7 @@ describe('buildHermeticEnv allowlist', () => {
 });
 
 describe('EVALS_HERMETIC=0 escape hatch', () => {
-  test('returns byte-identical legacy env, overrides still last', () => {
+  test('returns the legacy env plus the updater pin, overrides still last', () => {
     const base = { ...CONTAMINATED, EVALS_HERMETIC: '0' } as NodeJS.ProcessEnv;
     const e = buildHermeticEnv(base, HERMETIC_VARS, { GSTACK_HEADLESS: '1' });
     // Legacy spread: every base var survives, hermeticVars NOT applied.
@@ -175,7 +198,7 @@ describe('EVALS_HERMETIC=0 escape hatch', () => {
     expect(e.CLAUDE_CONFIG_DIR).toBe('/Users/op/.claude');
     expect(e.GSTACK_HOME).toBe('/Users/op/.gstack');
     expect(e.GSTACK_HEADLESS).toBe('1');
-    expect(e).toEqual({ ...(base as Record<string, string>), GSTACK_HEADLESS: '1' });
+    expect(e).toEqual({ ...(base as Record<string, string>), DISABLE_AUTOUPDATER: '1', GSTACK_HEADLESS: '1' });
   });
 
   test('isHermeticEnabled reads at call time (ESM-hoist safety)', () => {

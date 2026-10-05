@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {spawnSync} from 'node:child_process';
 const ROOT = path.resolve(import.meta.dir, '..');
-test.each(['complete-control', 'captured-omission', 'claimed-only', 'background', 'missing-report', 'unrelated-report', 'captured-timeout'])
+test.each(['complete-control', 'captured-omission', 'claimed-only', 'background', 'missing-report', 'unrelated-report', 'captured-timeout', 'performance-omitted', 'performance-background'])
   ('N+1 registered completion contract: %s', scenario => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'n1-contract-'));
     const facts = path.join(dir, 'facts.json');
@@ -18,6 +18,8 @@ const actual=await import(path.join(root,'test/helpers/session-runner.ts'));
 const fixture=JSON.parse(fs.readFileSync(path.join(root,'test/fixtures/review-n-plus-one-dispatch.json'),'utf8'));
 const data=structuredClone(['captured-omission','claimed-only'].includes(scenario)?fixture.omission:fixture.ci);
 if(scenario==='background')data.events[1].message.content[0].input.run_in_background=true;
+if(scenario==='performance-background')data.events[0].message.content[0].input.run_in_background=true;
+if(scenario==='performance-omitted')data.events.shift();
 const parsed=actual.parseNDJSON(data.events.map(e=>JSON.stringify(e)));
 let prompt='';
 mock.module(path.join(root,'test/helpers/e2e-helpers.ts'),()=>({

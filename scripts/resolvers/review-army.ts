@@ -1,7 +1,7 @@
 /**
  * Review Army resolver — parallel specialist reviewers for /review
  *
- * Generates template prose that instructs Claude to:
+ * Generates template prose for each supported host to:
  * 1. Detect stack and scope (via gstack-diff-scope)
  * 2. Select and dispatch specialist subagents in parallel
  * 3. Collect, parse, merge, and deduplicate JSON findings
@@ -10,7 +10,9 @@
  * Shipped as Release 2 of the self-learning roadmap (SELF_LEARNING_V0.md).
  */
 import type { TemplateContext } from './types';
+import { generateCodexNativeReview } from './codex-native-review';
 import { CC_BACKGROUND_DEFAULT_SINCE } from './constants';
+import { learningsCapture, LEARNINGS_VERDICT } from './learnings';
 
 function generateSpecialistSelection(ctx: TemplateContext): string {
   const isShip = ctx.skillName === 'ship';
@@ -85,6 +87,47 @@ Note which specialists were selected, gated, and skipped. Print the selection:
 }
 
 function generateSpecialistDispatch(ctx: TemplateContext): string {
+  if (ctx.host === 'codex') return `### Dispatch native specialists
+
+${generateCodexNativeReview(ctx, 'specialist review army')}
+Use the selection and adaptive gating above unchanged. These specialists supplement
+the main review; a failed specialist does not block it but must be reported as missing
+coverage. Missing selected coverage prevents claiming the Review Army complete or
+clean. Dispatch selected independent specialists in parallel only within the actual
+native capacity and task authority; otherwise use bounded batches, not invented slots.
+
+The parent prepares each packet: the FULL selected specialist checklist, stack context,
+relevant approved pitfall learnings (search at most 5 for the specialist domain), and
+the exact merge-base diff plus relevant source/test context. Exclude unrelated/private
+material; do not pass shell commands for a tool-less reviewer to execute. Declare any
+truncation. Ask each specialist to apply its checklist to that supplied evidence.
+Use bounded read-only source inspection for checklist criteria requiring cross-file
+tracing; provide exact approved roots/paths. Packet-only is allowed only if the packet
+contains that full evidence. Missing paths remain unverified, never clean.
+
+**Output contract:** One JSON finding per line, no preamble or commentary:
+{"severity":"CRITICAL|INFORMATIONAL","confidence":8,"path":"file","line":1,"category":"category","summary":"description","fix":"recommended fix","fingerprint":"path:line:category","specialist":"name"}
+Required: severity, confidence, path, category, summary, specialist.
+Optional: line, fix, fingerprint, evidence, evidence_paths, helper_target, test_stub,
+advisory, lines_removable.
+For a testable defect, include a minimal test_stub in the detected TEST_FW with clear
+describe/it/test intent. Skip stubs for architectural/design-only findings. Preserve
+the simplification checklist's advisory fields. Optional extraction advice belongs to
+the core shared-code check; do not duplicate its proposals. Report real defects in
+duplicated code independently. Preserve advisory metadata for structural advice; never
+label a demonstrated defect advisory merely because sharing a helper could fix it. If
+no findings, return NO FINDINGS.
+
+Collect actual final outputs through advertised native waits before merging. Before
+editing, confirm every dispatched reviewer task has finished or stopped. A timeout
+alone does not prove termination. If a reader is live or its state is unknown, wait or
+inspect its native task status; if you cannot confirm termination, follow the parent's
+Fix-First stop path without edits. Failed, timed-out or unavailable contexts are
+review_not_run, not NO FINDINGS or completed/clean coverage. Record the specialist and
+reason, continue independent review work where safe, and do not count failed dispatches
+as zero-finding samples in adaptive hit-rate statistics. Keep completion pending while
+selected coverage remains unresolved.
+`;
   return `### Dispatch specialists in parallel
 
 For each selected specialist, launch an independent subagent via the Agent tool.
@@ -95,19 +138,20 @@ so they run in parallel. Each subagent has fresh context — no prior review bia
 
 Construct the prompt for each specialist. The prompt includes:
 
-1. The specialist's checklist content (you already read the file above)
+1. The specialist's checklist path from the selection above (the subagent reads it; never paste its content)
 2. Stack context: "This is a {STACK} project."
 3. Past learnings for this domain (if any exist):
 
 \`\`\`bash
-${ctx.paths.binDir}/gstack-learnings-search --type pitfall --query "{specialist domain}" --limit 5 2>/dev/null || true
+${learningsCapture(`${ctx.paths.binDir}/gstack-learnings-search --type pitfall --query "{specialist domain}" --limit 5`)}
+${LEARNINGS_VERDICT}
 \`\`\`
 
 If learnings are found, include them: "Past learnings for this domain: {learnings}"
 
 4. Instructions:
 
-"You are a specialist code reviewer. Read the checklist below, then run
+"You are a specialist code reviewer. Read the checklist at {checklist path}, then run
 \`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"\` to get the full diff. Apply the checklist against the diff.
 
 For each finding, output a JSON object on its own line:
@@ -126,10 +170,7 @@ If no findings: output \`NO FINDINGS\` and nothing else.
 Do not output anything else — no preamble, no summary, no commentary.
 
 Stack context: {STACK}
-Past learnings: {learnings or 'none'}
-
-CHECKLIST:
-{checklist content}"
+Past learnings: {learnings or 'none'}"
 
 **Subagent configuration:**
 - Use \`subagent_type: "general-purpose"\`
@@ -200,9 +241,11 @@ Core findings keep the core Confidence Calibration gates.
 #### 5. Score and present specialists
 
 Only specialist findings enter this header and \`quality_score\`; core findings do not.
-Use the merged NON-advisory specialist findings for both counts and score:
+Use the merged NON-advisory specialist findings for both counts and score;
+the header's N is X + Y, so advisory findings never add to it:
 \`quality_score = max(0, 10 - (critical_count * 2 + informational_count * 0.5))\`
 Cap at 10 and retain for ${persistRef}. These are not final unresolved-defect totals.
+Print only this block: the stage 6 activity object and \`test_stub\` bodies are log and Fix-First data.
 Validated \`"advisory": true\` findings from any source are excluded from score,
 header, unresolved-defect totals and clean-status blockers. Show them separately;
 they remain ASK-only, never auto-applied. Real defects follow normal Fix-First.
@@ -257,6 +300,29 @@ function generateRedTeam(ctx: TemplateContext): string {
   const isShip = ctx.skillName === 'ship';
   const stepMerge = isShip ? '9.2' : '4.6';
   const fixFirstRef = isShip ? 'Step 9.3 dedup, then Step 9.4 Fix-First' : 'Step 5 Fix-First';
+  if (ctx.host === 'codex') return `### Red Team dispatch (conditional)
+
+**Activation:** Only if DIFF_LINES > 200 OR any specialist produced a CRITICAL finding.
+
+When activated, prepare a bounded packet from the red-team checklist at
+\`${ctx.paths.skillRoot}/review/specialists/red-team.md\`, the merged specialist
+findings from Step ${stepMerge}, and the exact approved diff plus relevant source/test
+evidence. Exclude unrelated/private material and credentials. Do not ask the reviewer
+to run shell commands or read outside the exact authorised paths.
+
+Dispatch one fresh native reviewer through the API advertised by this Codex session.
+Preserve the selected main model and effort; when the API is
+\`collaboration.spawn_agent\`, use \`fork_turns: "none"\` and omit unselected overrides.
+Ask it to find cross-cutting concerns, integration boundary issues and failure modes
+missed by the specialist findings. Require the existing JSON finding schema with
+\`specialist:"red-team"\`; a successful \`NO FINDINGS\` is a completed empty result.
+Wait for actual terminal completion before integrating its output.
+
+If the reviewer finds issues, add them to the original specialist outputs and rerun
+stages 1–7 of Step ${stepMerge} before ${fixFirstRef}; do not boost or count earlier
+findings twice. Failure, timeout, refusal or unavailable native dispatch is
+\`review_not_run\`, never a clean result; continue only through the existing missing-
+coverage policy. ${isShip ? "Return to the parent's Exploratory QA step, then dedup and persistence; Step 9.4 cannot certify missing dispatched coverage as completed or clean." : 'Continue independent Step 4.7 QA and Step 4.8 adversarial review; Step 5.8 cannot certify missing dispatched coverage as completed or clean.'}`;
   return `### Red Team dispatch (conditional)
 
 **Activation:** Only if DIFF_LINES > 200 OR any specialist produced a CRITICAL finding.
@@ -264,13 +330,13 @@ function generateRedTeam(ctx: TemplateContext): string {
 If activated, dispatch one more subagent via the Agent tool (pass \`run_in_background: false\` — foreground; subagents default to background since ${CC_BACKGROUND_DEFAULT_SINCE}).
 
 The Red Team subagent receives:
-1. The red-team checklist from \`${ctx.paths.skillRoot}/review/specialists/red-team.md\`
-2. The merged specialist findings from Step ${stepMerge} (so it knows what was already caught)
+1. The red-team checklist path \`${ctx.paths.skillRoot}/review/specialists/red-team.md\` (it reads the file)
+2. The merged specialist findings from Step ${stepMerge}, one line each (so it knows what was already caught)
 3. The git diff command
 
 Prompt: "You are a red team reviewer. The code has already been reviewed by N specialists
 who found the following issues: {merged findings summary}. Your job is to find what they
-MISSED. Read the checklist, run \`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"\`, and look for gaps.
+MISSED. Read the checklist at {red-team checklist path}, run \`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"\`, and look for gaps.
 Output findings as JSON objects (same schema as the specialists). Focus on cross-cutting
 concerns, integration boundary issues, and failure modes that specialist checklists
 don't cover."
@@ -284,9 +350,6 @@ If the Red Team fails or times out, confirm it stopped and record its review as 
 }
 
 export function generateReviewArmy(ctx: TemplateContext): string {
-  // Codex host: strip entirely — Codex should not run Review Army
-  if (ctx.host === 'codex') return '';
-
   const sections = [
     generateSpecialistSelection(ctx),
     generateSpecialistDispatch(ctx),

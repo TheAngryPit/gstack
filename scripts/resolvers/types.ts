@@ -85,6 +85,7 @@ import type { Model } from '../models';
 export type { Model } from '../models';
 
 export interface TemplateContext {
+  sectionBase?: string; // Generated host-specific section directory.
   skillName: string;
   tmplPath: string;
   benefitsFrom?: string[];
@@ -111,6 +112,12 @@ export interface TemplateContext {
    * Terse builds make the compression structural — bytes never ship in the first place.
    */
   explainLevel?: 'default' | 'terse';
+  /**
+   * Install-context render contract (docs/ADDING_A_HOST.md): absolute install
+   * root a per-install render serves (`gen-skill-docs --install-root`).
+   * null/undefined = the host's default root (committed render, unchanged bytes).
+   */
+  installRoot?: string | null;
 }
 
 /** Resolver function signature. args is populated for parameterized placeholders like {{INVOKE_SKILL:name}}. */

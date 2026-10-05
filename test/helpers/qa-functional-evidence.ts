@@ -7,6 +7,12 @@ import { readQACheckpointFiles, validateQACheckpoints } from './qa-checkpoint-ev
 import { nativeCalls } from './qa-checkpoint-evidence';
 import { qaNativeCapture } from './qa-evidence-producer';
 
+/** Webhook scenarios a run must observe, per mode; the verdict and the fixture's capture nudge share this list. */
+export const QA_WEBHOOK_REQUIRED_SCENARIOS: Record<QAMode, string[]> = {
+  'qa-only': ['happy', 'reject', 'duplicate', 'partial', 'concurrent-ab', 'concurrent-ba', 'cancel', 'dependency'],
+  qa: ['happy', 'cancel', 'dependency'],
+};
+
 const canonical = (value: any): string => JSON.stringify(value && typeof value === 'object'
   ? Array.isArray(value) ? value.map(item => JSON.parse(canonical(item)))
     : Object.fromEntries(Object.keys(value).sort().map(key => [key, JSON.parse(canonical(value[key]))])) : value) ?? 'null';
@@ -15,14 +21,14 @@ const passingOutput = (text: string) => /\b[1-9]\d* pass\b/.test(text) && /\b0 f
 
 export function qaNativeProbes(result: Pick<SkillTestResult, 'toolCalls'> & Partial<Pick<SkillTestResult, 'transcript'>>, root?: string) {
   const calls = root && result.transcript ? nativeCalls(result.transcript, []) : [];
-  return result.toolCalls.flatMap<{ index: number; command: string; nativeCommand?: string; observed: any }>((call, index) => {
+  return result.toolCalls.flatMap<{ index: number; command: string; nativeCommand?: string; capture?: string; observed: any }>((call, index) => {
     if (root && call.tool === 'Bash') {
       const native = calls.filter(native => native.name === 'Bash' && native.input.command === call.input?.command && native.output === call.output);
       const producer = native.length === 1 ? qaNativeCapture(native[0], { cwd: root, reportRoot: path.join(root, 'qa-reports'), executable: path.join(root, 'bin/gstack-qa-evidence') }) : undefined;
       if (producer && /^bun (?:run probe -- |cancel\.ts$)/.test(producer.command.nativeCommand!)) {
         const observed = producer.captured.observed as any;
         if (observed && (Array.isArray(observed.args) || typeof observed.scenario === 'string'
-          || producer.command.nativeCommand === 'bun cancel.ts' && Object.hasOwn(observed, 'exit'))) return [{ index, command: call.input.command, nativeCommand: producer.command.nativeCommand!, observed }];
+          || producer.command.nativeCommand === 'bun cancel.ts' && Object.hasOwn(observed, 'exit'))) return [{ index, command: call.input.command, nativeCommand: producer.command.nativeCommand!, capture: producer.command.id!, observed }];
       }
     }
     if (call.tool !== 'Bash' || !/^bun (?:run probe -- |cancel\.ts$)/.test(call.input?.command ?? '')) return [];
@@ -126,7 +132,7 @@ export function qaFunctionalVerdict(fixture: QAFunctionalFixture, mode: QAMode, 
   const cancellations = probes.filter(probe => fixture.family === 'cli' ? nativeCommand(probe) === 'bun cancel.ts' : probe.observed.scenario === 'cancel');
   if (!cancellations.length) failures.push('missing cancellation observation');
   if (fixture.family === 'webhook') {
-    for (const scenario of ['happy', 'reject', 'duplicate', 'partial', 'concurrent-ab', 'concurrent-ba']) {
+    for (const scenario of QA_WEBHOOK_REQUIRED_SCENARIOS[mode].filter(scenario => !['cancel', 'dependency'].includes(scenario))) {
       if (!probes.some(probe => probe.observed.scenario === scenario)) failures.push(`missing native ${scenario} probe`);
     }
   } else if (!probes.some(probe => probe.observed.args?.[0] === 'apply' && qaProbeClassification(probe.observed) === 'pass')) failures.push('missing adjacent valid CLI apply');
@@ -151,15 +157,25 @@ export function qaFunctionalVerdict(fixture: QAFunctionalFixture, mode: QAMode, 
   if (!report || report.revision !== fixture.revision || report.runtime !== `bun ${Bun.version}` || report.cwd !== fixture.root) failures.push('report lacks exact revision/runtime/cwd');
   if (!Array.isArray(report?.limits) || report.limits.length === 0) failures.push('report lacks coverage limits');
   if (!Array.isArray(report?.evidence) || report.evidence.length < probes.length) failures.push('report omitted executed probe evidence');
+  // A capture taken before the repair whose command reran on the repaired
+  // inputs may be classified superseded (exploratory §4).
+  const rerunAfterRepair = (probe: typeof probes[number]) => firstEdit >= 0 && probe.index < firstEdit
+    && probes.some(later => later.index > firstEdit && nativeCommand(later) === nativeCommand(probe));
   for (const probe of probes) {
     if (!report?.evidence?.some(row => row.command === probe.command && row.contract === 'README.md' && typeof row.expected === 'string' && row.expected.trim()
-      && row.classification === qaProbeClassification(probe.observed) && canonical(row.observed) === canonical(probe.observed))) failures.push(`missing exact sanitized evidence for ${probe.command}`);
+      && (row.classification === qaProbeClassification(probe.observed) || (row.classification === 'superseded' && rerunAfterRepair(probe)))
+      && canonical(row.observed) === canonical(probe.observed))) failures.push(`missing exact sanitized evidence for ${probe.command}`);
   }
   for (const row of report?.evidence ?? []) {
     if (!probes.some(probe => row.command === probe.command && canonical(row.observed) === canonical(probe.observed))) failures.push('report invented an executed probe');
   }
+  const learnedNote = (row: any) => {
+    try { return JSON.parse(checkpointFiles[`exploration-${row.nextCapture}.json`]).hypothesis === row.hypothesis; } catch { return false; }
+  };
   if (!report?.learning?.some(row => typeof row.hypothesis === 'string' && row.hypothesis.trim().length > 20
-    && probes.some(previous => previous.command === row.observationCommand && probes.some(next => next.index > previous.index && next.command === row.nextCommand && nativeCommand(next) !== nativeCommand(previous))))) failures.push('missing observation-to-next-hypothesis evidence');
+    && probes.some(previous => (typeof row.observationCapture === 'string' ? previous.capture === row.observationCapture : previous.command === row.observationCommand)
+      && probes.some(next => next.index > previous.index && nativeCommand(next) !== nativeCommand(previous)
+        && (typeof row.nextCapture === 'string' ? next.capture === row.nextCapture && learnedNote(row) : next.command === row.nextCommand))))) failures.push('missing observation-to-next-hypothesis evidence');
   const publicText = JSON.stringify(report) + result.output + reportMarkdown + JSON.stringify(checkpointFiles);
   if (publicText.includes(QA_PRIVATE_SENTINEL)) failures.push('private sentinel leaked into published evidence');
   if (mode === 'qa' && defect) {

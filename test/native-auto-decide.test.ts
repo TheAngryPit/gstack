@@ -155,6 +155,32 @@ for (const mode of modes) {
   }
 }
 
+// Census 36633323521 slice 17: the exact public declaration after a successful
+// AUTO_DECIDE check and question log. Its text is transplanted into the retained
+// owned retry for representation only; ownership still comes from that retry.
+const censusEqualsDeclaration = "**Decision: review mode = HOLD SCOPE** (auto-decided from your stored `plan-ceo-review-mode` preference; recommendation and selection both HOLD SCOPE).\n\nAudit record written via `gstack-question-log` with `user_choice: \"HOLD SCOPE\"`, `recommended: \"HOLD SCOPE\"`, `auto_decided: true`, session `1326-1790717444-c118c433`. Telemetry closed with `outcome=abort` since you stopped the workflow after mode selection by design, not because anything failed.";
+test('actual census "review mode = MODE" declaration completes the authenticated decision', () => {
+  const f = clone(); message(f).text = censusEqualsDeclaration;
+  expect(decide(f)?.option).toBe('HOLD SCOPE');
+  delete f.options.stateEvidence; f.tools = [];
+  expect(decide(f)).toBeNull();
+});
+for (const text of [
+  'Decision: review mode = SCOPE EXPANSION for this draft.',
+  'Decision: review mode = HOLD SCOPE for this draft, if approved.',
+  'Decision: review mode = not HOLD SCOPE for this draft.',
+  'Decision: review mode == HOLD SCOPE for this draft.',
+  'Decision: review mode = pending.',
+]) {
+  test(`"=" declarations keep every mode and completion veto: ${text}`, () => {
+    const f = clone(); message(f).text = text;
+    expect(decide(f)).toBeNull();
+    const g = clone(); g.options.stateEvidence.records[0].user_choice = 'HOLD SCOPE';
+    message(g).text = censusEqualsDeclaration + `\n\nCorrection: ${text}`;
+    expect(decide(g)).toBeNull();
+  });
+}
+
 const invalidDeclarations = [
   'Decision: HOLD SCOPELESS for this draft.',
   'Decision: HOLD for this draft.',

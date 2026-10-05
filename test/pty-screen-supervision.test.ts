@@ -20,16 +20,29 @@ const terminal = `class {
 
 function adapter() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-drain-'));
+  const screenModule = path.join(ROOT, 'test/helpers/pty/screen.ts');
+  const fixtureModule = path.join(ROOT, 'test/helpers/plan-count-fixture.ts');
   const screen = path.join(dir, 'screen.ts');
   const runner = path.join(dir, 'runner.ts');
-  fs.writeFileSync(screen, fs.readFileSync(path.join(ROOT, 'test/helpers/pty-screen.ts'), 'utf8')
-    .replace('const Terminal = await loadTerminal();', `const Terminal = ${terminal};`) +
-    `\nexport const controls = { writes: 0, disposals: 0, callback: undefined, disposeThrows: false, original: new Error('original parser rejection') };\n`);
-  fs.writeFileSync(runner, fs.readFileSync(path.join(ROOT, 'test/helpers/claude-pty-runner.ts'), 'utf8')
-    .replaceAll('fixture.cleanup();', 'globalThis.beforeFixtureCleanup?.(fixture); fixture.cleanup();')
+  fs.writeFileSync(screen, fs.readFileSync(screenModule, 'utf8')
+    .replace('const Terminal = await loadTerminal();', `const Terminal = ${terminal};`)
     .replace(/from (['"])(\.\.?\/[^'"]+)\1/g, (_match, _quote, relative) =>
-      'from ' + JSON.stringify(pathToFileURL(relative === './pty-screen' ? screen :
-        path.resolve(ROOT, 'test/helpers', relative + '.ts')).href)));
+      'from ' + JSON.stringify(pathToFileURL(path.resolve(path.dirname(screenModule), relative + '.ts')).href)) +
+    `\nexport const controls = { writes: 0, disposals: 0, callback: undefined, disposeThrows: false, original: new Error('original parser rejection') };\n`);
+  // The real harness, with the stub viewport in place of pty/screen.ts and a
+  // hook that observes each fixture just before the runner cleans it up.
+  fs.writeFileSync(runner, `import {mock} from 'bun:test';
+const screen = await import(${JSON.stringify(pathToFileURL(screen).href)});
+mock.module(${JSON.stringify(screenModule)}, () => screen);
+const fixtures = { ...await import(${JSON.stringify(pathToFileURL(fixtureModule).href)}) };
+mock.module(${JSON.stringify(fixtureModule)}, () => ({ ...fixtures, createPlanCountFixture: (...args) => {
+  const fixture = fixtures.createPlanCountFixture(...args), cleanup = fixture.cleanup;
+  fixture.cleanup = () => { globalThis.beforeFixtureCleanup?.(fixture); cleanup(); };
+  return fixture;
+} }));
+export const { launchClaudePty, runPlanSkillCounting, runPlanSkillFloorCheck } =
+  await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'test/helpers/claude-pty-runner.ts')).href)});
+`);
   return { dir, screen: pathToFileURL(screen).href, runner: pathToFileURL(runner).href };
 }
 
@@ -205,3 +218,27 @@ console.log(JSON.stringify({attempts,total:clock,fileWall:1800000}));
     expect(proof.total).toBeLessThan(proof.fileWall);
   } finally { fs.rmSync(a.dir, { recursive: true, force: true }); }
 }, 25_000);
+
+// The fake judge binary is a #! shell script, which Windows cannot exec; the PTY judge itself only
+// runs inside the POSIX PTY eval harness, so this case is POSIX-only like the harness it covers.
+test.skipIf(process.platform === 'win32')('the PTY state judge leaves the event loop to concurrent sessions while it waits', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-judge-'));
+  const claude = path.join(dir, 'claude');
+  const worker = path.join(dir, 'worker.ts');
+  try {
+    fs.writeFileSync(claude, '#!/bin/sh\ncat >/dev/null\nsleep 1\necho \'{"state":"waiting","reasoning":"fake judge"}\'\n', { mode: 0o755 });
+    fs.writeFileSync(worker, `import {judgePtyState} from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'test/helpers/claude-pty-runner.ts')).href)};
+const ticks=[];const timer=setInterval(()=>ticks.push(performance.now()),50);
+const verdict=await judgePtyState('Which layout? 1. One panel 2. Two panels',{testName:'nonblocking'});
+clearInterval(timer);
+console.log(JSON.stringify({state:verdict.state,elapsedMs:verdict.elapsedMs,ticks:ticks.length}));
+`);
+    const result = spawnSync(process.execPath, [worker], { cwd: ROOT, encoding: 'utf8', timeout: 15_000,
+      env: { ...process.env, BROWSE_TERMINAL_BINARY: claude, HOME: dir } });
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const proof = JSON.parse(result.stdout.trim().split('\n').at(-1)!);
+    expect(proof.state).toBe('waiting');
+    expect(proof.elapsedMs).toBeGreaterThanOrEqual(1000);
+    expect(proof.ticks).toBeGreaterThanOrEqual(10);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);

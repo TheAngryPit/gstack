@@ -116,7 +116,7 @@ If multiple runtimes detected (monorepo) → ask which runtime to set up first, 
 3. Create directory structure (test/, spec/, etc.)
 4. Create one example test matching the project's code to verify setup works
 
-If package installation fails → debug once. If still failing → revert with \`git checkout -- package.json package-lock.json\` (or equivalent for the runtime). Warn user and continue without tests.
+Record existing files and edits before installing. If package installation fails → debug once. If still failing → undo only the changes this bootstrap made and preserve the user's edits; never blanket-checkout. Warn user and continue without tests.
 
 ### B4.5. First real tests
 
@@ -125,7 +125,7 @@ Generate 3-5 real tests for existing code:
 1. **Find recently changed files:** \`git log --since=30.days --name-only --format="" | sort | uniq -c | sort -rn | head -10\`
 2. **Prioritize by risk:** Error handlers > business logic with conditionals > API endpoints > pure functions
 3. **For each file:** Write one test that tests real behavior with meaningful assertions. Never \`expect(x).toBeDefined()\` — test what the code DOES.
-4. Run each test. Passes → keep. Fails → fix once. Still fails → delete silently.
+4. Run each test. Passes → keep. Fails → fix an invalid test or fixture once. Still fails → drop it and name it, with its failure output, in the bootstrap summary; a failure in the code under test is a finding for the user, never a silent deletion.
 5. Generate at least 1 test, cap at 5.
 
 Never import secrets, API keys, or credentials in test files. Use environment variables or test fixtures.
@@ -137,7 +137,7 @@ Never import secrets, API keys, or credentials in test files. Use environment va
 {detected test command}
 \`\`\`
 
-If tests fail → debug once. If still failing → revert all bootstrap changes and warn user.
+If tests fail → debug once. If still failing → undo only this bootstrap's own changes, preserve the user's edits, and warn user with the failure.
 
 ### B5.5. CI/CD pipeline
 
@@ -188,7 +188,7 @@ Append a \`## Testing\` section:
 git status --porcelain
 \`\`\`
 
-Only commit if there are changes. Stage all bootstrap files (config, test directory, TESTING.md, CLAUDE.md, .github/workflows/test.yml if created):
+Only commit if there are changes. Stage the bootstrap's own files by name (config, test directory, TESTING.md, CLAUDE.md, .github/workflows/test.yml if created); if unrelated edits are already staged, stop and ask before committing:
 \`git commit -m "chore: bootstrap test framework ({framework name})"\`
 
 ---`;
@@ -304,7 +304,7 @@ Read the plan document. For each new feature, service, endpoint, or component de
 Read every changed file. For each one, trace how data flows through the code — don't just list functions, actually follow the execution:`;
 
   const traceStep1 = mode === 'plan'
-    ? `1. **Read the plan.** For each planned component, understand what it does and how it connects to existing code. When grounded in concrete source and test files, read them in a dedicated tool call before drawing the diagram. Do not mix diff, grep, package/config, git, or commentary into that read; use separate calls for context. Base the diagram on that read.`
+    ? `1. **Read the plan.** For each planned component, see how it connects to existing code. When grounded in concrete source and test files, read them in a dedicated tool call before drawing the diagram (\`cat -n src/f && echo -- && cat -n test/f\`). Do not mix diff, grep, config, git or commentary into that read; use separate calls for context. Base the diagram on that read.`
     : `1. **Read the diff.** For each changed file, read the full file (not just the diff hunk) to understand context.`;
 
   sections.push(`
@@ -341,7 +341,7 @@ context. Base the diagram on that read.
    - Every call to another function (trace into it — does IT have untested branches?)
    - Every edge: what happens with null input? Empty array? Invalid type?
 
-This is the critical step — you're building a map of every line of code that can execute differently based on input. Every branch in this diagram needs a test.`);
+This is the critical step — you're building a map of every line of code that can execute differently based on input. Every branch in this diagram needs coverage that would catch a real regression; the test value bar below decides whether that is a new test, an extension of an existing one, or already covered.`);
 
   // ── User flow coverage (shared) ──
   sections.push(`
@@ -349,7 +349,7 @@ This is the critical step — you're building a map of every line of code that c
 
 Code coverage isn't enough — you need to cover how real users interact with ${mode === 'plan' ? 'the selected target. For each existing or proposed feature' : 'the changed code. For each changed feature'}, think through:
 
-- **User flows:** What sequence of actions does a user take that touches this code? Map the full journey (e.g., "user clicks 'Pay' → form validates → API call → success/failure screen"). Each step in the journey needs a test.
+- **User flows:** What sequence of actions does a user take that touches this code? Map the full journey (e.g., "user clicks 'Pay' → form validates → API call → success/failure screen"). Each step in the journey needs coverage.
 - **Interaction edge cases:** What happens when the user does something unexpected?
   - Double-click/rapid resubmit
   - Navigate away mid-operation (back button, close tab, click another link)
@@ -480,23 +480,25 @@ A proposal that fails the value bar becomes "extend <existing test>" or is dropp
 
 Run the decision gate for this section's new or reopened choices. **STOP for each pending decision.** Wait for its answer before applying that remedy, moving to the next section or calling ExitPlanMode.
 
-When these test and eval choices are resolved, write the Test Plan Artifact below. Its approved requirements should be specific enough to implement alongside the feature code.`);
+Then write the Test Plan Artifact below, even while some choices are still unanswered (for example in a non-interactive run). Its approved requirements should be specific enough to implement alongside the feature code.`);
 
     // ── Test plan artifact (plan + ship) ──
     sections.push(`
 ${subheading} Test Plan Artifact
 
-After resolving the Test review decisions, record the approved test requirements in an artifact for \`/qa\` and \`/qa-only\`. List any unresolved choices separately as pending, not required implementation. Update this artifact if later approved decisions change the tests. Use the Review record and write policy above.
+After the Test review decision gate, record the approved test requirements in an artifact for \`/qa\` and \`/qa-only\`. Write it even when choices are still pending; list any unresolved choices separately as pending, not required implementation. Update this artifact if later approved decisions change the tests. Use the Review record and write policy above.
 
 \`\`\`bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG  # sets SLUG and BRANCH
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "\${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+BRANCH=$(~/.claude/skills/gstack/bin/gstack-slug --get BRANCH 2>/dev/null)
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"  # sets SLUG and BRANCH
 TEST_PLAN_USER=$(whoami)
 DATETIME=$(date +%Y%m%d-%H%M%S)
 \`\`\`
 
 Use \`SLUG\` and the sanitized \`BRANCH\` from gstack-slug, \`TEST_PLAN_USER\` for {user}, and \`DATETIME\` for {datetime}. Set {date} to today. Read the local origin URL with \`git remote get-url origin\` and use its owner/repo; without an origin, write \`local-only\`. No network request is needed.
 
-Write to \`~/.gstack/projects/{slug}/{user}-{branch}-eng-review-test-plan-{datetime}.md\`:
+Write to \`<PROJECT_DIR>/{user}-{branch}-eng-review-test-plan-{datetime}.md\` (\`PROJECT_DIR\` printed above):
 
 \`\`\`markdown
 # Test Plan
@@ -537,7 +539,7 @@ If test framework detected (or bootstrapped in Step 4):
 - Write the value card as a header comment in each generated or extended test.
 - Prioritize error handlers and edge cases first (happy paths are more likely already tested)
 - Read 2-3 existing test files to match conventions exactly
-- Generate unit tests. Mock all external dependencies (DB, API, Redis).
+- Generate the smallest native test for each path: unit tests for logic, mocking only services unrelated to the behavior under test (integration points where mocking hides real failures go to [→E2E]).
 - For paths marked [→E2E]: generate integration/E2E tests using the project's E2E framework (Playwright, Cypress, Capybara, etc.)
 - For paths marked [→EVAL]: generate eval tests using the project's eval framework, or flag for manual eval if none exists
 - Write tests that exercise the specific uncovered path with real assertions
@@ -614,12 +616,13 @@ ${subheading} Test Plan Artifact
 After producing the coverage diagram, write a test plan artifact so \`/qa\` and \`/qa-only\` can consume it:
 
 \`\`\`bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "\${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"
 USER=$(whoami)
 DATETIME=$(date +%Y%m%d-%H%M%S)
 \`\`\`
 
-Write to \`~/.gstack/projects/{slug}/{user}-{branch}-ship-test-plan-{datetime}.md\`:
+Write to \`<PROJECT_DIR>/{user}-{branch}-ship-test-plan-{datetime}.md\` (\`PROJECT_DIR\` printed above):
 
 \`\`\`markdown
 # Test Plan

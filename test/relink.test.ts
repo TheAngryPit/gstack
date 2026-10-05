@@ -56,6 +56,8 @@ function setupMockInstall(skills: string[]): void {
   fs.mkdirSync(mockBin, { recursive: true });
   fs.copyFileSync(path.join(BIN, 'gstack-config'), path.join(mockBin, 'gstack-config'));
   fs.chmodSync(path.join(mockBin, 'gstack-config'), 0o755);
+  // A real install always ships the state-root twin beside the bins that source it.
+  fs.copyFileSync(path.join(BIN, 'gstack-state-root.sh'), path.join(mockBin, 'gstack-state-root.sh'));
   if (fs.existsSync(path.join(BIN, 'gstack-relink'))) {
     fs.copyFileSync(path.join(BIN, 'gstack-relink'), path.join(mockBin, 'gstack-relink'));
     fs.chmodSync(path.join(mockBin, 'gstack-relink'), 0o755);
@@ -523,6 +525,32 @@ describe('gstack-relink (#578)', () => {
     // If relink was triggered, symlinks should exist
     expect(fs.existsSync(path.join(skillsDir, 'gstack-qa'))).toBe(true);
     expect(fs.existsSync(path.join(skillsDir, 'gstack-ship'))).toBe(true);
+  });
+
+  // C6 (#2263): discovery is structural (has a SKILL.md), never name-based. A
+  // hardcoded meta-dir list dropped the real `browse` skill, so /browse
+  // disappeared after toggling skill_prefix.
+  test('materializes every dir carrying a SKILL.md, even names once meta-excluded (browse)', () => {
+    const formerlyExcluded = ['bin', 'browse', 'design', 'docs', 'extension', 'lib', 'node_modules', 'scripts', 'test'];
+    setupMockInstall(['qa', ...formerlyExcluded]);
+    const env = { GSTACK_INSTALL_DIR: installDir, GSTACK_SKILLS_DIR: skillsDir };
+    run(`${path.join(installDir, 'bin', 'gstack-config')} set skill_prefix false`, env);
+    run(`${path.join(installDir, 'bin', 'gstack-relink')}`, env);
+    const missing = ['qa', ...formerlyExcluded].filter(s => !fs.existsSync(path.join(skillsDir, s, 'SKILL.md')));
+    expect(missing).toEqual([]);
+  });
+
+  test('skips top-level dirs that have no SKILL.md', () => {
+    setupMockInstall(['qa']);
+    for (const meta of ['node_modules', 'lib', 'scripts']) {
+      fs.mkdirSync(path.join(installDir, meta), { recursive: true });
+      fs.writeFileSync(path.join(installDir, meta, 'placeholder.txt'), 'not a skill');
+    }
+    const env = { GSTACK_INSTALL_DIR: installDir, GSTACK_SKILLS_DIR: skillsDir };
+    run(`${path.join(installDir, 'bin', 'gstack-config')} set skill_prefix false`, env);
+    run(`${path.join(installDir, 'bin', 'gstack-relink')}`, env);
+    expect(fs.existsSync(path.join(skillsDir, 'qa', 'SKILL.md'))).toBe(true);
+    expect(['bin', 'node_modules', 'lib', 'scripts'].filter(m => fs.existsSync(path.join(skillsDir, m)))).toEqual([]);
   });
 });
 

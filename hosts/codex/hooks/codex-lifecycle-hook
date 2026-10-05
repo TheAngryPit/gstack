@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Codex command-hook shim. The bridge is fail-open: lifecycle telemetry and
+# explicitly opted-in current-session import must never block a Codex turn.
+HERE="$(cd "$(dirname "$0")" && pwd)" || exit 0
+bun "$HERE/codex-lifecycle-hook.ts" <&0 || true
+exit 0

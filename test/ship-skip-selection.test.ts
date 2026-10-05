@@ -5,7 +5,8 @@ import { computePaidCaseSelection } from '../scripts/test-paid-shards';
 const id = 'ship-skipped-queued-finding';
 
 test.each([
-  'scripts/resolvers/review.ts', 'scripts/resolvers/index.ts',
+  'scripts/resolvers/review-dashboard.ts', 'scripts/resolvers/plan-gates.ts', 'scripts/resolvers/spec-review.ts',
+  'scripts/resolvers/outside-voice-steps.ts', 'scripts/resolvers/review-scope.ts', 'scripts/resolvers/index.ts',
   'ship/sections/review-army.md.tmpl', 'ship/sections/adversarial.md.tmpl',
   'ship/sections/manifest.json', 'bin/gstack-review-log', 'bin/gstack-review-read',
   'bin/gstack-slug', 'bin/gstack-config', 'bin/gstack-brain-enqueue',

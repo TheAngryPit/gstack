@@ -46,9 +46,18 @@ export const ALL_TIERS = {
 /** Supervision reserve added to every registered whole-file wall. */
 export const SHARD_RESERVE_MS = 2 * 60_000;
 
-/** Whole-file supervision must cover each existing attempt and its retry.
- * These fixtures already allow 25 minutes per case; the old 30-minute
- * wall could kill a second attempt after five minutes. No case budget grows.
+/**
+ * Retry policy (approved 2026-09-29, eval reliability wave): paid evals never
+ * retry. Each case's kind (E2E_KINDS) fixes its trials before the run: `rule`
+ * one trial, `behavior` a panel of EVAL_POLICY.panel independent trials, and
+ * `judge` one case that samples its judge panel internally. A failed verdict
+ * is final for that run; a manual re-run adds trials under a new run attempt
+ * and never replaces the original verdict. Rows below keep only wall
+ * supervision; per-case budgets never change with this rule.
+ */
+
+/** Whole-file supervision for one run of every case.
+ * These fixtures allow 25 minutes per case.
  * Reserve the sequential upper bound even when Bun runs sibling cases together.
  */
 export const FINDING_RETRY_BUDGETS = [
@@ -58,57 +67,60 @@ export const FINDING_RETRY_BUDGETS = [
   file, cases,
   id: `${file.slice('test/skill-e2e-'.length, -'.test.ts'.length)}-existing-retry-v1`,
   testMs: 1_500_000,
-  retries: 1,
+  caseMs: 1_500_000,
   shardReserveMs: SHARD_RESERVE_MS,
-  shardMs: cases * 1_500_000 * 2 + SHARD_RESERVE_MS,
+  shardMs: cases * 1_500_000 + SHARD_RESERVE_MS,
 }));
 
-/** Three existing captures and one configured retry; only supervision grows. */
+/** Three existing captures in one 16-minute case. */
 export const AUQ_CONSISTENCY_RETRY_BUDGET = {
   file: 'test/skill-e2e-auq-consistency.test.ts',
   id: 'auq-consistency-existing-retry-v1',
   cases: 1,
   testMs: 3 * CAPTURE_MS + 60_000,
-  retries: 1,
+  caseMs: 3 * CAPTURE_MS + 60_000,
   shardReserveMs: SHARD_RESERVE_MS,
-  shardMs: (3 * CAPTURE_MS + 60_000) * 2 + SHARD_RESERVE_MS,
+  shardMs: 3 * CAPTURE_MS + 60_000 + SHARD_RESERVE_MS,
 } as const;
 
 /** These fixtures have a fixed case count in every supported tier. */
 export const STRICT_RETRY_CASE_BUDGETS = [...FINDING_RETRY_BUDGETS, AUQ_CONSISTENCY_RETRY_BUDGET];
 
-/** Whole-file walls cover all existing cases and retries, even if Bun runs them
+/** Whole-file walls cover all existing cases, even if Bun runs them
  * sequentially. Mixed-tier files reserve their larger complete tier, never a
- * currently selected subset. These rows add no case-count or model-work policy.
- * The 10-second terms preserve the existing Codex/recording finalization grace.
+ * currently selected subset. caseMs is the longest single case budget, the
+ * wall of one isolated case shard. These rows add no case-count or model-work
+ * policy. The 10-second terms preserve the existing Codex/recording
+ * finalization grace.
  */
 export const FILE_RETRY_BUDGETS = [
   ...STRICT_RETRY_CASE_BUDGETS,
   ...[
-    { file: 'test/skill-e2e-qa-callers.test.ts', attemptMs: 5 * (CAPTURE_MS + 15_000), retries: 1 },
-    { file: 'test/skill-e2e-shared-libs-paths.test.ts', attemptMs: 3 * CAPTURE_LONG_MS, retries: 1 },
-    { file: 'test/skill-e2e-ship-docsync.test.ts', attemptMs: 5 * CAPTURE_LONG_MS + 8 * CAPTURE_MS, retries: 1 },
+    { file: 'test/skill-e2e-qa-callers.test.ts', attemptMs: 5 * (CAPTURE_MS + 15_000), caseMs: CAPTURE_MS + 15_000 },
+    { file: 'test/skill-e2e-shared-libs-paths.test.ts', attemptMs: 3 * CAPTURE_LONG_MS, caseMs: CAPTURE_LONG_MS },
+    { file: 'test/skill-e2e-ship-docsync.test.ts', attemptMs: 4 * CAPTURE_LONG_MS + 8 * CAPTURE_MS, caseMs: CAPTURE_LONG_MS },
     // Seventeen workflow judges include their 10s recording grace; the other
-    // seven judges retain 120s. Supervise all 24 and the existing one retry.
-    { file: 'test/skill-llm-eval.test.ts', attemptMs: 17 * (JUDGE_MS + 10_000) + 7 * JUDGE_MS, retries: 1 },
-    { file: 'test/skill-e2e-auq-matrix.test.ts', attemptMs: 6 * CAPTURE_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-format.test.ts', attemptMs: 4 * (CAPTURE_MS + 10_000), retries: 1 },
-    { file: 'test/skill-e2e-auto-decide-preserved.test.ts', attemptMs: PTY_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-ceo-finding-floor.test.ts', attemptMs: PTY_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-eng-finding-floor.test.ts', attemptMs: PTY_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-design-finding-floor.test.ts', attemptMs: PTY_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-devex-finding-floor.test.ts', attemptMs: PTY_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-mode-no-op.test.ts', attemptMs: 5 * CAPTURE_LONG_MS, retries: 2 },
-    { file: 'test/skill-e2e-plan-ceo-mode-routing.test.ts', attemptMs: 2 * CAPTURE_LONG_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-eng-plan-mode.test.ts', attemptMs: 2 * CAPTURE_LONG_MS, retries: 1 },
-    { file: 'test/skill-e2e-plan-prosons.test.ts', attemptMs: 4 * (CAPTURE_MS + 10_000), retries: 1 },
-    // Gate: six 300s cases + one 610s case; periodic: two 900s + three 600s.
-    { file: 'test/skill-e2e-plan.test.ts', attemptMs: Math.max(6 * CAPTURE_MS + CAPTURE_LONG_MS + 10_000, 2 * PTY_MS + 3 * CAPTURE_LONG_MS), retries: 1 },
-  ].map(({ file, attemptMs, retries }) => ({
-    file, attemptMs, retries,
+    // seven judges retain 120s. Supervise all 24.
+    { file: 'test/skill-llm-eval.test.ts', attemptMs: 17 * (JUDGE_MS + 10_000) + 7 * JUDGE_MS, caseMs: JUDGE_MS + 10_000 },
+    { file: 'test/skill-e2e-auq-matrix.test.ts', attemptMs: 6 * CAPTURE_MS, caseMs: CAPTURE_MS },
+    { file: 'test/skill-e2e-plan-format.test.ts', attemptMs: 4 * (CAPTURE_MS + 10_000), caseMs: CAPTURE_MS + 10_000 },
+    { file: 'test/skill-e2e-auto-decide-preserved.test.ts', attemptMs: PTY_MS, caseMs: PTY_MS },
+    { file: 'test/skill-e2e-plan-ceo-finding-floor.test.ts', attemptMs: PTY_MS, caseMs: PTY_MS },
+    { file: 'test/skill-e2e-plan-eng-finding-floor.test.ts', attemptMs: PTY_MS, caseMs: PTY_MS },
+    { file: 'test/skill-e2e-plan-design-finding-floor.test.ts', attemptMs: PTY_MS, caseMs: PTY_MS },
+    { file: 'test/skill-e2e-plan-devex-finding-floor.test.ts', attemptMs: PTY_MS, caseMs: PTY_MS },
+    { file: 'test/skill-e2e-plan-mode-no-op.test.ts', attemptMs: 6 * CAPTURE_LONG_MS, caseMs: CAPTURE_LONG_MS },
+    { file: 'test/skill-e2e-plan-ceo-mode-routing.test.ts', attemptMs: 2 * CAPTURE_LONG_MS, caseMs: CAPTURE_LONG_MS },
+    { file: 'test/skill-e2e-plan-eng-plan-mode.test.ts', attemptMs: 2 * CAPTURE_LONG_MS, caseMs: CAPTURE_LONG_MS },
+    { file: 'test/skill-e2e-plan-prosons.test.ts', attemptMs: 4 * (CAPTURE_MS + 10_000), caseMs: CAPTURE_MS + 10_000 },
+    // Gate: six 300s cases + one 610s case; periodic: two 900s + two 600s
+    // (plan-eng-review-artifact runs from its own PTY file).
+    { file: 'test/skill-e2e-plan.test.ts', attemptMs: Math.max(6 * CAPTURE_MS + CAPTURE_LONG_MS + 10_000, 2 * PTY_MS + 2 * CAPTURE_LONG_MS), caseMs: PTY_MS },
+  ].map(({ file, attemptMs, caseMs }) => ({
+    file, attemptMs, caseMs,
     id: `${file.slice('test/'.length, -'.test.ts'.length)}-existing-retry-v1`,
     shardReserveMs: SHARD_RESERVE_MS,
-    shardMs: attemptMs * (retries + 1) + SHARD_RESERVE_MS,
+    shardMs: attemptMs + SHARD_RESERVE_MS,
   })),
 ];
 

@@ -117,6 +117,9 @@ export function isEngBatchingIssueAUQ(fp: AskUserQuestionFingerprint, priorCalls
   return !priorCalls.some(prior => batchingIssueNumber(prior) === issue);
 }
 
+// The report's target declaration field (Target / Review target / Reviewed target, optionally qualified).
+const TARGET_FIELD = /^(?:Reviewed |Review )?target(?: \([^)\n]*\))?:/i;
+
 /** A native brief can use its D number and topic while its stable R identity
  * lives in the required saved ledger. Count that owned choice, not a title
  * spelling. This does not approve the row or validate the implementation. */
@@ -160,26 +163,31 @@ function recordedBatchingIssue(call: NativePlanQuestionCall, savedPlan: string):
   const rawSourceNames = [...(lines[1] ?? '').matchAll(/\b[\w./-]+\.md\b/g)];
   const directSource = sourceNames.length > 0 && sourceNames.every(name => name === 'PLAN.md') &&
     new Set([...metadata.matchAll(/\bPLAN\.md:([1-9]\d*(?:[-–][1-9]\d*)?)\b/g)].map(match => match[1])).size <= 1;
-  const targetName = (s: string) => clean(s).replace(/^Eng(?:ineering)? review:\s*/i, '')
+  const targetName = (s: string) => clean(s).replace(/^Eng(?:ineering)? review(?: report)?\s*[:—–-]\s*/i, '')
     .replace(/^Plan\s*[:—–-]\s*/i, '').toLowerCase();
-  const named = [...(lines[1] ?? '').matchAll(/"(Plan:\s*[^"\n]+)"|“(Plan:\s*[^”\n]+)”/g)]
-    .map(match => targetName(match[1] ?? match[2]!));
+  const named = [...(lines[1] ?? '').matchAll(/"(Plan:\s*[^"\n]+)"|“(Plan:\s*[^”\n]+)”|\b[Pp]lan\s+"([^"\n]+)"|\b[Pp]lan\s+“([^”\n]+)”/g)]
+    .map(match => targetName(match[1] ?? match[2] ?? match[3] ?? match[4]!));
   const titles = tokens.slice(0, start).filter(token => token.type === 'heading' && token.depth === 1);
+  // Target declarations are fields, whatever their list or emphasis markup.
   const targetFields = tokens.slice(0, start).flatMap((token, at) => {
-    if (token.type !== 'paragraph' || !currentHeading(at)) return [];
+    if ((token.type !== 'paragraph' && token.type !== 'list') || !currentHeading(at)) return [];
     const previous = tokens.slice(0, at).filter(t => t.type !== 'space').at(-1);
     const quotedContext = /\b(?:quoted|copied|historical|example|hypothetical|archived)\b[^\n]*:\s*$/i;
     if (previous?.type === 'paragraph' && quotedContext.test(previous.raw)) return [];
-    const parts = token.raw.split('\n');
-    return parts.filter((line, i) => /^Reviewed target:/.test(line) &&
+    const parts = token.raw.split('\n').map(line => line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').replace(/[*_]/g, '').trim());
+    return parts.filter((line, i) => TARGET_FIELD.test(line) &&
       !parts.slice(0, i).some(part => quotedContext.test(part)));
   });
-  const namedSource = !rawSourceNames.length && named.length === 1 && titles.length === 1 &&
+  const targetFiles = targetFields.length === 1 ? [...targetFields[0]!.matchAll(/[\w./-]*[\w-]+\.md\b/g)].map(match => match[0]) : [];
+  // An unsourced brief inherits the report's one current PLAN.md target; its
+  // ledger record still supplies the cited finding. A brief that names its plan
+  // must name the report title's plan, and an unfenced copy of that plan may
+  // add its own H1 only when it names that same plan.
+  const namedSource = !rawSourceNames.length && named.length <= 1 && titles.length >= 1 &&
     titles[0]!.type === 'heading' && currentHeading(tokens.indexOf(titles[0]!)) &&
-    /^Eng(?:ineering)? review:\s*Plan\s*[:—–-]/i.test(clean(titles[0]!.text)) &&
-    targetName(titles[0]!.text) === named[0] && targetFields.length === 1 &&
-    /^Reviewed target:\s*`?PLAN\.md`?(?:\s|$)/.test(targetFields[0]!) &&
-    [...targetFields[0]!.matchAll(/\b[\w./-]+\.md\b/g)].length === 1;
+    targetFiles.length === 1 && targetFiles[0]!.split('/').at(-1) === 'PLAN.md' &&
+    (named.length === 0 || /^Eng(?:ineering)? review(?: report)?\s*[:—–-]\s*\S/i.test(clean(titles[0]!.text)) &&
+      titles.every(title => title.type === 'heading' && targetName(title.text) === named[0]));
   if (!directSource && !namedSource) return;
   const withdrawn = (value: string, owners: string) => new RegExp(
     `(?:^|[.!?;]\\s+|\\n)(?:Correction:\\s*)?(?:${owners}) (?:is|was|has been) ["“'‘]?(?:withdrawn|cancelled|canceled|rejected|superseded|resolved|closed|hypothetical|not current|no longer current)\\b`, 'i').test(prose(value, true));
@@ -194,7 +202,7 @@ function recordedBatchingIssue(call: NativePlanQuestionCall, savedPlan: string):
   const recordSection = (at: number, depth: number) => {
     const owner = tokens.slice(0, at).filter(token => token.type === 'heading' && token.depth < depth).at(-1);
     if (!owner || owner.type !== 'heading') return false;
-    const name = clean(owner.text).replace(/^(?:Section\s+)?[1-9]\d*[.:]?\s*/i, '');
+    const name = clean(owner.text).replace(/^(?:Section\s+)?[1-9]\d*(?:[.:]|\s+[—–-])?\s*/i, '');
     return /^Decision ledger$/i.test(name) || /^(?:Architecture|Code quality|Tests?|Testing|Performance) review(?:\s*[—–:-]\s+[A-Za-z0-9][A-Za-z0-9 ,/()&-]*)?$/i.test(name);
   };
   const words = (s: string) => (clean(s).toLowerCase().replace(/\(recommended\)/g, '').match(/[a-z][a-z0-9_]*/g) ?? [])
@@ -265,7 +273,7 @@ function recordedBatchingIssue(call: NativePlanQuestionCall, savedPlan: string):
     if (questions.length !== 1) continue;
     const inlineBrief = fields[questions[0]!]!.slice(marker.length).trim();
     const inline = Boolean(inlineBrief);
-    if (!inline && (namedSource || clean(fields[questions[0]! + 1] ?? '') !== clean(title))) continue;
+    if (!inline && clean(fields[questions[0]! + 1] ?? '') !== clean(title)) continue;
     const sources = [...finding[0]!.matchAll(/\b([\w./-]+\.md)(?::([1-9]\d*(?:[-–][1-9]\d*)?))?\b/g)];
     if (sources.length !== 1 || sources[0]![1] !== 'PLAN.md' ||
         !inline && !sources[0]![2] || source && sources[0]![2] !== source) continue;
@@ -316,6 +324,8 @@ function recordedBatchingIssue(call: NativePlanQuestionCall, savedPlan: string):
       const explicitSelectors = nativeOptions.flatMap(option => option.selector ? [option.selector] : []);
       if (new Set(explicitSelectors).size !== explicitSelectors.length ||
           nativeOptions.some(option => option.selector && !selectors.includes(option.selector) || !option.label || /^[A-D][).:]\s+/.test(option.label))) continue;
+      // The preamble's `(recommended)` suffix marks the recommendation; it is not part of the choice.
+      const unmarked = (label: string) => clean(label).replace(/\s*\(recommended\)$/i, '');
       const readOptions = (lines: string[]) => {
         const records: Array<{ selector: string; label: string; description: string[] }> = [];
         for (const line of lines) {
@@ -327,7 +337,7 @@ function recordedBatchingIssue(call: NativePlanQuestionCall, savedPlan: string):
         if (records.length !== nativeOptions.length || new Set(records.map(record => record.selector)).size !== records.length ||
             records.some(record => !selectors.includes(record.selector))) return undefined;
         const matches = records.map(record => nativeOptions.flatMap((native, at) =>
-          (!native.selector || native.selector === record.selector) && clean(record.label) === native.label &&
+          (!native.selector || native.selector === record.selector) && unmarked(record.label) === unmarked(native.label) &&
             clean(record.description.join('\n')) === clean(native.description) ? [at] : []));
         return matches.every(match => match.length === 1) && new Set(matches.flat()).size === records.length ? records : undefined;
       };

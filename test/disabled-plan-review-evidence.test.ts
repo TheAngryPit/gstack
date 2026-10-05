@@ -188,7 +188,7 @@ describe('disabled outside-plan live oracle', () => {
     expect(forbidden.status).toBe(73);
     expect(readFileSync(fixture.cliDispatchLog, 'utf8')).toBe('codex invoked\n');
   }, 150_000);
-  test('generated Codex plan and documentation log fences resolve runtime in fresh shells', () => {
+  test('generated Codex plan and documentation reviews stop on disabled native gate', () => {
     const rendered = join(TEMP, 'codex-render');
     const generated = spawnSync(process.execPath, ['run', 'scripts/gen-skill-docs.ts', '--host', 'codex', '--out-dir', rendered], {
       cwd: ROOT, encoding: 'utf8', timeout: 120_000,
@@ -198,10 +198,17 @@ describe('disabled outside-plan live oracle', () => {
     const home = join(repo, 'owned-home');
     const codexHome = join(home, 'custom codex');
     const state = join(repo, 'gstack-state');
+    const spyBin = join(repo, 'spy-bin');
+    const cliDispatchLog = join(repo, 'unexpected-cli-dispatch');
     mkdirSync(join(codexHome, 'skills'), { recursive: true });
+    mkdirSync(spyBin, { recursive: true });
     symlinkSync(ROOT, join(codexHome, 'skills', 'gstack'), 'dir');
+    for (const cli of ['codex', 'claude']) {
+      writeFileSync(join(spyBin, cli), `#!/bin/sh\nprintf '${cli} invoked\\n' >> "$CLI_DISPATCH_LOG"\nexit 73\n`, { mode: 0o755 });
+    }
     const env = { ...process.env, HOME: home, CODEX_HOME: codexHome, GSTACK_HOME: state, GSTACK_STATE_ROOT: state,
-      GSTACK_PROJECT_SLUG: 'codex-disabled-fixture', GSTACK_ROOT: '', GSTACK_BIN: '', GSTACK_ACTIVE_HOST: 'codex' };
+      GSTACK_PROJECT_SLUG: 'codex-disabled-fixture', GSTACK_ROOT: '', GSTACK_BIN: '', GSTACK_ACTIVE_HOST: 'codex',
+      CLI_DISPATCH_LOG: cliDispatchLog, PATH: `${spyBin}:${process.env.PATH ?? ''}` };
     const run = (command: string, overrides: NodeJS.ProcessEnv = {}) => spawnSync('bash', ['-c', command], { cwd: repo, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 5_000 });
     const config = (mode: string) => spawnSync(join(ROOT, 'bin/gstack-config'), ['set', 'codex_reviews', mode], {
       cwd: repo, env, encoding: 'utf8', timeout: 5_000,
@@ -213,43 +220,69 @@ describe('disabled outside-plan live oracle', () => {
     const logPath = join(state, 'projects', env.GSTACK_PROJECT_SLUG, `${branch}-reviews.jsonl`);
     const brokenRuntime = join(repo, 'broken-runtime');
     mkdirSync(join(brokenRuntime, 'bin'), { recursive: true });
-    mkdirSync(join(brokenRuntime, 'lib'));
-    writeFileSync(join(brokenRuntime, 'lib/claude-bin.ts'), '// valid explicit runtime marker\n');
-    writeFileSync(join(brokenRuntime, 'bin/gstack-config'), '#!/bin/sh\nexit 19\n', { mode: 0o755 });
+    mkdirSync(join(brokenRuntime, 'lib'), { recursive: true });
     const unexpectedWrite = join(repo, 'unexpected-review-write');
     writeFileSync(join(brokenRuntime, 'bin/gstack-review-log'), '#!/bin/sh\nprintf invoked > "$UNEXPECTED_REVIEW_WRITE"\n', { mode: 0o755 });
-    for (const [skill, id, phase] of [
-      ['gstack-plan-eng-review', 'codex-plan-review', 'plan-review'],
-      ['gstack-document-release', 'codex-doc-review', 'documentation'],
-    ]) {
-      const instructions = readFileSync(join(rendered, '.agents', 'skills', skill, 'SKILL.md'), 'utf8');
-      const fence = [...instructions.matchAll(/```bash\n([\s\S]*?)\n```/g)]
-        .map(match => match[1]).find(command => command.includes(`"skill":"${id}"`) && command.includes('"outside_status":"disabled"'));
+    const cases = [
+      { skill: 'gstack-plan-eng-review', file: '.agents/skills/gstack-plan-eng-review/sections/review-sections.md', heading: '## Native Codex independent plan challenge (default-on)', id: 'codex-plan-review', phase: 'plan-review' },
+      { skill: 'gstack-document-release', file: '.agents/skills/gstack-document-release/sections/release-body.md', heading: '## Native Codex Documentation Review (default-on)', id: 'codex-doc-review', phase: 'documentation' },
+    ];
+    for (const cli of ['codex', 'claude']) {
+      const observed = spawnSync(join(spyBin, cli), ['--version'], { cwd: repo, env, encoding: 'utf8', timeout: 5_000 });
+      expect(observed.status).toBe(73);
+    }
+    expect(readFileSync(cliDispatchLog, 'utf8')).toBe('codex invoked\nclaude invoked\n');
+    writeFileSync(cliDispatchLog, '');
+    for (const { skill, file, heading, id, phase } of cases) {
+      const content = readFileSync(join(rendered, file), 'utf8');
+      const start = content.indexOf(heading);
+      expect(start, skill).toBeGreaterThanOrEqual(0);
+      const nextHeading = content.indexOf('\n## ', start + heading.length);
+      const section = content.slice(start, nextHeading < 0 ? content.length : nextHeading);
+      const fence = [...section.matchAll(/```bash\n([\s\S]*?)\n```/g)]
+        .map(match => match[1]).find(command => command.includes('CODEX_REVIEW_MODE: disabled'));
       expect(fence, skill).toBeDefined();
+      if (!fence) throw new Error(`No native-review gate in ${skill}`);
+      expect(fence).toContain('outside_provider":"native-context"');
+      expect(fence).toContain('"outside_status":"disabled"');
+      expect(section.indexOf('Only dispatch the native reviewer when the block reports')).toBeGreaterThan(section.indexOf(fence!));
+      expect(section).toContain('If disabled, stop this review branch after the skipped record');
+      const reviewer = content.indexOf('## Codex independent review:', start);
+      expect(reviewer).toBeGreaterThan(section.indexOf('Only dispatch the native reviewer when the block reports'));
       expect(config('disabled').status).toBe(0);
-      const prior = { skill: id, timestamp: new Date(Date.now() - 60_000).toISOString(), status: 'clean', source: 'claude-code',
-        host: 'codex', outside_provider: 'claude-code', outside_status: 'completed', phase };
+      const prior = { skill: id, timestamp: new Date(Date.now() - 60_000).toISOString(), status: 'clean', source: 'codex-native',
+        host: 'codex', outside_provider: 'native-context', outside_status: 'completed', phase };
       const seed = spawnSync(join(ROOT, 'bin/gstack-review-log'), [JSON.stringify(prior)], { cwd: repo, env, encoding: 'utf8', timeout: 5_000 });
       expect(seed.status, seed.stderr).toBe(0);
       const before = readFileSync(logPath, 'utf8');
-      const logged = run(fence!); // No variables survive from a preflight shell.
+      const logged = run(fence); // No variables survive from a preflight shell.
       expect(logged.status, logged.stderr).toBe(0);
+      expect(logged.stdout).toContain('CODEX_REVIEW_MODE: disabled');
       const after = readFileSync(logPath, 'utf8');
       expect(after.startsWith(before)).toBe(true);
       const records = after.trim().split('\n').map(line => JSON.parse(line)).filter(record => record.skill === id);
       expect(records).toHaveLength(2);
-      expect(records[1]).toMatchObject({ skill: id, host: 'codex', outside_provider: 'claude-code',
+      expect(records[1]).toMatchObject({ skill: id, host: 'codex', outside_provider: 'native-context',
         outside_status: 'disabled', phase, status: 'skipped', source: 'none' });
       expect(config('enabled').status).toBe(0);
-      const skipped = run(fence!);
-      expect(skipped.status, skipped.stderr).toBe(0);
+      const enabled = run(fence);
+      expect(enabled.status, enabled.stderr).toBe(0);
+      expect(enabled.stdout).toContain('CODEX_REVIEW_MODE: enabled');
       expect(readFileSync(logPath, 'utf8')).toBe(after);
-      const failedRead = run(fence!, { GSTACK_ROOT: brokenRuntime, UNEXPECTED_REVIEW_WRITE: unexpectedWrite });
+      writeFileSync(join(brokenRuntime, 'bin/gstack-config'), '#!/bin/sh\necho maybe\n', { mode: 0o755 });
+      const unknown = run(fence, { GSTACK_ROOT: brokenRuntime, UNEXPECTED_REVIEW_WRITE: unexpectedWrite });
+      expect(unknown.status).not.toBe(0);
+      expect(unknown.stderr).toContain('Cannot determine codex_reviews state');
+      expect(readFileSync(logPath, 'utf8')).toBe(after);
+      expect(existsSync(unexpectedWrite)).toBe(false);
+      writeFileSync(join(brokenRuntime, 'bin/gstack-config'), '#!/bin/sh\nexit 19\n', { mode: 0o755 });
+      const failedRead = run(fence, { GSTACK_ROOT: brokenRuntime, UNEXPECTED_REVIEW_WRITE: unexpectedWrite });
       expect(failedRead.status).not.toBe(0);
       expect(failedRead.stderr).toContain('Cannot read codex_reviews');
       expect(readFileSync(logPath, 'utf8')).toBe(after);
       expect(existsSync(unexpectedWrite)).toBe(false);
     }
+    expect(readFileSync(cliDispatchLog, 'utf8')).toBe('');
   }, 150_000);
 
 });
@@ -257,6 +290,26 @@ describe('disabled outside-plan live oracle', () => {
 
 // Both actual attempts obeyed the off switch; prior records and rejected claims
 // were mistaken for current completion by the bare substring check.
+describe('closing outside-review self-report', () => {
+  const stored = require('./fixtures/disabled-plan-self-report.json') as { known_good: Record<string, string>; known_bad: Record<string, string> };
+  const withOutput = (text: string) => { const result = completed(); result.output += '\n' + text; return result; };
+  test.each(Object.entries(stored.known_good))('self-report passes %s', (_name, text) => {
+    expect(oracle(withOutput(text))).toMatchObject({ passed: true, falseCompletion: false, disabledAttribution: true });
+  });
+  test.each(Object.entries(stored.known_bad))('self-report fails %s', (_name, text) => {
+    expect(oracle(withOutput(text))).toMatchObject({ passed: false, falseCompletion: true });
+  });
+  test('a disabled self-report cannot override dispatch, CLI execution, preflight or persistence', () => {
+    const result = withOutput(stored.known_good['plain-history-wording']!);
+    expect(oracle(result, 'codex invoked\n').passed).toBe(false);
+    const dispatched = structuredClone(result); dispatched.transcript.splice(-1, 0, dispatch('Agent', { prompt: 'Outside review' }));
+    expect(oracle(dispatched).passed).toBe(false);
+    const noPreflight = structuredClone(result); noPreflight.transcript.splice(1, 2);
+    expect(oracle(noPreflight).passed).toBe(false);
+    expect(disabledPlanReviewEvidence(result, '', JSON.stringify(PRIOR_RECORD), PRIOR_RECORD).passed).toBe(false);
+  });
+});
+
 describe('AD v2 disabled-plan public attribution', () => {
   const captured = require('./fixtures/disabled-plan-attribution-ad-v2.json');
   test.each(captured.cases)('accepts actual attempt $attempt output without crediting historical coverage', (item: any) => {
@@ -407,5 +460,49 @@ describe('AX pre-run log record with an explicit current-coverage exclusion', ()
       historical.replace('That entry predates', 'Outside_status: completed. That entry predates')]) {
       expect(evaluate(text).falseCompletion).toBe(true);
     }
+  });
+});
+
+// Census 36597762183: the parent obeyed the off switch and named the seeded
+// record as pre-existing twice, with the quotation before or after its owner.
+describe('36597762183 pre-existing record quoted around its owner', () => {
+  const captured = require('./fixtures/disabled-plan-attribution-36597762183.json');
+  const prior = captured.reviewRecords[0];
+  const evaluate = (output: string) => {
+    const result = completed(); result.output = output; result.transcript.at(-1).result = output;
+    return disabledPlanReviewEvidence(result, '', captured.reviewRecords.map((record: any) => JSON.stringify(record)).join('\n'), prior);
+  };
+  test('the retained failing verdict is unchanged and the actual output now passes', () => {
+    expect(captured.provenance.originalVerdict).toMatchObject({ passed: false, falseCompletion: true, persistedDisabled: true });
+    expect(evaluate(captured.output)).toMatchObject({ passed: true, falseCompletion: false, persistedDisabled: true });
+  });
+  test.each([
+    ['foreign timestamp', (o: string) => o.replace('(timestamp `16:32:22`', '(timestamp `11:11:11`')],
+    ['current claim in the owning sentence', (o: string) => o.replace('predates this run and is inconsistent', 'is now the current result and is inconsistent')],
+    ['conditional history', (o: string) => o.replace('predates this run and', 'predates this run if approved and')],
+    ['unowned quotation', (o: string) => o.replace('the stale `', 'the `').replace('pre-existing entry', 'entry')],
+    ['changed source value', (o: string) => o.replaceAll('source: codex', 'source: in-host')],
+    ['separate current claim', (o: string) => o + '\nCurrent outside_status: completed.'],
+  ])('%s still counts as completion', (_name, mutate) => {
+    expect(evaluate(mutate(captured.output)).falseCompletion).toBe(true);
+  });
+});
+
+describe('repair rerun: ISO record timestamp at second precision', () => {
+  const captured = require('./fixtures/disabled-plan-attribution-local-rerun.json');
+  const prior = captured.reviewRecords[0];
+  const evaluate = (output: string) => {
+    const result = completed(); result.output = output; result.transcript.at(-1).result = output;
+    return disabledPlanReviewEvidence(result, '', captured.reviewRecords.map((record: any) => JSON.stringify(record)).join('\n'), prior);
+  };
+  test('the same instant written without milliseconds binds the retained record', () => {
+    expect(captured.provenance.originalVerdict).toMatchObject({ passed: false, falseCompletion: true });
+    expect(evaluate(captured.output)).toMatchObject({ passed: true, falseCompletion: false });
+  });
+  test('an authored record is not pre-existing history', () => {
+    expect(evaluate(captured.output.replace('entry I did not write', 'entry I wrote')).falseCompletion).toBe(true);
+  });
+  test.each(['2026-09-29T16:58:53Z', '2026-09-28T16:58:52Z', '16:58:53Z'])('another instant %s is not that record', stamp => {
+    expect(evaluate(captured.output.replace('2026-09-29T16:58:52Z', stamp)).falseCompletion).toBe(true);
   });
 });

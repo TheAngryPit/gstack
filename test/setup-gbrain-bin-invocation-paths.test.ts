@@ -20,6 +20,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { expandHostSetup } from './helpers/expand-host-setup';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const TMPL = path.join(ROOT, 'setup-gbrain', 'SKILL.md.tmpl');
@@ -31,18 +32,18 @@ const MEMORY_DOC = path.join(ROOT, 'setup-gbrain', 'memory.md');
 // sections/transcript-gate.md.tmpl; the skeleton keeps dispatch + the Step 10
 // verdict prose. Negative (no-bare-invocation) checks run over the UNION so a
 // stale form can't hide in any template file.
-const tmpl = fs.readFileSync(TMPL, 'utf-8');
-const transcriptGate = fs.readFileSync(
+const tmpl = expandHostSetup(fs.readFileSync(TMPL, 'utf-8'));
+const transcriptGate = expandHostSetup(fs.readFileSync(
   path.join(SECTIONS_DIR, 'transcript-gate.md.tmpl'),
   'utf-8',
-);
+));
 const tmplUnion = [tmpl]
   .concat(
     fs
       .readdirSync(SECTIONS_DIR)
       .filter((f) => f.endsWith('.md.tmpl'))
       .sort()
-      .map((f) => fs.readFileSync(path.join(SECTIONS_DIR, f), 'utf-8')),
+      .map((f) => expandHostSetup(fs.readFileSync(path.join(SECTIONS_DIR, f), 'utf-8'))),
   )
   .join('\n');
 const memoryDoc = fs.readFileSync(MEMORY_DOC, 'utf-8');
@@ -74,10 +75,8 @@ describe('setup-gbrain templates (skeleton + sections) — bin invocation paths'
     );
   });
 
-  test('the silent-bulk mention uses bun run + .ts (R2, transcript-gate section)', () => {
-    expect(transcriptGate).toContain(
-      'bun run ~/.claude/skills/gstack/bin/gstack-memory-ingest.ts --bulk --quiet'
-    );
+  test('the gate never bulk-ingests before the user answers (transcript-gate section)', () => {
+    expect(transcriptGate).not.toMatch(/gstack-memory-ingest\.ts --bulk/);
   });
 
   test('the post-answer full-sync step uses bun run + .ts (R3, transcript-gate section)', () => {
@@ -86,21 +85,28 @@ describe('setup-gbrain templates (skeleton + sections) — bin invocation paths'
     );
   });
 
-  test('the preamble-hook incremental-sync mention uses bun run + .ts (R4, transcript-gate section)', () => {
-    expect(transcriptGate).toContain(
-      'bun run ~/.claude/skills/gstack/bin/gstack-gbrain-sync.ts --incremental --quiet'
-    );
+  test('no skill-start hook is claimed to ingest transcripts; /sync-gbrain is named (transcript-gate section)', () => {
+    expect(transcriptGate).not.toMatch(/every skill\s+start/i);
+    expect(transcriptGate).toContain('/sync-gbrain');
   });
 
-  test('the neighboring gstack-config line in the post-answer block is untouched (bash script, no extension)', () => {
-    expect(transcriptGate).toContain(
-      '~/.claude/skills/gstack/bin/gstack-config set transcript_ingest_mode <choice>'
-    );
+  test('the post-answer gstack-config line stores a mode value, not the answer letter (bash script, no extension)', () => {
+    expect(transcriptGate).toContain('~/.claude/skills/gstack/bin/gstack-config set transcript_ingest_mode');
+    expect(transcriptGate).not.toContain('transcript_ingest_mode <choice>');
   });
+});
 
-  test('the prose-only mention naming the tool as a sentence subject is left unchanged (KTD4 — not a literal invocation; Step 10 verdict, skeleton)', () => {
-    expect(tmpl).toContain('gstack-memory-ingest now persists staged transcripts to');
-  });
+describe('transcript consent question is gated on `gstack-config has`', () => {
+  const syncTmpl = fs.readFileSync(path.join(ROOT, 'sync-gbrain', 'SKILL.md.tmpl'), 'utf-8');
+  for (const [name, text] of [['setup-gbrain transcript gate', transcriptGate], ['sync-gbrain', syncTmpl]] as const) {
+    test(`${name} checks presence with has before asking, and never asks spawned or headless sessions`, () => {
+      const hasAt = text.indexOf('gstack-config has transcript_ingest_mode');
+      expect(hasAt).toBeGreaterThanOrEqual(0);
+      expect(text.indexOf('AskUserQuestion', hasAt)).toBeGreaterThan(hasAt);
+      for (const v of ['recent', 'all', 'off']) expect(text).toContain(`\`${v}\``);
+      expect(text).toMatch(/spawned[\s\S]{0,40}headless[\s\S]{0,80}do not ask/i);
+    });
+  }
 });
 
 describe('setup-gbrain/memory.md — bin invocation paths', () => {

@@ -4,10 +4,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { canonical, completeness, CsoError, fingerprint, importLegacy, renderReport, sha256, snapshotPathHandle, snapshotPathId, validateCoverage, validateFinding, validateVerificationObservation, validateVerificationRequest } from '../lib/cso/contracts';
-import { assertCanonicalStartPlan, canonicalStartPlan, canonicalTestPlan, certify, fileEffect, makeReviewArtifact, patchHash, preparePatchedSource, resolveVerificationRequestPaths, testExecutionPassed, treeHash, validateRepairBundle, validateReviewArtifact, verificationIdentity, verifyRepair } from '../lib/cso/verification';
+import { assertCanonicalStartPlan, canonicalStartPlan, canonicalTestPlan, certify, fileEffect, makeReviewArtifact, patchHash, preparePatchedSource, resolveVerificationRequestPaths, testExecutionPassed, treeHash, validateRepairBundle, validateReviewArtifact, verificationHarnessHash, verificationIdentity, verifyRepair } from '../lib/cso/verification';
 import { assertionWitnessPairHash, witnessObservationHash } from '../lib/cso/witness';
 import { admit, machinePoolRoot, markSupervised, release } from '../lib/cso/admission';
 import { sanitizeHelperForJson } from '../lib/cso/process';
+import { spawnSync } from 'node:child_process';
+import { dispatchCsoCommand } from '../lib/cso/cli';
+import { RUNTIME_CATALOG } from '../lib/cso/runtime-catalog';
 
 const dirs:string[]=[];const tmp=()=>{const p=fs.mkdtempSync(path.join(os.tmpdir(),'cso-contract-'));dirs.push(p);return p;};afterEach(()=>{for(const p of dirs.splice(0))fs.rmSync(p,{recursive:true,force:true});});
 const CREDENTIAL_CANARY=['ghp_','abcdefghijklmnopqrstuvwxyz1234567890'].join('');
@@ -208,5 +211,97 @@ describe('tested repair certificate gate',()=>{
     const drift=structuredClone(bundle);drift.preparation!.after.preparedDependencyHash=h('b');drift.verification.preparationHash=sha256(canonical(drift.preparation));drift.verification.id='';const rebound=verificationIdentity(drift.verification);drift.verification.id=rebound;drift.id=rebound;expect(()=>validateRepairBundle(drift,rebound,before)).toThrow('test toolchain changed');
     expect(()=>certify({...params,preparation:undefined})).toThrow('require before/after prepared dependency proofs');expect(()=>certify({...params,preparation:{before:proof(h('9')),after:proof(h('b'))}})).toThrow('toolchain bytes changed');
   });
+  const securityArray=()=>[
+    {name:'tenant isolation',path:'/user?id=2',method:'GET',expected:{status:403},vulnerable:{status:200,includes:'tenant-b'}},
+    {name:'tenant isolation by header',path:'/user',method:'GET',headers:{'x-tenant':'b'},expected:{status:403},vulnerable:{status:200,includes:'tenant-b'}},
+    {name:'tenant isolation on write',path:'/user/2',method:'PUT',body:'{"name":"x"}',expected:{status:404},vulnerable:{status:204}},
+  ];
+  test('single-object security keeps its pre-array request, patch, assertion, and harness bytes',()=>{
+    const root=tmp();fs.writeFileSync(path.join(root,'test.js'),'pass\n');fs.chmodSync(path.join(root,'test.js'),0o644);
+    const raw:any=request('vulnerable\n','fixed\n');raw.review.reviewedPatchHash=patchHash(raw);const req=validateVerificationRequest(raw);
+    expect(Array.isArray(req.security)).toBe(false);expect(canonical(req.security)).toBe(canonical(raw.security));
+    expect({patch:patchHash(req),request:sha256(canonical(req)),assertion:sha256(canonical({legitimate:req.legitimate,security:req.security})),harness:verificationHarnessHash(req,root)}).toEqual({
+      patch:'cc6ab00ee0160ce484a86130f94a5e6e5f588f3ec975c781c4d077647adff483',
+      request:'85175d755f1b297eb7d15dc1d9850e1ac453d1d129ceee58213d89cbab0ee59c',
+      assertion:'7e0f792881bc14137f2aa70b0662a013939749903e49eb507c1ecf48561b0771',
+      harness:'2a74b61982270fd10c071f0bdd32ae37f04de6e3eca1db6c9225132de29b4309',
+    });
+  });
+  test('security accepts a bounded array of distinct assertions that each carry an exclusive vulnerable oracle',()=>{
+    const make=(security:unknown)=>{const raw:any=request('vulnerable\n','fixed\n');raw.security=security;raw.review.reviewedPatchHash=patchHash(raw);return raw;};
+    const accepted=validateVerificationRequest(make(securityArray()));expect(accepted.security).toEqual(securityArray() as any);
+    expect(validateVerificationRequest(make(securityArray().slice(0,1))).security).toHaveLength(1);
+    const full=Array.from({length:8},(_,i)=>({...securityArray()[0],name:`payload ${i}`}));expect(validateVerificationRequest(make(full)).security).toHaveLength(8);
+    expect(()=>validateVerificationRequest(make([]))).toThrow('1..8 assertions');
+    expect(()=>validateVerificationRequest(make([...full,{...full[0],name:'payload 8'}]))).toThrow('1..8 assertions');
+    expect(()=>validateVerificationRequest(make([securityArray()[0],{...securityArray()[1],name:'tenant isolation'}]))).toThrow('names must be distinct');
+    const missing=securityArray();delete (missing[2] as any).vulnerable;expect(()=>validateVerificationRequest(make(missing))).toThrow('distinct before/fixed security oracles');
+    const overlapping=securityArray();overlapping[1].vulnerable={...overlapping[1].expected} as any;expect(()=>validateVerificationRequest(make(overlapping))).toThrow('mutually exclusive');
+    const extra:any=securityArray();extra[0].expected.untrusted='yes';expect(()=>validateVerificationRequest(make(extra))).toThrow('Unexpected security[0].expected field');
+    expect(()=>validateVerificationRequest(make([null]))).toThrow();
+  });
+  test('an array security request is observed in exactly one before/after pair and binds every member',async()=>{
+    const runDir=tmp(),snapshot=path.join(runDir,'snapshot');fs.mkdirSync(snapshot);fs.writeFileSync(path.join(snapshot,'app.js'),'vulnerable\n');const testBody='test("ok",()=>{})\n';fs.writeFileSync(path.join(snapshot,'app.test.js'),testBody);const packageJson='{"scripts":{"test":"node --test"}}';fs.writeFileSync(path.join(snapshot,'package.json'),packageJson);
+    const raw:any=request('vulnerable\n','fixed\n');raw.findingId='1abcdefabcdefabcdefabcdefabcdefa';raw.security=securityArray();raw.existingTests=[{executable:'/usr/local/bin/node',args:['--test','--test-reporter=tap','./app.test.js']}];raw.testFiles=['app.test.js'];raw.review.reviewedPatchHash=patchHash(raw);
+    const manifest:any={version:3,createdAt:'2026-01-01T00:00:00Z',expiresAt:'2026-01-08T00:00:00Z',root:'/repo',headCommit:'a'.repeat(40),originalHash:'b'.repeat(64),executionHash:treeHash(snapshot),entries:[{path:'app.js',originalHash:sha256('vulnerable\n'),executionHash:sha256('vulnerable\n'),bytes:11,mode:0o600},{path:'app.test.js',originalHash:sha256(testBody),executionHash:sha256(testBody),bytes:Buffer.byteLength(testBody),mode:0o600},{path:'package.json',originalHash:sha256(packageJson),executionHash:sha256(packageJson),bytes:packageJson.length,mode:0o600}]};
+    const runtime:any={id:'node',stack:'node',image:'runtime@sha256:'+'a'.repeat(64),platform:'linux/amd64'},phases:string[]=[];
+    const executor:any={observe:async(_source:string,phase:string,observed:any)=>{phases.push(phase);expect(observed.security).toEqual(securityArray());return{booted:true,legitimate:true,security:phase==='before'?'intended_failure':'pass',existingTests:true,output:'ok',inputHash:''};}};
+    let unattested:any;try{await verifyRepair({runId:'run',runDir,manifest,rawRequest:raw,runtime,verifier:runtime,policyHash:'c'.repeat(64),archives:[],executor,persist:false});}catch(error){unattested=error;}
+    expect(phases).toEqual(['before','after']);expect(unattested).toMatchObject({code:'PREREQUISITE',attempt:{reproduction:'reproduced',repair:'proposed',bundleIssued:false}});
+    const root=tmp(),before=path.join(root,'before'),after=path.join(root,'after');fs.mkdirSync(before);fs.writeFileSync(path.join(before,'app.js'),'vulnerable\n');fs.writeFileSync(path.join(before,'test.js'),'pass\n');
+    const plain:any=request('vulnerable\n','fixed\n');plain.security=securityArray();plain.review.reviewedPatchHash=patchHash(plain);const req=validateVerificationRequest(plain);preparePatchedSource(before,after,req);
+    const params:any={runId:'run',manifest:{originalHash:'d'.repeat(64),executionHash:treeHash(before),entries:[]},request:req,runtime:{id:'node',image:'runtime@sha256:'+'a'.repeat(64),platform:'linux/amd64'},verifier:{image:'runtime@sha256:'+'a'.repeat(64)},before:{booted:true,legitimate:true,security:'intended_failure',existingTests:true,output:'before',inputHash:''},after:{booted:true,legitimate:true,security:'pass',existingTests:true,output:'after',inputHash:''},beforeRoot:before,afterRoot:after,policyHash:'c'.repeat(64),auditPolicyHash:'e'.repeat(64),archives:[],testToolchain:'runtime'};
+    const bundle=authenticatedBundleFixture(certify(params),params);expect(validateRepairBundle(bundle,bundle.id,before).id).toBe(bundle.id);
+    const dropped=structuredClone(bundle);(dropped.request.security as any[]).pop();expect(()=>validateRepairBundle(dropped,dropped.id,before)).toThrow('harness');
+    expect(certify({...params,after:{...params.after,security:'inconclusive'}}).manifest.result).toBe('inconclusive');
+  });
 });
 function tree(root:string){return sha256(JSON.stringify(fs.readdirSync(root).sort().map(p=>{const file=path.join(root,p),stat=fs.statSync(file);return[p,sha256(fs.readFileSync(file)),stat.mode&0o777];})));}
+
+describe('#2894 truthful completion in the report the user receives',()=>{
+  const coverage=(domain:string,status:string,gaps:string[]=[],tool?:any)=>({domain,scope:'all',status,method:'trace',gaps,exclusions:[],evidence:[],...(tool?{tool}:{})});
+  const report=(entries:any[],status='finished'):any=>{const base:any={coverage:entries,gaps:[]};return{...base,schemaVersion:3,runId:'1700000000000-0123456789abcdef',repoId:'x',createdAt:'2026-01-01',deadline:'2026-01-01',status,completeness:completeness(base),policy:{mode:'daily',scope:'all',diff:false,base:'main',offline:true,budgetSeconds:600,maxWorkers:3,maxRepairs:3},source:{root:'/x',snapshotHash:'s',originalHash:'o'},application:{actors:[],assets:[],entrypoints:[],tenantBoundaries:[],sensitiveOperations:[],invariants:[]},findings:[],events:[]};};
+  test('not assessed names what ran, what is missing, why, and the next step, and never reads as clean',()=>{
+    const markdown=renderReport(report([coverage('snapshot-inputs','assessed'),coverage('auth','not_assessed',['Investigation deadline reached']),coverage('secrets','not_assessed',['Assessment has not been submitted'])]));
+    const lines=markdown.split('\n');
+    expect(lines[0]).toStartWith('not assessed — ');
+    expect(lines[1]).toBe('Status: not assessed. No security domain was assessed, so this report is not a clean result.');
+    expect(lines[2]).toBe('Ran: snapshot-inputs (assessed). Missing: auth (not\\_assessed); secrets (not\\_assessed).');
+    expect(lines[3]).toBe('Reason: Investigation deadline reached; Assessment has not been submitted.');
+    expect(lines[4]).toStartWith('Next: start a new /cso audit');
+    expect(markdown).not.toContain('No supported findings in the assessed scope.');
+    expect(markdown).toContain('No findings: nothing was assessed.');
+    const running=renderReport(report([coverage('auth','not_assessed')],'running'));
+    expect(running).toContain('Reason: no assessment evidence was recorded for the missing domains.');
+    expect(running).toContain('Next: resume this run with `gstack-cso resume 1700000000000-0123456789abcdef`');
+  });
+  test('partial and complete keep the exact empty phrase; partial names missing coverage first and optional scanners without results',()=>{
+    const partial=renderReport(report([coverage('auth','assessed'),coverage('secrets','partial',['Scanner timed out']),coverage('scanner:gitleaks','not_assessed',['Scanner catalog unavailable'],{name:'gitleaks',version:'unavailable',freshness:'not reported',outcome:'not_assessed'})]));
+    expect(partial).toStartWith('partial — all\nStatus: partial. Some required coverage is missing;');
+    expect(partial).toContain('Ran: auth (assessed); secrets (partial). Missing: secrets (partial).');
+    expect(partial).toContain('Optional scanners without results: gitleaks (not\\_assessed: Scanner catalog unavailable).');
+    expect(partial).toContain('No supported findings in the assessed scope.');
+    expect(partial.indexOf('Status: partial')).toBeLessThan(partial.indexOf('No supported findings'));
+    const complete=renderReport(report([coverage('auth','assessed')]));
+    expect(complete).toContain('No supported findings in the assessed scope.');
+    expect(complete).not.toContain('Status:');
+  });
+  test('a finished run with no submitted evidence writes a not-assessed report.md',async()=>{
+    const previous=process.env.GSTACK_HOME,base=tmp();process.env.GSTACK_HOME=path.join(base,'state');
+    try{
+      const repo=path.join(base,'repo');fs.mkdirSync(repo);
+      for(const args of [['init','-q'],['config','user.email','fixture@example.test'],['config','user.name','Fixture']])expect(spawnSync('git',args,{cwd:repo,timeout:10_000}).status).toBe(0);
+      fs.writeFileSync(path.join(repo,'app.js'),'console.log("fixture")\n');
+      for(const args of [['add','app.js'],['commit','-qm','fixture']])expect(spawnSync('git',args,{cwd:repo,timeout:10_000}).status).toBe(0);
+      const dependencies={runtimeCatalog:RUNTIME_CATALOG,catalogImageSession:async()=>{throw new Error('unused');},watchdogPath:()=>'/unused'} as any;
+      const started=await dispatchCsoCommand('start',['--repo',repo,'--offline'],dependencies) as any;
+      await dispatchCsoCommand('finish',[started.runId],dependencies);
+      const markdown=fs.readFileSync(path.join(base,'state','security','cso',started.repoId,started.runId,'report.md'),'utf8');
+      expect(markdown).toStartWith('not assessed — ');
+      expect(markdown).toContain('Status: not assessed. No security domain was assessed, so this report is not a clean result.');
+      expect(markdown).toContain('Missing: application-model (not\\_assessed)');
+      expect(markdown).toMatch(/\nReason: [^\n]*Assessment has not been submitted[^\n]*\nNext: start a new \/cso audit/);
+      expect(markdown).not.toContain('No supported findings in the assessed scope.');
+    }finally{if(previous===undefined)delete process.env.GSTACK_HOME;else process.env.GSTACK_HOME=previous;}
+  },30_000);
+});

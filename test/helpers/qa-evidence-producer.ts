@@ -29,6 +29,7 @@ export interface QaEvidenceCommand {
   timeoutMs?: number;
   publicOutput?: boolean;
   intent?: { capture: string; observationCommand: string; hypothesis: string; nextCommand: string };
+  after?: { capture: string; hypothesis: string };
 }
 
 export function qaEvidenceCommand(command: string, context?: QaEvidenceContext): QaEvidenceCommand | undefined {
@@ -51,13 +52,19 @@ export function qaEvidenceCommand(command: string, context?: QaEvidenceContext):
     intent: { capture: tokens[5], observationCommand: tokens[6], hypothesis: tokens[7], nextCommand: tokens[8] } };
   const publicOutput = tokens[5] === '--public';
   const option = publicOutput ? 6 : 5;
+  const after = tokens[option + 2] === '--after' && /^\d{3}$/.test(tokens[option + 3] ?? '') && tokens[option + 4] === '--hypothesis'
+    ? { capture: tokens[option + 3], hypothesis: tokens[option + 5] ?? '' } : undefined;
+  if (after) {
+    tokens.splice(option + 2, 4);
+    matches.splice(option + 2, 4);
+  }
   if (tokens[2] !== 'capture' || tokens[option + 2] !== '--' || tokens.length < option + 4) return;
   const deadline = tokens[option] === '--deadline' ? source(path.resolve(context.cwd, tokens[option + 1])) : undefined;
   if (tokens[option] === '--deadline' && !deadline) return;
   if (tokens[option] === '--timeout-ms' && (!/^[1-9]\d*$/.test(tokens[option + 1]) || Number(tokens[option + 1]) > 2_147_483_647)) return;
   if (!['--deadline', '--timeout-ms'].includes(tokens[option])) return;
   return { action: 'capture', id: tokens[4], publicOutput, argv: tokens.slice(option + 3), nativeCommand: command.slice(matches[option + 3].index).trim(),
-    ...(tokens[option] === '--deadline' ? { deadline } : { timeoutMs: Number(tokens[option + 1]) }) };
+    ...(tokens[option] === '--deadline' ? { deadline } : { timeoutMs: Number(tokens[option + 1]) }), ...(after ? { after } : {}) };
 }
 
 export type QaProducerCall = { name: string; input: Record<string, any>; output: string; failed: boolean; start: number; end: number };
@@ -75,6 +82,7 @@ export function qaProducerReceipt(call: QaProducerCall, context?: QaEvidenceCont
       || receipt.status !== status || !/^[a-f0-9]{64}$/.test(receipt.sha256)
       || receipt.exitCode !== exitCode
       || (command.id !== undefined && receipt.id !== command.id)
+      || (command.after ? receipt.checkpoint !== command.id || !/^[a-f0-9]{64}$/.test(receipt.checkpointSha256) : receipt.checkpoint !== undefined)
       || (call.failed && (command.action !== 'capture' || receipt.exitCode === 0))) return;
     return { command, receipt };
   } catch { return; }

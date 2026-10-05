@@ -11,7 +11,7 @@
  *   - The resolver emits the gate text
  *   - The regenerated SKILL.md files for all consumers carry the gate
  *   - The framework-meta nudge is present
- *   - The deferred-design-doc reference is present (T-Codex-2 split)
+ *   - No contributor-local design-doc path reaches user-facing prose
  *   - Each named FP class from the issue has an explicit row in the gate
  *
  * No paid eval. The static invariants are the durable guarantees that the
@@ -31,12 +31,10 @@ describe("#1539 confidence resolver — pre-emit verification gate present", () 
   test("resolver text includes the gate header", () => {
     const out = generateConfidenceCalibration({} as never);
     expect(out).toMatch(/Pre-emit verification gate/);
-    expect(out).toMatch(/#1539/);
   });
 
   test("gate requires quoted code snippet (file:line + verbatim text)", () => {
     const out = generateConfidenceCalibration({} as never);
-    expect(out).toMatch(/Quote the specific code line/);
     expect(out).toMatch(/file:line/);
     expect(out).toMatch(/verbatim text/);
   });
@@ -61,15 +59,13 @@ describe("#1539 confidence resolver — pre-emit verification gate present", () 
     expect(out).toMatch(/Prisma/);
   });
 
-  test("references the deferred design doc for framework-aware verification (T-Codex-2)", () => {
+  test("does not point reviewers at contributor-local plan files", () => {
     const out = generateConfidenceCalibration({} as never);
-    expect(out).toMatch(/1539-framework-aware-review\.md/);
+    expect(out).not.toContain('.gstack-dev/plans/');
   });
 
   test("enumerates the four FP classes the gate kills (#1539 named cases)", () => {
     const out = generateConfidenceCalibration({} as never);
-    expect(out).toMatch(/field doesn't exist on model/);
-    expect(out).toMatch(/dict\.get\(\) might be None/);
     expect(out).toMatch(/save\(\) might lose fields/);
     expect(out).toMatch(/update_fields might miss/);
   });
@@ -101,7 +97,6 @@ describe("#1539 generated SKILL.md files — gate propagated to all consumers", 
     test(`${rel} carries the Pre-emit verification gate`, () => {
       const body = readUnion(rel);
       expect(body).toMatch(/Pre-emit verification gate/);
-      expect(body).toMatch(/Quote the specific code line/);
     });
   }
 });

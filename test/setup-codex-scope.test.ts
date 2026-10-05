@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,7 +6,10 @@ import { dirname, join } from 'node:path';
 import { generateAutoplanSnapshotTool } from '../scripts/resolvers/composition';
 import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
 import { runBashScript } from './helpers/bash-script';
-import { ROOT, owned, fixtureWriteFileSync, fixtureCopyFileSync, fixtureMkdirSync, fixtureUtimesSync, tree, fixture, install } from './helpers/setup-codex-scope-fixture';
+import { cleanupFixtures, cleanupSeed, ROOT, owned, fixtureWriteFileSync, fixtureCopyFileSync, fixtureMkdirSync, fixtureUtimesSync, tree, fixture, install } from './helpers/install-fixture';
+
+afterEach(cleanupFixtures);
+afterAll(cleanupSeed);
 
 test.skipIf(process.platform === 'win32')('fixture writes reject physical escapes and allow aliased temporary roots', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gstack-fixture-guard-'));
@@ -34,13 +37,13 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       expect(tree(f.global)).toEqual(before);
       expect(tree(f.previous)).toEqual(sourceBefore);
       const local = join(f.project, '.agents/skills');
-      expect(realpathSync(join(local, 'gstack-review/SKILL.md'))).toBe(join(f.source, '.agents/skills/gstack-review/SKILL.md'));
-      expect(realpathSync(join(local, 'gstack/bin'))).toBe(join(f.source, 'bin'));
+      expect(realpathSync(join(local, 'gstack-review/SKILL.md'))).toBe(realpathSync(join(f.source, '.agents/skills/gstack-review/SKILL.md')));
+      expect(realpathSync(join(local, 'gstack/bin'))).toBe(realpathSync(join(f.source, 'bin')));
       const ctx = { host: 'codex', paths: HOST_PATHS.codex, skillName: 'autoplan', tmplPath: '' } as TemplateContext;
       const command = generateAutoplanSnapshotTool(ctx).replace(/^```bash\n/, '').replace(/\n```$/, '');
       const resolved = runBashScript(command, { cwd: f.other, env: f.env, timeout: 10_000 });
       expect(resolved.status, resolved.stderr).toBe(0);
-      expect(resolved.stdout.trim()).toBe(join(f.previous, 'bin/gstack-autoplan-snapshot.ts'));
+      expect(resolved.stdout.trim()).toBe(realpathSync(join(f.previous, 'bin/gstack-autoplan-snapshot.ts')));
     }, 90_000);
   }
 
@@ -56,15 +59,15 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     for (let run = 0; run < 2; run++) {
       install(f);
       for (const [rel, before] of Object.entries(sourceBefore)) expect(tree(join(f.source, rel))).toEqual(before);
-      expect(realpathSync(join(f.source, '.agents/skills/gstack/bin'))).toBe(join(f.source, '.agents/skills/gstack/bin'));
+      expect(realpathSync(join(f.source, '.agents/skills/gstack/bin'))).toBe(realpathSync(join(f.source, '.agents/skills/gstack/bin')));
     }
   }, 90_000);
 
   for (const layout of ['machine', 'ordinary']) test(`${layout}: ordinary machine sources still register globally`, () => {
     const f = fixture(layout);
     install(f);
-    expect(realpathSync(join(f.global, 'gstack/bin'))).toBe(join(f.source, 'bin'));
-    expect(realpathSync(join(f.global, 'gstack-review/SKILL.md'))).toBe(join(f.source, '.agents/skills/gstack-review/SKILL.md'));
+    expect(realpathSync(join(f.global, 'gstack/bin'))).toBe(realpathSync(join(f.source, 'bin')));
+    expect(realpathSync(join(f.global, 'gstack-review/SKILL.md'))).toBe(realpathSync(join(f.source, '.agents/skills/gstack-review/SKILL.md')));
     expect(readFileSync(join(f.global, 'custom/SKILL.md'), 'utf8')).toBe('User-owned skill.\n');
   }, 90_000);
 
@@ -97,8 +100,8 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
         expect(tree(join(direct, 'bin'))).toEqual(sourceBefore.bin);
         expect(readFileSync(join(f.global, 'gstack-review/SKILL.md'))).toEqual(readFileSync(join(migrated, '.agents/skills/gstack-review/SKILL.md')));
       } else {
-        expect(realpathSync(join(direct, 'bin'))).toBe(join(migrated, 'bin'));
-        expect(realpathSync(join(f.global, 'gstack-review/SKILL.md'))).toBe(join(migrated, '.agents/skills/gstack-review/SKILL.md'));
+        expect(realpathSync(join(direct, 'bin'))).toBe(realpathSync(join(migrated, 'bin')));
+        expect(realpathSync(join(f.global, 'gstack-review/SKILL.md'))).toBe(realpathSync(join(migrated, '.agents/skills/gstack-review/SKILL.md')));
       }
       expect(readFileSync(join(f.global, 'custom/SKILL.md'), 'utf8')).toBe('User-owned skill.\n');
     }
@@ -121,7 +124,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       expect(existsSync(join(runtime, 'setup'))).toBe(false);
       expect(existsSync(join(runtime, 'review/SKILL.md'))).toBe(false);
       expect(existsSync(join(runtime, '.agents/skills'))).toBe(false);
-      expect(realpathSync(join(runtime, 'bin'))).toBe(join(f.source, 'bin'));
+      expect(realpathSync(join(runtime, 'bin'))).toBe(realpathSync(join(f.source, 'bin')));
     }
     install(f);
     expect(tree(f.source)).toEqual(sourceBefore);
@@ -147,7 +150,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     const f = fixture('.claude');
     const result = install(f, '--host codex --global -q');
     expect(result.stderr).toContain(`Global Codex registration requested from project source: ${f.source}`);
-    expect(realpathSync(join(f.global, 'gstack/bin'))).toBe(join(f.source, 'bin'));
+    expect(realpathSync(join(f.global, 'gstack/bin'))).toBe(realpathSync(join(f.source, 'bin')));
   }, 90_000);
 
   test('Claude-only vendored setup cannot prune global Codex entries either', () => {
@@ -192,15 +195,15 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     const before = tree(f.global);
     install(f);
     expect(tree(f.global)).toEqual(before);
-    expect(realpathSync(join(f.project, '.agents/skills/gstack-review/SKILL.md'))).toBe(join(source, '.agents/skills/gstack-review/SKILL.md'));
-    expect(realpathSync(join(link, 'bin'))).toBe(join(source, 'bin'));
+    expect(realpathSync(join(f.project, '.agents/skills/gstack-review/SKILL.md'))).toBe(realpathSync(join(source, '.agents/skills/gstack-review/SKILL.md')));
+    expect(realpathSync(join(link, 'bin'))).toBe(realpathSync(join(source, 'bin')));
   }, 90_000);
 
   test('a parent-directory alias cannot turn the running source into a disposable runtime', () => {
     const f = fixture('.claude');
     fixtureMkdirSync(join(f.project, '.agents'));
     symlinkSync(join(f.project, '.claude/skills'), join(f.project, '.agents/skills'), 'dir');
-    expect(realpathSync(join(f.project, '.agents/skills/gstack'))).toBe(f.source);
+    expect(realpathSync(join(f.project, '.agents/skills/gstack'))).toBe(realpathSync(f.source));
     fixtureWriteFileSync(join(f.source, 'uncommitted-work'), 'Keep the running source.\n');
     const result = spawnSync('bash', [join(f.source, 'setup'), '--host', 'codex', '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
       cwd: f.other, env: f.env, encoding: 'utf8', timeout: 60_000,
@@ -208,7 +211,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(existsSync(join(f.source, 'uncommitted-work')), result.stdout + result.stderr).toBe(true);
     expect(readFileSync(join(f.source, 'uncommitted-work'), 'utf8')).toBe('Keep the running source.\n');
     expect(result.status, result.stdout + result.stderr).toBe(0);
-    expect(realpathSync(join(f.project, '.agents/skills/gstack/bin'))).toBe(join(f.source, 'bin'));
+    expect(realpathSync(join(f.project, '.agents/skills/gstack/bin'))).toBe(realpathSync(join(f.source, 'bin')));
   }, 90_000);
 
 });

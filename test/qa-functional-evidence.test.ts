@@ -188,6 +188,22 @@ describe('functional evidence and native regression controls', () => {
     } finally { fixture.cleanup(); }
   });
 
+  test('webhook scenario coverage binds the report-only run; the fix run needs the happy path and relies on the post-repair recheck of all eight', () => {
+    const fixture = createQAFunctionalFixture('webhook');
+    try {
+      const calls: NativeCall[] = [{ tool: 'Read', input: { file_path: 'qa/sections/system-functional.md' }, output: 'Functional QA native instruction read '.repeat(8) }];
+      for (const scenario of ['happy', 'concurrent-ab', 'concurrent-ab', 'cancel', 'dependency']) recordedProbe(fixture, calls, ['probe.ts', scenario]);
+      const result = nativeCapture(calls);
+      const section = { path: 'qa/sections/system-functional.md', content: calls[0]!.output };
+      const missing = (mode: 'qa' | 'qa-only') => qaFunctionalVerdict(fixture, mode, result, observation, {}, section)
+        .filter(failure => /^missing native [a-z-]+ probe$/.test(failure)).sort();
+      expect(missing('qa-only')).toEqual(['missing native duplicate probe', 'missing native partial probe', 'missing native reject probe', 'missing native concurrent-ba probe'].sort());
+      expect(missing('qa')).toEqual([]);
+      const noHappy = nativeCapture(calls.filter(call => !(call.tool === 'Bash' && call.input.command === 'bun run probe -- happy')));
+      expect(qaFunctionalVerdict(fixture, 'qa', noHappy, observation, {}, section)).toContain('missing native happy probe');
+    } finally { fixture.cleanup(); }
+  });
+
   test('native-shaped adverse receipts cannot hide stream, input, state or interruption failures', () => {
     const cli = createQAFunctionalFixture('cli', { healthy: true });
     const webhook = createQAFunctionalFixture('webhook', { healthy: true });
@@ -349,6 +365,17 @@ describe('functional evidence and native regression controls', () => {
           learning: [{ observationCommand: probes[0]!.command, hypothesis: 'The successful native path suggests checking interruption and boundary assumptions.', nextCommand: probes[1]!.command }], limits: ['External exporter remains unavailable.'] };
         const writes = monitor.stop(); stopped = true;
         expect(qaFunctionalVerdict(fixture, 'qa', captured, writes, report, section, checkpointReport(fixture))).toEqual([]);
+        // Run 37170610789 slice 6 (feaa28d): the pre-repair happy capture, rerun on
+        // the repaired inputs, was classified superseded (exploratory §4).
+        const supersede = (index: number) => ({ ...report, evidence: report.evidence.map((row, i) => i === index ? { ...row, classification: 'superseded' } : row) });
+        expect(qaFunctionalVerdict(fixture, 'qa', captured, writes, supersede(0), section, checkpointReport(fixture))).toEqual([]);
+        expect(qaFunctionalVerdict(fixture, 'qa', captured, writes, supersede(probes.length - 1), section, checkpointReport(fixture)))
+          .toContain(`missing exact sanitized evidence for ${probes[probes.length - 1]!.command}`);
+        if (family === 'webhook') {
+          const reject = probes.findIndex(probe => probe.observed.scenario === 'reject');
+          expect(qaFunctionalVerdict(fixture, 'qa', captured, writes, supersede(reject), section, checkpointReport(fixture)))
+            .toContain(`missing exact sanitized evidence for ${probes[reject]!.command}`);
+        }
         for (const allowed of ['.qa-state/probe.json', 'qa-reports/evidence.md']) {
           const capture = nativeCapture([...calls, { tool: 'Write', input: { file_path: path.join(fixture.root, allowed), content: 'owned evidence' }, output: 'File written.' }]);
           expect(qaFunctionalVerdict(fixture, 'qa', capture, writes, report, section, checkpointReport(fixture))).toEqual([]);

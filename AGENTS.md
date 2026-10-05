@@ -66,7 +66,7 @@ Invoke them by name (e.g., `/office-hours`).
 | `/health` | Code quality dashboard (type checker, linter, tests, dead code). |
 | `/benchmark` | Performance regression detection (page load, Core Web Vitals). |
 | `/benchmark-models` | Cross-model benchmark for skills (Claude, GPT, Gemini side-by-side). |
-| `/cso` | Supported security findings with explicit coverage. Static assessment remains available without catalog profiles; contained runtime/scanner execution requires matching qualified profiles. Runtime-tested bundles authenticate separate external assertions. Project-test completion remains `self_reported` because target code controls the test process; `tested` is reserved for a future target-independent completion witness. |
+| `/cso` | Supported security findings with explicit coverage. Static assessment remains available without catalog profiles; contained runtime/scanner execution requires matching qualified profiles, and no catalog has one yet (scanner build inputs are reviewed and await their qualification run; runtime qualification needs a private evaluator that is still being built), so `/cso` runs static assessment only. Runtime-tested bundles authenticate separate external assertions. Project-test completion remains `self_reported` because target code controls the test process; `tested` is reserved for a future target-independent completion witness. |
 | `/setup-gbrain` | Set up gbrain for cross-machine session memory sync. |
 | `/sync-gbrain` | Keep gbrain current with this repo's code; refresh agent search guidance in CLAUDE.md. |
 
@@ -149,7 +149,8 @@ When fixing failures or preparing `/ship`, follow this order:
    public events in free regressions, including negative controls, before paying
    for another agent run. Check behavior and acknowledgments; match exact prose
    only when that prose is the contract. Do not lower thresholds, increase model
-   budgets, skip cases, or rejudge a failure to manufacture a pass.
+   budgets, skip cases, or rejudge a failure to manufacture a pass. A
+   pre-registered fixed panel is not rejudging.
    For policy or validation repairs, exercise the actual registered callback with
    representative native input and assert that it uses the helper’s result.
    When renderer or parser failures recur at the same boundary, verify the
@@ -209,7 +210,16 @@ When fixing failures or preparing `/ship`, follow this order:
    result and pending permission state; diagnose a blocked actor before waiting
    through its deadline. Preserve cancellation separately from a test verdict.
    Skipped or unstarted cases
-   do not satisfy coverage; preserve configured retries and every attempt.
+   do not satisfy coverage; preserve every attempt. Paid evals never retry. Each
+   case's kind (`E2E_KINDS`) fixes its trials before the run: `rule` one trial;
+   `behavior` a panel of 3 independent trials, PASS at >= 2 with no contract
+   violation; `judge` 3 samples on one output, gated on the mean against the
+   unchanged threshold. Never add trials, samples or dispatches after seeing a
+   result, never change a kind to change a verdict without pass-rate evidence,
+   and report every trial. Quarantine follows `CASE_QUARANTINE`'s entry and exit
+   rules only (`EVAL_POLICY`, `docs/TESTING_INTERNALS.md`). A census whose every
+   red is machine-classified INFRA or INCOMPLETE may be re-dispatched once as a
+   new run; report both runs.
 7. Prove all known repairs with focused tests, including affected paid cases.
    Rerun a failed case only after a concrete repair or a demonstrated launch
    correction. Run the remaining required selected evaluations on the integrated
@@ -235,22 +245,31 @@ When fixing failures or preparing `/ship`, follow this order:
 
 ```bash
 bun install              # install dependencies
+bun run typecheck        # strict tsc over product code; must report zero errors
+bun run typecheck:test   # test-code type-debt ratchet (new diagnostics fail; --write-baseline locks in fixes)
+bun run format:cso       # format lib/cso/*.ts (format:cso:check is the CI gate)
 bun run test:quick       # fast measured free subset for edit feedback (not acceptance)
 bun run test             # complete free suite via the strict shard runner (no API spend)
-bun run test:ubicloud    # same suite on an ephemeral 16-vCPU Ubicloud VM (needs UBICLOUD_API_KEY)
-bun run eval:bg:pr       # changed fast live probes + selected judges, with explicit deferrals
-bun run eval:bg:release  # fresh complete gate + periodic live coverage
-bun run test:windows     # curated Windows-safe subset (runs on windows-latest)
+bun run eval:bg:pr       # changed live probes + selected judges; dispatches CI when HEAD is clean and pushed, else runs locally
+bun run eval:bg:release  # fresh complete gate + periodic live coverage (same backend choice)
+bun run test:health      # audit success metrics and weekly health from CI history (free; needs gh)
 bun run build            # generate docs + compile binaries
 bun run gen:skill-docs   # regenerate SKILL.md files from templates
 bun run skill:check      # health dashboard for all skills
 ```
 
+Every other test and eval command (Ubicloud, the Windows subset, one paid tier
+or case, branch validation in CI, pass rates, plan previews), with its cost and
+prerequisites, is in [Which command do I run?](CONTRIBUTING.md#which-command-do-i-run).
+Agents poll `eval:bg:*` logs for the `### gstack-detach EXIT=<code> ###` sentinel
+([CLAUDE.md](CLAUDE.md#running-evals-as-an-agent-always-detach-sigterm-proof)).
+
 ## Platform support
 
 - **macOS** + **Linux**: full test suite supported.
-- **Windows**: curated Windows-safe subset runs on `windows-latest` via the
-  `windows-free-tests` CI job. Setup script (`./setup`) requires Git Bash or
+- **Windows**: the curated Windows-safe subset runs in the `windows-free-tests`
+  CI workflow across six `windows-latest` jobs, packed by Windows-measured
+  durations. Setup script (`./setup`) requires Git Bash or
   MSYS today; native PowerShell support is a future expansion. The `bin/gstack-paths`
   helper resolves state roots through `CLAUDE_PLUGIN_DATA` / `GSTACK_HOME` so plugin
   installs work on every platform.
@@ -270,5 +289,11 @@ bun run skill:check      # health dashboard for all skills
 - Run `bun run gen:skill-docs --host codex` to regenerate Codex-specific output.
 - Browser steps in skills are `aside repl` scripts per `scripts/resolvers/aside.ts` (Aside first), each with a `$B` equivalent for the fallback engine — `$B <command>` is the browse binary and is a legitimate tool when the Aside probe does not print `READY`. Local HTML renders through `bin/gstack-render.ts`, which picks the same way.
 - Safety skills (careful, freeze, guard) use inline advisory prose — always confirm before destructive operations.
-- State paths resolve via `bin/gstack-paths` (sourced via `eval "$(...)"`). Honors `GSTACK_HOME`, `CLAUDE_PLUGIN_DATA`, `CLAUDE_PLANS_DIR`.
+- State paths resolve through one chain owned by `lib/state-root.ts` and its sourced bash twin `bin/gstack-state-root.sh` (`GSTACK_STATE_ROOT` → `GSTACK_HOME` → `GSTACK_STATE_DIR` → gstack's `CLAUDE_PLUGIN_DATA` → `~/.gstack`; see docs/state-root.md). Skill prose uses `GSTACK_STATE_ROOT=$(bin/gstack-paths --get GSTACK_STATE_ROOT)` with its `${GSTACK_STATE_ROOT:?…}` guard (worktree-isolated Claude Code sessions refuse eval); `test/state-root-ratchet.test.ts` rejects hand-rolled chains.
+- Browse daemon HTTP routes are entries in `browse/src/routes/table.ts` (its header shows how to add one); never dispatch on `url.pathname` in `server.ts`.
+- Both test lanes run shards through `scripts/lib/shard-engine.ts`; the free and paid runners hold lane policy only. PTY harness code lives in `test/helpers/pty/*` behind the `claude-pty-runner.ts` barrel.
+- Outside-voice failure prose (auth, timeout, empty, fallback) comes only from `outsideVoiceFailurePolicy()` in `scripts/resolvers/outside-voice.ts`.
+- Every env-var-host fence starts with the shared prelude from `scripts/resolvers/runtime-root.ts` (inserted by its post-render pass); never resolve gstack's root by hand in a template.
+- Every Codex run's verdict goes through `lib/outside-review-result.ts`; its reason codes live in `lib/gate-outcomes.ts`, each with a `docs/troubleshooting.md` anchor.
+- `test/module-size-ratchet.test.ts` keeps refactored owner modules at or under 800 lines (150 per function) and residual files from growing.
 - The `claude` CLI binary resolves via `lib/claude-bin.ts` (re-exported from `browse/src/claude-bin.ts` for browse internals; `Bun.which()` + `GSTACK_CLAUDE_BIN` override). Set `GSTACK_CLAUDE_BIN=wsl` plus `GSTACK_CLAUDE_BIN_ARGS='["claude"]'` to run Claude through WSL on Windows.

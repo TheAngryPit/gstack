@@ -10,8 +10,8 @@ then return here for a new lookup, fresh body and both redaction scans before pu
 
 1. Resolve the archive directory and branch:
    ```bash
-   eval "$(~/.claude/skills/gstack/bin/gstack-paths)"
-   eval "$(~/.claude/skills/gstack/bin/gstack-slug)"
+   GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+   SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG)
    CURRENT_BRANCH=$(git branch --show-current)
    SPEC_ARCHIVES="$GSTACK_STATE_ROOT/projects/$SLUG/specs"
    ```
@@ -44,6 +44,7 @@ details for cards whose file type has no known comment syntax.>
 
 ## Pre-Landing Review
 <findings from Step 9 code review, or "No issues found.">
+<Outside review: its verdict; `unverified` or `unavailable` is listed as missing coverage with its reason, never as passed.>
 
 ## Exploratory QA
 <Step 9's current surfaces/charters, reproducers, approved regressions and red/green
@@ -69,7 +70,7 @@ unavailable results as passing.>
 
 ## Plan Completion
 <If plan file found: completion checklist summary from Step 8>
-<If no plan file: "No plan file detected.">
+<If Step 8 printed the not-run line: that line verbatim.>
 <If plan items deferred: list deferred items>
 
 ## Linked Spec
@@ -90,7 +91,10 @@ Unavailable/inconclusive is never PASS.>
 <If TODOS.md doesn't exist and user skipped: omit this section>
 
 ## Documentation
-<Embed Step 14.5's vetted nonempty `documentation_section` for this invocation.>
+<Embed Step 14.5's vetted nonempty `documentation_section` for this invocation:
+its saved section file, inserted unchanged by the scan block's `DOCS_SECTION_FILE` lines.
+A blocked audit shipped under a user exception has no section file: state its
+blocked status, scope and exception here and omit those lines.>
 <Always include the status and reviewed scope: updated, current, or blocked with the actual user's named risk exception. Never omit this section or reuse another invocation's audit.>
 
 ## Test plan
@@ -109,17 +113,24 @@ engine WARN-degrades the example credentials those tools quote instead of blocki
 the PR (a live-format credential inside the fence still blocks).
 
 Use Step 18's `NEW_TITLE` unchanged; its version prefix is already present.
-In a new shell, restore the saved literal title before this block.
+In a new shell, restore the saved literal title before this block, and Step 14.5's
+saved section file path as `DOCS_SECTION_FILE`.
 
 ```bash
 : "${NEW_TITLE:?Restore the saved Step 18 title before scanning}"
+: "${DOCS_SECTION_FILE:?Restore the saved Step 14.5 section file path before composing}"
 REDACT_VIS=$(~/.claude/skills/gstack/bin/gstack-config get redact_repo_visibility 2>/dev/null)
 [ -z "$REDACT_VIS" ] && REDACT_VIS=$(gh repo view --json visibility -q .visibility 2>/dev/null | tr 'A-Z' 'a-z')
 REDACT_VIS="${REDACT_VIS:-unknown}"
-PR_BODY_FILE=$(mktemp) || { echo "ERROR: mktemp failed — cannot scan the PR body; refusing to create the PR unscanned." >&2; exit 1; }
-cat > "$PR_BODY_FILE" <<'PR_BODY_EOF'
-<PR body from above>
+PR_BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/gstack-pr-body.XXXXXX") || { echo "ERROR: mktemp failed — cannot scan the PR body; refusing to create the PR unscanned." >&2; exit 1; }
+{ cat <<'PR_BODY_EOF'
+<PR body from above, through the "## Documentation" heading line>
 PR_BODY_EOF
+cat -- "$DOCS_SECTION_FILE" && echo || exit 1
+cat <<'PR_BODY_EOF'
+<rest of the PR body from above>
+PR_BODY_EOF
+} > "$PR_BODY_FILE" || exit 1
 ~/.claude/skills/gstack/bin/gstack-redact --from-file "$PR_BODY_FILE" --repo-visibility "$REDACT_VIS" --self-email "$(git config user.email 2>/dev/null)" --json
 case $? in
   0) ;;
@@ -144,9 +155,9 @@ or `glab mr update -d "$(cat "$PR_BODY_FILE")"` (GitLab).
 
 Update the title with the same scanned `NEW_TITLE`: `gh pr edit --title "$NEW_TITLE"` (or `glab mr update -t "$NEW_TITLE"`).
 
-**REST fallback (#1079):** if `gh pr edit` fails with the `repository.pullRequest.projectCards` GraphQL deprecation, do not re-ask for auth. Use the SAME scanned file: `PR_NUMBER=$(gh pr view --json number -q .number)`, then `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -F body=@"$PR_BODY_FILE"`; for the title use `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -f title="$NEW_TITLE"`.
+**REST fallback:** if `gh pr edit` fails with the `repository.pullRequest.projectCards` GraphQL deprecation, do not re-ask for auth. Use the SAME scanned file: `PR_NUMBER=$(gh pr view --json number -q .number)`, then `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -F body=@"$PR_BODY_FILE"`; for the title use `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -f title="$NEW_TITLE"`.
 
-**Self-check:** re-fetch the title and assert it starts with `v$NEW_VERSION `. Retry once if wrong, then surface any failure. Print the existing URL and continue to Step 20; do not run the create commands below.
+**Self-check:** re-fetch the title and assert it equals `NEW_TITLE`. Retry once if wrong, then surface any failure. Print the existing URL and continue to Step 20; do not run the create commands below.
 
 **No open PR/MR, GitHub:**
 

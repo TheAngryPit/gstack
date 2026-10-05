@@ -45,6 +45,20 @@ test('the pinned SDK refuses a default nonstreaming 64k request before network a
   expect(transport).not.toHaveBeenCalled();
 });
 
+test('effort reaches the wire beside the response schema and is absent unless requested', async () => {
+  transport.mockImplementation(async () => response());
+  await callJudge('score the whole bundle', 'claude-fable-5-1', {
+    max_tokens: 65_536, stream: true, jsonSchema: WORKFLOW_JUDGE_RESPONSE_SCHEMA, effort: 'medium',
+  });
+  await callJudge('score the whole bundle', 'claude-fable-5-1', { max_tokens: 65_536, stream: true, effort: 'medium' });
+  await callJudge('score the whole bundle', 'claude-fable-5-1', { max_tokens: 65_536, stream: true });
+  const bodies = transport.mock.calls.map((call: any[]) => JSON.parse(call[1].body));
+  expect(bodies[0].output_config).toEqual({ format: { type: 'json_schema', schema: WORKFLOW_JUDGE_RESPONSE_SCHEMA }, effort: 'medium' });
+  expect(bodies[1].output_config).toEqual({ effort: 'medium' });
+  expect(bodies[2]).not.toHaveProperty('output_config');
+  for (const body of bodies) expect(body).not.toHaveProperty('thinking');
+});
+
 test('the real SDK streams 64k requests and parses only completed public text', async () => {
   transport.mockResolvedValue(response());
   expect(await callJudge('score the whole bundle', 'claude-fable-5-1', {

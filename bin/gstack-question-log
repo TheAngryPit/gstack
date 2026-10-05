@@ -19,6 +19,8 @@
 #                        (optional — looked up from registry if omitted)
 #   options_count      — number of options presented (positive integer)
 #   user_choice        — key user selected (free string; registry-options preferred)
+#   native_answers     — exact Codex-native answer array (native source only;
+#                        bounded, never truncated)
 #   recommended        — option key the agent recommended (optional)
 #   followed_recommendation — bool (optional — computed if both present)
 #   session_id         — stable session identifier
@@ -35,13 +37,15 @@ case "$(uname -s)" in
 esac
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null)"
 # GSTACK_STATE_ROOT takes precedence over GSTACK_HOME (test isolation per D16).
-GSTACK_HOME="${GSTACK_STATE_ROOT:-${GSTACK_HOME:-$HOME/.gstack}}"
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+GSTACK_HOME="$_gstack_sr_root"
 mkdir -p "$GSTACK_HOME/projects/$SLUG"
 
 INPUT="$1"
 
 # Validate and enrich from registry.
-TMPERR=$(mktemp)
+TMPERR=$(mktemp "${TMPDIR:-/tmp}/gstack-question-log.XXXXXX") || { echo "gstack-question-log: could not create a temp file in ${TMPDIR:-/tmp}, so the question was not logged. Fix: point TMPDIR at a writable directory." >&2; exit 1; }
 trap 'rm -f "$TMPERR"' EXIT
 set +e
 VALIDATED=$(printf '%s' "$INPUT" | GSTACK_LIB_DIR="$SCRIPT_DIR/../lib" bun -e "
@@ -57,10 +61,16 @@ if (!j.skill || !/^[a-z0-9-]+\$/.test(j.skill)) {
   process.exit(1);
 }
 
-// Required: question_id (kebab-case, <=64 chars).
-// Cathedral T5: hook-sourced events use 'hook-<10-char-hash>' which is
-// kebab-case-compatible and passes the same regex.
-if (!j.question_id || !/^[a-z0-9-]+\$/.test(j.question_id) || j.question_id.length > 64) {
+// Required: question_id (kebab-case, <=64 chars) for local/legacy writers.
+// Codex-native request_user_input IDs are supplied by the native protocol and
+// must remain byte-for-byte identifiable, so allow their bounded opaque form
+// only when the source explicitly carries native provenance.
+if (j.source === 'codex-import-native') {
+  if (typeof j.question_id !== 'string' || !j.question_id.trim() || j.question_id.length > 128 || /[\u0000\r\n]/.test(j.question_id)) {
+    process.stderr.write('gstack-question-log: invalid native question_id, must be a non-empty single-line string <=128 chars\n');
+    process.exit(1);
+  }
+} else if (!j.question_id || !/^[a-z0-9-]+\$/.test(j.question_id) || j.question_id.length > 64) {
   process.stderr.write('gstack-question-log: invalid question_id, must be kebab-case <=64 chars\n');
   process.exit(1);
 }
@@ -70,11 +80,11 @@ if (!j.question_id || !/^[a-z0-9-]+\$/.test(j.question_id) || j.question_id.leng
 //   'hook'             — PostToolUse hook captured it deterministically (T5)
 //   'auq-other'        — user picked 'Other' and typed free text (Layer 8)
 //   'auto-decided'     — PreToolUse enforcement hook substituted the answer (T6)
-//   'codex-import-marker' / 'codex-import-pattern' — T9 backfill from Codex
+//   'codex-import-native' / 'codex-import-marker' / 'codex-import-pattern' — T9 backfill from Codex
 //   'spawned-env-deny'  — spawned-session AUQ deny (#2733): the model, not a
 //                         human, resolves the gate; tagged so /plan-tune never
 //                         trains on machine picks as if a human made them
-const ALLOWED_SOURCES = ['agent', 'hook', 'auq-other', 'auto-decided', 'codex-import-marker', 'codex-import-pattern', 'spawned-env-deny'];
+const ALLOWED_SOURCES = ['agent', 'hook', 'auq-other', 'auto-decided', 'codex-import-native', 'codex-import-marker', 'codex-import-pattern', 'spawned-env-deny'];
 if (j.source !== undefined) {
   if (!ALLOWED_SOURCES.includes(j.source)) {
     process.stderr.write('gstack-question-log: invalid source, must be one of: ' + ALLOWED_SOURCES.join(', ') + '\n');
@@ -152,6 +162,36 @@ if (j.options_count !== undefined) {
     process.exit(1);
   }
   j.options_count = n;
+}
+
+// Codex-native answers are retained separately from user_choice. The latter is
+// a legacy scalar capped at 64 characters; native_answers is the lossless
+// record for long free-form and multi-answer responses. Keep the aggregate
+// bound well below the importer transcript bound so one event cannot dominate
+// the append-only log.
+const MAX_NATIVE_ANSWERS = 32;
+const MAX_NATIVE_ANSWER_CHARS = 16384;
+const MAX_NATIVE_ANSWERS_CHARS = 65536;
+if (j.source === 'codex-import-native') {
+  if (!Array.isArray(j.native_answers) || j.native_answers.length < 1 || j.native_answers.length > MAX_NATIVE_ANSWERS) {
+    process.stderr.write('gstack-question-log: native_answers must be a non-empty array of at most ' + MAX_NATIVE_ANSWERS + ' strings\n');
+    process.exit(1);
+  }
+  let nativeAnswerChars = 0;
+  for (const answer of j.native_answers) {
+    if (typeof answer !== 'string' || !answer.length || answer.length > MAX_NATIVE_ANSWER_CHARS) {
+      process.stderr.write('gstack-question-log: each native answer must be a non-empty string <= ' + MAX_NATIVE_ANSWER_CHARS + ' chars\n');
+      process.exit(1);
+    }
+    nativeAnswerChars += answer.length;
+  }
+  if (nativeAnswerChars > MAX_NATIVE_ANSWERS_CHARS) {
+    process.stderr.write('gstack-question-log: native_answers total exceeds ' + MAX_NATIVE_ANSWERS_CHARS + ' chars\n');
+    process.exit(1);
+  }
+} else if (j.native_answers !== undefined) {
+  process.stderr.write('gstack-question-log: native_answers requires source=codex-import-native\n');
+  process.exit(1);
 }
 
 // user_choice — required; <= 64 chars; single-line; no injection patterns

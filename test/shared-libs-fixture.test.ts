@@ -6,14 +6,15 @@ import * as path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   createSharedInteractiveToolHandler, createSharedLibsFixture, fixtureGit, fixtureWrite, installSourceShims,
-  readRequests, seedOpportunitySources, sharedReadOnlyViolations, shellQuote, snapshotFixture, type SharedLibsFixture,
-  SharedCaptureAccumulator, type SharedCaptureAttempt, isInternalClaudeGitRequest,
+  installHostileGitConfig, isGuardedGitRequest, reviewLifecycleInstructions, standaloneInstructions, SHARED_LIBS_ROOT, readRequests, seedOpportunitySources, sharedReadOnlyViolations, shellQuote, snapshotFixture, type SharedLibsFixture,
+  SharedCaptureAccumulator, type SharedCaptureAttempt, isInternalClaudeGitRequest, SHARED_LIBS_OLDER_OPEN_PRS, prCoverageRequestViolations,
 } from './helpers/shared-libs-eval-fixture';
 import { EvalCollector, type EvalTestEntry } from './helpers/eval-store';
 import { collectorOutcomeCounts } from '../scripts/test-paid-shards';
 import { E2E_TOUCHFILES, GLOBAL_TOUCHFILES, selectTests } from './helpers/touchfiles';
 import nativeNoChangeCases from './fixtures/shared-libs-no-change-ci-public.json';
 import r44 from './fixtures/shared-libs-index-flags-r44-packets.json';
+import skipDescriptions from './fixtures/shared-libs-index-flags-skip-description-public.json';
 import { seedPathReviewPrerequisites, checkPathReviewPrerequisites } from './helpers/shared-libs-path-fixture';
 
 const cleanup: string[] = [];
@@ -26,6 +27,72 @@ function scratch(): string {
   cleanup.push(directory);
   return directory;
 }
+
+describe('shared-code Git guard', () => {
+  test('the standalone runtime resolves the real helper, and only its complete prefix counts as a guarded read', () => {
+    const f = createSharedLibsFixture('safe-git');
+    cleanup.push(f.root);
+    seedOpportunitySources(f);
+    installHostileGitConfig(f);
+    installSourceShims(f);
+    const instructions = fs.readFileSync(standaloneInstructions(f), 'utf8');
+    const helper = path.join(SHARED_LIBS_ROOT, 'bin/gstack-safe-git');
+    expect(instructions).toContain(`\`${helper} -C <repo> rev-parse --is-inside-work-tree\``);
+    expect(instructions).not.toContain('~/.claude/skills/gstack');
+    const run = (command: string, args: string[]) => spawnSync(command, args, {
+      cwd: f.repo, encoding: 'utf8', timeout: 10_000, env: { ...process.env, ...f.env } });
+    const refusal = run(helper, ['status']);
+    expect(refusal.status).toBe(2);
+    expect(refusal.stderr).toContain('gstack-safe-git: refused');
+    // Exit status is Git's own; with Git < 2.44 these reach the recording shim and then fail on --no-lazy-fetch.
+    for (const args of [['rev-parse', '--is-inside-work-tree'], ['log', '-p', '-1'],
+      ['diff', f.tip, f.tip, '--', 'README.md'], ['ls-files', '--cached', '--others', '--exclude-standard', '-z']]) run(helper, args);
+    const guarded = readRequests(f).filter(row => row.tool === 'git');
+    expect(guarded.map(row => row.args[9])).toEqual(['rev-parse', 'log', 'diff', 'ls-files']);
+    for (const row of guarded) expect(isGuardedGitRequest(row), JSON.stringify(row)).toBe(true);
+    expect(fs.existsSync(f.hookTrace) ? fs.readFileSync(f.hookTrace, 'utf8') : '').toBe('');
+
+    fs.rmSync(f.trace, { force: true });
+    run('git', ['log', '-1']);
+    run('git', ['--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', 'rev-parse', 'HEAD']);
+    const unguarded = readRequests(f);
+    expect(unguarded).toHaveLength(2);
+    for (const row of unguarded) expect(isGuardedGitRequest(row), JSON.stringify(row)).toBe(false);
+
+    const wrapped = guarded[2]!;
+    const without = (value: string) => ({ ...wrapped, args: wrapped.args.filter(arg => arg !== value) });
+    for (const damaged of [
+      { ...wrapped, env: {} },
+      { ...wrapped, env: { ...wrapped.env, GIT_NO_LAZY_FETCH: '0' } },
+      without('--no-replace-objects'), without('--no-pager'), without('diff.submodule=short'),
+      without('--no-textconv'), without('--no-ext-diff'),
+      { ...wrapped, args: [...wrapped.args, '--ext-diff'] },
+      { ...wrapped, args: [...wrapped.args, '--output=out.patch'] },
+      { ...wrapped, args: wrapped.args.map(arg => arg === 'core.fsmonitor=false' ? 'core.fsmonitor=true' : arg) },
+    ]) expect(isGuardedGitRequest(damaged), JSON.stringify(damaged.args)).toBe(false);
+  });
+});
+
+describe('review Skip option description', () => {
+  test.each(skipDescriptions.cases)('Step 5c limits Skip to its own effect; the $scenario capture narrated more and stays refused', async ({ input }) => {
+    const rule = 'B) Skip (describe only as: no code/index change; Skip recorded)';
+    expect(fs.readFileSync(path.join(SHARED_LIBS_ROOT, 'review/SKILL.md'), 'utf8')).toContain(rule);
+    const workflow = fs.readFileSync(reviewLifecycleInstructions({ root: scratch() } as SharedLibsFixture), 'utf8');
+    expect(workflow.slice(workflow.indexOf('### Step 5c'), workflow.indexOf('### Step 5d'))).toContain(rule);
+    const refusals: Error[] = [];
+    const handler = () => createSharedInteractiveToolHandler('skip', { nonQuestion: () => { throw new Error('unexpected tool'); },
+      onQuestion: () => {}, onAnswer: () => {}, onRefusal: error => { refusals.push(error); } });
+    const skip = input.questions[0].options.find(option => option.label.startsWith('Skip'))!;
+    expect(skip.description).toMatch(/can be applied in a later|replacing the invalidated prior Skip/);
+    await expect(handler()('AskUserQuestion', input)).rejects.toThrow('No unambiguous no-change option');
+    expect(refusals).toHaveLength(1);
+    const ruled = structuredClone(input);
+    ruled.questions[0].options.find(option => option.label.startsWith('Skip'))!.description = 'No code/index change; Skip recorded.';
+    const answer = await handler()('AskUserQuestion', ruled);
+    expect(answer.updatedInput.answers).toEqual({ [ruled.questions[0].question]: ruled.questions[0].options.find(option => option.label.startsWith('Skip'))!.label });
+    expect(refusals).toHaveLength(1);
+  });
+});
 
 describe('shared-code legacy interactive actor', () => {
   test('R58 acknowledges the exact removed-filter Skip packet without authorizing its recommended fix', async () => {
@@ -818,6 +885,25 @@ describe('shared-code curl source isolation', () => {
     expect(after).toEqual(before);
   });
 
+  test('the provider rate-limit probe gets the same 404 over curl as over gh, not a refusal', () => {
+    // Gate census 37174266054 slice 9: shared-libs-read-only probed API availability
+    // with this exact command; gh already answers rate_limit as an unknown endpoint (404).
+    const f = createSharedLibsFixture('curl-rate-limit');
+    cleanup.push(f.root);
+    installSourceShims(f);
+    const command = 'curl -sS -m 20 -o /dev/null -w "%{http_code}\\n" "https://api.github.com/rate_limit" 2>&1';
+    const response = curl(f, ['-sS', '-m', '20', '-o', '/dev/null', '-w', '%{http_code}\\n', 'https://api.github.com/rate_limit']);
+    expect(response.status).toBe(0);
+    expect(response.stdout).toBe('404\n');
+    expect(gh(f, 'rate_limit').stderr).toContain('HTTP 404');
+    expect(sharedReadOnlyViolations([{ tool: 'Bash', input: { command } }], readRequests(f))).toEqual([]);
+    for (const args of [['-X', 'POST', 'https://api.github.com/rate_limit'], ['-o', path.join(scratch(), 'out'), 'https://api.github.com/rate_limit'],
+      ['https://api.github.com/rate_limit/extra']]) {
+      expect(curl(f, args).status, JSON.stringify(args)).toBe(2);
+      expect(sharedReadOnlyViolations([], readRequests(f).slice(-1)).length, JSON.stringify(args)).toBeGreaterThan(0);
+    }
+  });
+
   test('unknown URLs, methods and file-producing curl options are rejected by the shim', () => {
     const f = createSharedLibsFixture('curl-rejected');
     cleanup.push(f.root);
@@ -859,6 +945,7 @@ describe('shared-code curl source isolation', () => {
       "curl -w '%output{/tmp/report}%{http_code}' https://api.github.com/repos/fixture/shared-libs",
       "curl -X POST https://api.github.com/repos/fixture/shared-libs",
       'printf data > /tmp/report', 'cat README.md >> "/tmp/report"', 'cat README.md | tee /tmp/report',
+      'cat README.md | tee /dev/null report.txt', 'cat README.md | tee -a report.txt', 'cat README.md | tee -- -a',
       "bash <<'SH'\nprintf data > /tmp/report\nSH\n",
       "cat <<'DATA'\njust data\nDATA\ncurl -o /tmp/report https://api.github.com/repos/fixture/shared-libs",
     ]) expect(sharedReadOnlyViolations(bash(command)).length, command).toBeGreaterThan(0);
@@ -868,6 +955,9 @@ describe('shared-code curl source isolation', () => {
       "curl -sS -o - -w 'http=%{http_code}\\n' https://api.github.com/repos/fixture/shared-libs",
       "curl -sS -m 15 -o /dev/null -w 'http=%{http_code}\\n' https://api.github.com/repos/fixture/shared-libs 2>&1",
       'gh auth status 2>&1 | head -5', 'git --no-lazy-fetch log 2>/dev/null',
+      // Paid opportunity-judgment t1 (1213b01): tee to the discard device writes no file.
+      'for p in src/version.ts README.md .gitignore; do echo "===== $p"; gh api --method GET -H "Accept: application/vnd.github.raw" "repos/fixture/shared-libs/contents/$p?ref=987f57ff2613724dd4a5509dda1b0fea155aab8a" 2>&1 | head -c 4000 | tee /dev/null | sha256sum; echo "exit=${PIPESTATUS[0]}"; done',
+      'cat README.md | tee -a /dev/stderr',
       "rg 'a > b' README.md", "rg '>' README.md", "rg '|' README.md",
       'rg tee README.md', 'rg curl README.md',
       "python3 - <<'PY'\nsize = 2\nif size > 1:\n    print(size)\nPY\n",
@@ -936,6 +1026,153 @@ function pinnedSource(f: SharedLibsFixture, revision: string, file: string) {
   expect(Buffer.from(body.content, 'base64')).toEqual(bytes);
   return bytes;
 }
+
+function ghCli(f: SharedLibsFixture, args: string[]) {
+  return spawnSync(path.join(f.bin, 'gh'), args, {
+    cwd: f.repo, env: { ...process.env, ...f.env }, encoding: 'utf8', timeout: 10_000,
+  });
+}
+
+describe('shared-code PR coverage world', () => {
+  const numbers = (stdout: string) => (JSON.parse(stdout) as Array<{ number: number }>).map(pr => pr.number);
+  const pulls = (query: string) => `repos/fixture/shared-libs/pulls?${query}`;
+
+  test('gh pr list, pulls?state= and search/issues page one finite table in the same order', () => {
+    const f = createSharedLibsFixture('pr-world');
+    cleanup.push(f.root);
+    seedOpportunitySources(f);
+    installSourceShims(f, { prCoverage: true });
+    const scan = (state: string) => {
+      const rows: number[] = [];
+      for (let page = 1; page < 20; page++) {
+        const endpoint = pulls(`state=${state}&sort=updated&direction=desc&per_page=100&page=${page}`);
+        const response = gh(f, endpoint);
+        expect(response.status, response.stderr).toBe(0);
+        const batch = numbers(response.stdout);
+        // PR 7's activity timestamp is the request time; compare the table rows.
+        expect(numbers(curl(f, ['-sS', `https://api.github.com/${endpoint}`]).stdout)).toEqual(batch);
+        rows.push(...batch);
+        if (batch.length < 100) return { rows, pages: page };
+      }
+      throw new Error(`state=${state} listing never produced a short last page`);
+    };
+    const open = scan('open'), closed = scan('closed'), all = scan('all');
+    const olderOpen = SHARED_LIBS_OLDER_OPEN_PRS;
+    expect(open.rows).toHaveLength(olderOpen + 2);
+    expect(new Set(open.rows).size).toBe(open.rows.length);
+    expect(open.rows[0]).toBe(7);
+    expect(open.rows.at(-1)).toBe(42);
+    expect(closed.rows).toEqual([5, 4, 3]);
+    expect(all.rows).toEqual([...open.rows, ...closed.rows]);
+    expect(open.pages).toBe(Math.floor((olderOpen + 2) / 100) + 1);
+    expect(numbers(gh(f, pulls('page=1')).stdout)).toEqual(open.rows.slice(0, 30));
+    expect(numbers(gh(f, pulls('state=open&direction=asc&per_page=100&page=1')).stdout)).toEqual(open.rows.slice().reverse().slice(0, 100));
+
+    for (const [state, rows] of [['open', open.rows], ['closed', closed.rows], ['all', all.rows]] as const) {
+      const listed = ghCli(f, ['pr', 'list', '--state', state, '--limit', '10000']);
+      expect(listed.status, listed.stderr).toBe(0);
+      expect(numbers(listed.stdout)).toEqual([...rows]);
+    }
+    expect(numbers(ghCli(f, ['pr', 'list']).stdout)).toEqual(open.rows.slice(0, 30));
+    expect(numbers(ghCli(f, ['pr', 'list', '-L', '5']).stdout)).toEqual(open.rows.slice(0, 5));
+
+    const searched: number[] = [];
+    for (let page = 1; ; page++) {
+      const response = gh(f, `search/issues?q=${encodeURIComponent('repo:fixture/shared-libs is:pr is:open')}&per_page=100&page=${page}`);
+      expect(response.status, response.stderr).toBe(0);
+      const result = JSON.parse(response.stdout);
+      expect(result.total_count).toBe(open.rows.length);
+      searched.push(...result.items.map((item: { number: number }) => item.number));
+      if (result.items.length < 100) break;
+    }
+    expect(searched).toEqual(open.rows);
+    const since = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);
+    const recent = JSON.parse(gh(f, `search/issues?q=${encodeURIComponent(`repo:fixture/shared-libs is:pr updated:>=${since}`)}`).stdout);
+    expect(recent.items.map((item: { number: number }) => item.number)).toEqual([7]);
+    expect(recent.total_count).toBe(1);
+  });
+
+  test('the maximum authorized open-metadata scan still leaves older open PRs unchecked', () => {
+    const periodic = fs.readFileSync(path.join(import.meta.dir, 'skill-e2e-shared-libs-periodic.test.ts'), 'utf8');
+    expect(periodic).toContain('prCoverageRequestViolations(');
+    const sixth = Array.from({ length: 6 }, (_, i) => `/repos/fixture/shared-libs/pulls?state=open&per_page=100&page=${i + 1}`);
+    expect(prCoverageRequestViolations([...sixth.slice(0, 5), '/repos/fixture/shared-libs/pulls/42/files?page=1',
+      '/repos/fixture/shared-libs/pulls/42/files?page=2'])).toEqual([]);
+    expect(prCoverageRequestViolations([...sixth, '/repos/fixture/shared-libs/pulls/42/files?page=1',
+      '/repos/fixture/shared-libs/pulls/42/files?page=2'])).toEqual(['6 open-PR metadata pages exceed the budget of 5']);
+    const f = createSharedLibsFixture('pr-world-budget');
+    cleanup.push(f.root);
+    seedOpportunitySources(f);
+    installSourceShims(f, { prCoverage: true });
+    const scanned: number[] = [];
+    for (let page = 1; page <= 5; page++) {
+      const batch = numbers(gh(f, pulls(`state=open&sort=updated&direction=desc&per_page=100&page=${page}`)).stdout);
+      expect(batch).toHaveLength(100);
+      scanned.push(...batch);
+    }
+    const everyOpen = numbers(ghCli(f, ['pr', 'list', '--state', 'open', '--limit', '10000']).stdout);
+    const unchecked = everyOpen.filter(number => !scanned.includes(number));
+    expect(unchecked.length).toBeGreaterThan(0);
+    expect(unchecked).toContain(42);
+    // The linked PR stays reachable directly, outside the metadata budget.
+    const direct = gh(f, 'repos/fixture/shared-libs/pulls/42');
+    expect(JSON.parse(direct.stdout)).toMatchObject({ number: 42, state: 'open', updated_at: '2020-01-01T00:00:00Z' });
+    expect(JSON.parse(gh(f, 'repos/fixture/shared-libs/pulls/7').stdout).number).toBe(7);
+  });
+
+  test('pinned contents agree across gh and curl for files and directories; unknown endpoints 404', () => {
+    const f = createSharedLibsFixture('pr-world-contents');
+    cleanup.push(f.root);
+    seedOpportunitySources(f);
+    installSourceShims(f, { prCoverage: true });
+    const root = gh(f, `repos/fixture/shared-libs/contents/?ref=${f.tip}`);
+    expect(root.status, root.stderr).toBe(0);
+    expect(JSON.parse(root.stdout)).toContainEqual({ type: 'dir', name: 'src', path: 'src' });
+    expect(gh(f, `repos/fixture/shared-libs/contents?ref=${f.tip}`).stdout).toBe(root.stdout);
+    for (const entry of ['src', 'src/retry-route.ts']) {
+      const endpoint = `repos/fixture/shared-libs/contents/${entry}?ref=${f.tip}`;
+      const viaGh = gh(f, endpoint), viaCurl = curl(f, ['-sS', `https://api.github.com/${endpoint}`]);
+      expect(viaGh.status, viaGh.stderr).toBe(0);
+      expect(viaCurl.status, viaCurl.stderr).toBe(0);
+      expect(viaCurl.stdout).toBe(viaGh.stdout);
+    }
+    const listing = JSON.parse(gh(f, `repos/fixture/shared-libs/contents/src?ref=${f.tip}`).stdout);
+    const file = listing.find((entry: { name: string }) => entry.name === 'retry-route.ts');
+    expect(file).toMatchObject({ type: 'file', path: 'src/retry-route.ts' });
+    expect(JSON.parse(gh(f, `repos/fixture/shared-libs/contents/src/retry-route.ts?ref=${f.tip}`).stdout).sha).toBe(file.sha);
+    expect(gh(f, 'repos/fixture/shared-libs/contents/src?ref=main').stderr).toContain('unsupported or unpinned');
+
+    for (const endpoint of [`repos/fixture/shared-libs/git/blobs/${'0'.repeat(40)}`,
+      `repos/fixture/shared-libs/git/trees/${f.tip}?recursive=1`, 'repos/fixture/shared-libs/pulls/999999', 'rate_limit']) {
+      const response = gh(f, endpoint);
+      expect(response.status, endpoint).not.toBe(0);
+      expect(response.stderr).toContain('HTTP 404');
+      expect(response.stdout).toBe('');
+    }
+    const missingPr = curl(f, ['-fsS', 'https://api.github.com/repos/fixture/shared-libs/pulls/999999']);
+    expect(missingPr.status).toBe(22);
+    expect(JSON.parse(gh(f, 'repos/fixture/shared-libs').stdout).default_branch).toBe('main');
+    // Default-branch discovery may list branches; both transports serve the same one-branch world.
+    const branches = curl(f, ['-sS', 'https://api.github.com/repos/fixture/shared-libs/branches?per_page=100']);
+    expect(branches.status, branches.stderr).toBe(0);
+    expect(JSON.parse(branches.stdout)).toEqual(JSON.parse(gh(f, 'repos/fixture/shared-libs/branches?per_page=100').stdout));
+    expect(JSON.parse(branches.stdout).map((b: { name: string }) => b.name)).toEqual(['main']);
+    // The read-only detector still rejects a raw-host fallback.
+    const raw = curl(f, ['-sS', `https://raw.githubusercontent.com/fixture/shared-libs/${f.tip}/src/retry-route.ts`]);
+    expect(raw.status).toBe(2);
+    expect(sharedReadOnlyViolations([], readRequests(f))).toEqual(['curl: unsupported curl URL: fixture GitHub GET endpoints only']);
+  });
+
+  test('without PR coverage every listing view is the same successful empty world', () => {
+    const f = createSharedLibsFixture('pr-world-empty');
+    cleanup.push(f.root);
+    installSourceShims(f);
+    expect(JSON.parse(ghCli(f, ['pr', 'list', '--state', 'all']).stdout)).toEqual([]);
+    expect(JSON.parse(gh(f, pulls('state=all&per_page=100&page=1')).stdout)).toEqual([]);
+    expect(JSON.parse(gh(f, 'search/issues?q=repo:fixture/shared-libs+is:pr').stdout))
+      .toEqual({ total_count: 0, incomplete_results: false, items: [] });
+  });
+});
 
 describe('shared-code Contents API revision fidelity', () => {
   test('default, branch and PR SHAs return their own exact committed bytes, excluding raw overlays', () => {
@@ -1046,7 +1283,7 @@ describe('shared-code capture attempt accounting', () => {
     expect(result.tests.map((row: EvalTestEntry) => row.transcript!.filter(event => event.scenario_name).length))
       .toEqual([3, 3, 2, 2, 4, 4]);
     expect(result.total_cost_usd).toBe(0.18);
-    expect(collectorOutcomeCounts([result])).toEqual({ executed: 3, reused: 0, passed: 3, failed: 0, manual_accepted: 0, attempts: 6 });
+    expect(collectorOutcomeCounts([result])).toEqual({ executed: 6, reused: 0, passed: 3, failed: 3, manual_accepted: 0, attempts: 6 });
   });
 
   test('missing scenarios in a later attempt cannot inherit an earlier pass', async () => {
@@ -1060,7 +1297,7 @@ describe('shared-code capture attempt accounting', () => {
     })).rejects.toThrow('missing scenarios: second');
     const result = await finalized(captures);
     expect(result.tests[1]).toMatchObject({ attempt: 2, passed: false, exit_reason: 'attempt_incomplete' });
-    expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, passed: 0, failed: 1, manual_accepted: 0, attempts: 2 });
+    expect(collectorOutcomeCounts([result])).toEqual({ executed: 2, reused: 0, passed: 1, failed: 1, manual_accepted: 0, attempts: 2 });
   });
 
   test('setup, verification and cleanup failures survive even when all recorded captures passed', async () => {
@@ -1190,7 +1427,7 @@ test('actual-retry', () => captures.runAttempt('actual-retry', ['audit'], 5_000,
     const result = JSON.parse(fs.readFileSync(path.join(resultDir, file), 'utf8'));
     expect(result.tests.map((row: EvalTestEntry) => [row.attempt, row.passed, row.exit_reason]))
       .toEqual([[1, false, 'timeout'], [2, true, 'success']]);
-    expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, passed: 1, failed: 0, manual_accepted: 0, attempts: 2 });
+    expect(collectorOutcomeCounts([result])).toEqual({ executed: 2, reused: 0, passed: 1, failed: 1, manual_accepted: 0, attempts: 2 });
   });
 
   test('Bun outer timeouts stay failed after late completion, with and without a retry', () => {
@@ -1232,8 +1469,8 @@ test('outer-timeout', () => captures.runAttempt('outer-timeout', ['audit'], 50, 
         .toEqual(mode === 'retry' ? [[1, false], [2, true]] : [[1, false]]);
       expect(['timeout', 'attempt_incomplete']).toContain(result.tests[0].exit_reason);
       expect(result.tests[0].error).toContain('Test attempt stopped:');
-      expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, manual_accepted: 0,
-        passed: mode === 'retry' ? 1 : 0, failed: mode === 'retry' ? 0 : 1, attempts: mode === 'retry' ? 2 : 1 });
+      expect(collectorOutcomeCounts([result])).toEqual({ executed: mode === 'retry' ? 2 : 1, reused: 0, manual_accepted: 0,
+        passed: mode === 'retry' ? 1 : 0, failed: 1, attempts: mode === 'retry' ? 2 : 1 });
     }
   });
 });
@@ -1502,3 +1739,46 @@ describe('retained native runtime callback failures', () => {
     expect(events).toEqual(['question', 'refusal']);
   });
 });
+
+describe('skip actor: deferred-reuse wording in a Skip option (PR lane run 36641824710)', () => {
+  const question = (skipDescription: string) => ({ questions: [{
+    question: '[ADVISORY] src/retry-worker.ts:2 — the worker now duplicates the tested `retrySeconds` helper from lib/retry-after.ts. How should this be handled? RECOMMENDATION: A (Fix).',
+    header: 'Shared-libs', multiSelect: false,
+    options: [
+      { label: 'Fix as recommended', description: 'Re-export retrySeconds from lib/retry-after.ts in both src/retry-worker.ts and src/retry-route.ts.' },
+      { label: 'Skip', description: skipDescription },
+    ],
+  }] });
+  const answer = async (skipDescription: string) => {
+    const callback = createSharedInteractiveToolHandler('skip', { nonQuestion: () => {}, onQuestion: () => {}, onAnswer: () => {} });
+    return callback('AskUserQuestion', question(skipDescription));
+  };
+  test('a future review reusing the recorded Skip once coverage holds is still no change', async () => {
+    const captured = 'Keep the duplicated implementations for now. Records an explicit Skip for this advisory (fingerprint shared-libs:af037ba2…) so a future review can reuse it once snapshot coverage holds.';
+    expect(await answer(captured)).toMatchObject({ behavior: 'allow', updatedInput: { answers: { [question(captured).questions[0].question]: 'Skip' } } });
+  });
+  test('a conditional tail that commits product work still refuses', async () => {
+    await expect(answer('Records an explicit Skip so a future review can reuse it once we migrate the worker and then import the helper.')).rejects.toThrow('No unambiguous no-change option');
+    await expect(answer('Records an explicit Skip so a future review can reuse the helper once snapshot coverage holds.')).rejects.toThrow('No unambiguous no-change option');
+  });
+});
+
+// Stored gh/curl endpoint lists for the PR coverage request budget.
+{
+  const stored = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/shared-libs/pr-coverage-endpoints.json'), 'utf8')) as
+    { known_good: Record<string, string[]>; known_bad: Record<string, string[]> };
+
+  describe('shared-libs PR coverage request budget', () => {
+    test.each(Object.entries(stored.known_good))('passes %s', (_name, endpoints) => {
+      expect(prCoverageRequestViolations(endpoints)).toEqual([]);
+    });
+    test.each(Object.entries(stored.known_bad))('fails %s', (_name, endpoints) => {
+      expect(prCoverageRequestViolations(endpoints).length).toBeGreaterThan(0);
+    });
+    test('file-list pages beyond the stated budget fail', () => {
+      const pages = Array.from({ length: 52 }, (_, i) => `/repos/fixture/shared-libs/pulls/${i < 2 ? 42 : 100 + i}/files?per_page=100&page=${i < 2 ? i + 1 : 1}`);
+      expect(prCoverageRequestViolations(pages)).toEqual(['52 file-list pages exceed the budget of 50 plus PR 7']);
+      expect(prCoverageRequestViolations(pages.slice(0, 51))).toEqual([]);
+    });
+  });
+}

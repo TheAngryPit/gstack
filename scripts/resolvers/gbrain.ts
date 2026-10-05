@@ -52,14 +52,54 @@ const skillSaveMap: Record<string, SkillSaveMeta> = {
   'design-consultation':  { slugPrefix: 'design-systems',  title: 'Design System',   tag: 'design-system' },
 };
 
+function nativeRequestTransport(write: boolean): string {
+  return `Use the existing source-bound caller, \`bun "$GSTACK_BIN/gstack-gbrain-codex" ${write ? '--authorized-write ' : ''}--request-stdin\`, only when the advertised execution tool supports a separate structured stdin field. Pass literal JSON in that field, never embedded in shell command text, a heredoc, command substitution or an environment variable.
+
+If no such stdin field exists, allocate a new owned private artifact with
+\`bun "$GSTACK_BIN/gstack-gbrain-codex" --prepare-request\`.
+Use the file-editing tool to write valid literal JSON to the exact returned
+\`path\`, retaining mode 0600 inside its unique mode-0700 temporary directory.
+Never select a repository path or reuse another task's request. Invoke
+\`bun "$GSTACK_BIN/gstack-gbrain-codex" ${write ? '--authorized-write ' : ''}--request-file "<exact allocator-returned path>"\`.
+Use structured argv when available; otherwise shell-quote only that trusted
+allocator path as a literal argument. Query, slug and body must never enter shell
+syntax. The helper refuses symlinks, non-private modes, altered ownership and a
+second claim. Allocate a new request for each search, page read or save.
+
+Read the content-free local \`GSTACK_REQUEST_ARTIFACT\` result. Successful
+consumption moves only the exact unchanged owned artifact to platform Trash
+when supported. \`retained_private\` means failed dispatch, changed ownership
+or unavailable Trash: report its exact local path and reason, preserve it for
+authorised recoverable cleanup, and never silently accumulate, erase or replay
+it. Retirement uses best-effort pre/post identity, exact-entry and raw-byte
+validation. A pathname race can still move changed content; a detected change
+must report retained_private at the actual recoverable location, never success
+or a compensating move over a replacement. This is not same-UID isolation.
+If creation or permissions fail, stop this optional enrichment; do not
+fall back to a shared file. The egress receipt must succeed before dispatch;
+a receipt is evidence of attempted sending, not permission or a successful save.`;
+}
+
 export function generateGBrainContextLoad(ctx: TemplateContext): string {
+  if (ctx.host === 'codex') return `## Brain Context Load
+
+Use only the explicitly selected Codex brain and this task's authorised read scope.
+${nativeRequestTransport(false)}
+
+For search, write {"op":"search","query":"<keywords>"}. Extract 2-4
+keywords and read at most three matching pages with fresh requests
+{"op":"get","slug":"<slug>"}. Keep all
+brain/user text in structured JSON; never interpolate query or slug into shell
+syntax. The caller pins the configured source and rejects missing or changed
+bindings. On failure continue without brain context; do not switch brains or
+configure a new one. Cite the pages when they inform the result.`;
   let base = `## Brain Context Load
 
 **Skip this entire section if \`gbrain\` is not on PATH.**
 
 Extract 2-4 keywords from the user's request. Search the brain:
 \`gbrain search "<keywords>"\`. Read the top 3 results with
-\`gbrain get_page "<slug>"\`. Use that context to inform your analysis.
+\`gbrain get "<slug>"\`. Use that context to inform your analysis.
 
 If \`gbrain search\` returns no results or any non-zero exit, proceed
 without brain context. Full search/read protocol + examples:
@@ -73,6 +113,26 @@ see \`docs/gbrain-write-surfaces.md\` §Context Load.`;
 }
 
 export function generateGBrainSaveResults(ctx: TemplateContext): string {
+  if (ctx.host === 'codex') return `## Save Results to Brain
+
+Only when the user has authorized preserving this task's output in the selected
+brain, prepare this literal request object:
+{"op":"put","slug":"${skillSaveMap[ctx.skillName]?.slugPrefix || '<slug-prefix>'}/<feature-slug>","content":"<frontmatter + Markdown>"}
+JSON-escape quotes, backslashes, and newlines in the content value; preserve the
+Markdown itself exactly.
+${nativeRequestTransport(true)}
+
+After a successful put, allocate a fresh read request
+{"op":"get","slug":"<same slug>"} and verify the saved page body before
+calling the result persisted. A successful subprocess exit alone is only
+dispatch evidence; report the save as unproven if the source-bound readback
+fails.
+
+Keep
+existing source and privacy boundaries. Enabling enrichment does not authorize
+automatic output writes or person/organization stub creation. Without task-scoped
+authorization keep the result local. If the caller rejects the binding or fails,
+report the unsaved result; do not retry against another brain.`;
   // gbrain v0.18+ uses `gbrain put <slug>` (NOT the deprecated `put_page`
   // MCP op). Compressed in v1.50.0.0: the inline heredoc + entity-stub +
   // throttle + backlink prose moved to docs/gbrain-write-surfaces.md
@@ -110,7 +170,8 @@ EOF
 )"
 \`\`\`
 
-Then extract person/org entities and create stub pages for each one.
+Read the saved page back before claiming persistence. Then extract
+person/org entities and create stub pages for each one.
 Throttle errors (exit 1 with "throttle"/"rate limit"/"busy") and any
 other non-zero exit are transient — don't retry inline. Full entity-stub
 template, throttle handling, and backlink protocol:
@@ -178,7 +239,7 @@ present in the loaded context; ground recommendations in what the brain
 prints for this skill.
 
 \`\`\`bash
-eval "$(${binDir}/gstack-slug 2>/dev/null)" 2>/dev/null || true
+SLUG=$(${binDir}/gstack-slug --get SLUG 2>/dev/null) || true
 {
   printf '## Brain Context\\n\\n'
 ${loadLines}
@@ -217,7 +278,7 @@ This is non-blocking — the user doesn't wait. Next invocation benefits
 from the warm cache.`}
 
 \`\`\`bash
-eval "$(${binDir}/gstack-slug 2>/dev/null)" 2>/dev/null || true
+SLUG=$(${binDir}/gstack-slug --get SLUG 2>/dev/null) || true
 (${binDir}/gstack-brain-cache refresh --project "$SLUG" 2>/dev/null &) || true
 \`\`\`
 `;
@@ -266,7 +327,7 @@ source_skill: ${ctx.skillName}
 After write, invalidate affected digests:
 
 \`\`\`bash
-eval "$(${ctx.paths.binDir}/gstack-slug 2>/dev/null)" 2>/dev/null || true
+SLUG=$(${ctx.paths.binDir}/gstack-slug --get SLUG 2>/dev/null) || true
 ${invalidateBash || '  # (no per-skill invalidation targets configured)'}
 \`\`\``;
 }

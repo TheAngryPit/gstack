@@ -29,6 +29,9 @@ import {
 import { __resetRegistry } from '../src/token-registry';
 import { BrowserManager } from '../src/browser-manager';
 import { resolveConfig } from '../src/config';
+import { usePrivateStateRoot } from '../../test/helpers/private-state-root';
+
+const privateRoot = usePrivateStateRoot();
 
 const PINNED_ORIGIN = `chrome-extension://${GSTACK_EXTENSION_ID}`;
 const fixtureDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-extension-token-')));
@@ -163,6 +166,24 @@ describe('POST /extension-token pinned-origin bootstrap', () => {
     // No detail about WHICH check failed
     expect(JSON.stringify(body)).not.toContain('origin');
     expect(JSON.stringify(body)).not.toContain('host');
+  });
+
+  test('gstack-config browse_extension_id moves the token to the configured extension; the env var does not', async () => {
+    const fork = 'b'.repeat(32);
+    const cfg = makeConfig();
+    const handle = buildFetchHandler(cfg);
+    const status = async (origin: string) => (await handle.fetchLocal(tokenRequest({ Origin: origin, Host: '127.0.0.1:34567' }), null)).status;
+    const saved = process.env.BROWSE_EXTENSION_ID;
+    process.env.BROWSE_EXTENSION_ID = fork;
+    try {
+      expect(await status(`chrome-extension://${fork}`)).toBe(403);
+      fs.writeFileSync(path.join(privateRoot.dir, 'config.yaml'), `browse_extension_id: ${fork}\n`);
+      expect(await status(`chrome-extension://${fork}`)).toBe(200);
+      expect(await status(PINNED_ORIGIN)).toBe(403);
+    } finally {
+      if (saved === undefined) delete process.env.BROWSE_EXTENSION_ID;
+      else process.env.BROWSE_EXTENSION_ID = saved;
+    }
   });
 
   test('missing Origin → 403', async () => {

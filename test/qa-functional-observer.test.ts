@@ -55,6 +55,8 @@ describe('QA command-observation boundary', () => {
 
   test('admits native fixture commands and rejects unobserved shell effects', () => {
     for (const command of ['date -u +%Y-%m-%dT%H:%M:%SZ', 'bun run probe -- apply credit 7junk', 'bun run probe -- apply UPPER 7', 'bun run probe -- apply 9bad 7', 'bun run probe -- apply', 'bun run probe -- apply credit', 'bun run probe -- apply credit 7 extra', 'bun run probe -- partial', 'bun test test/regression.test.ts', 'git status --short']) expect(qaCommandAllowed(command)).toBe(true);
+    for (const command of ['bun bin/gstack-qa-evidence', 'bun /abs/runtime/bin/gstack-qa-deadline', 'bun bin/gstack-qa-evidence --help']) expect(qaCommandAllowed(command), command).toBe(true);
+    for (const command of ['bun bin/gstack-qa-evidence capture', 'bun bin/gstack-qa-deadline start x 1', 'bun bin/gstack-qa-evidence; touch bad']) expect(qaCommandAllowed(command), command).toBe(false);
     for (const command of ['date', 'date -u', 'date -u +%s', ' date -u +%Y-%m-%dT%H:%M:%SZ', 'date -u +%Y-%m-%dT%H:%M:%SZ ', 'date -u +%Y-%m-%dT%H:%M:%SZ --set tomorrow', 'python3 mutate-with-mmap.py', 'echo ok; git commit -am fix', 'bun test > result.txt', 'curl https://example.com', 'bun -e "42"', 'git stash', 'git reset --hard', 'bun run probe -- partial && true', 'bun run probe -- apply $(touch bad) 7', 'bun run probe -- apply * 7', 'bun run probe -- apply credit 7; touch bad']) expect(qaCommandAllowed(command)).toBe(false);
   });
   test('malformed event buffers cannot become empty successful observations', () => {
@@ -107,6 +109,33 @@ describe('QA command-observation boundary', () => {
         expect(result.complete).toBe(false);
         expect(qaWriteVerdict(result, 'qa-only')).toContain('incomplete write observation');
       } finally { fixture.cleanup(); }
+    });
+  }
+
+  // ci-36709485593-1-eval-slices-6 qa-functional-cli-fix: link(2) raised the temporary receipt's nlink to 2 before the
+  // receipt.json name resolved, so the observer's open failed with ENOENT during an ordinary atomic publication.
+  for (const variant of ['published', 'foreign-link-kept', 'foreign-link-dropped', 'replaced-target'] as const) {
+    test(`evidence publication observed mid-link: ${variant}`, async () => {
+      const fixture = createQAFunctionalFixture('cli');
+      const outside = fs.mkdtempSync(path.join(path.dirname(fixture.root), 'qa-link-'));
+      const observer = await observeQAWrites(fixture.root, { evidenceProducer: true });
+      try {
+        const directory = path.join(fixture.root, 'qa-reports/.qa-evidence/002');
+        fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+        observer.drain();
+        const temporary = path.join(directory, 'receipt.json.tmp.2282.fd4f6b4d');
+        const target = path.join(directory, 'receipt.json');
+        const foreign = path.join(outside, 'second-name');
+        fs.writeFileSync(temporary, JSON.stringify({ version: 1, id: '002', status: 'complete' }), { mode: 0o600 });
+        fs.linkSync(temporary, foreign);
+        observer.drain();
+        if (variant === 'published') { fs.unlinkSync(foreign); fs.linkSync(temporary, target); observer.drain(); fs.unlinkSync(temporary); }
+        if (variant === 'foreign-link-dropped') fs.unlinkSync(temporary);
+        if (variant === 'replaced-target') { fs.unlinkSync(foreign); fs.unlinkSync(temporary); fs.writeFileSync(target, '{}', { mode: 0o600 }); }
+        const verdict = qaWriteVerdict(observer.stop(), 'qa-only');
+        if (variant === 'published') expect(verdict).toEqual([]);
+        else expect(verdict).toContain('incomplete write observation');
+      } finally { fixture.cleanup(); fs.rmSync(outside, { recursive: true, force: true }); }
     });
   }
 

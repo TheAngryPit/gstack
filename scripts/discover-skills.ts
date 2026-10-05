@@ -22,10 +22,14 @@ function subdirs(root: string): string[] {
     .map(d => d.name);
 }
 
-export function discoverTemplates(root: string): Array<{ tmpl: string; output: string }> {
+export function discoverTemplates(root: string, generation?: { includeSkills?: string[]; skipSkills?: string[] }): Array<{ tmpl: string; output: string }> {
   const dirs = ['', ...subdirs(root)];
   const results: Array<{ tmpl: string; output: string }> = [];
   for (const dir of dirs) {
+    // Match gen-skill-docs: allowlist first, then intentional host exclusions.
+    const skillDir = dir || path.basename(root);
+    if (generation?.includeSkills?.length && !generation.includeSkills.includes(skillDir)) continue;
+    if (generation?.skipSkills?.includes(skillDir)) continue;
     const rel = dir ? `${dir}/SKILL.md.tmpl` : 'SKILL.md.tmpl';
     if (fs.existsSync(path.join(root, rel))) {
       results.push({ tmpl: rel, output: rel.replace(/\.tmpl$/, '') });

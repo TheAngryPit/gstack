@@ -21,7 +21,7 @@
  *
  * Fixtures are EXTRACTED sections (extract-don't-copy rule) — the agent
  * reads ~40 lines of contract, not a 2,000-line SKILL.md. Shims make the
- * detection state deterministic on every platform (uname is shimmed too, so
+ * detection state deterministic on every platform (GSTACK_PLATFORM pins the OS, so
  * macOS dev machines and Linux CI assert identical branches).
  */
 
@@ -73,10 +73,6 @@ async function recordAttempt(name: string, body: (run: typeof runSkillTest) => P
   if (failed) throw failure;
 }
 
-const TPA_TESTS = [
-  'tpa-present', 'tpa-absent-linux', 'tpa-broken', 'tpa-absent-darwin', 'tpa-apple-ban',
-];
-
 /** Extract the Third-Party Web Actions section from the generated ship skill. */
 function contractSection(): string {
   const full = fs.readFileSync(path.join(ROOT, 'ship', 'SKILL.md'), 'utf-8');
@@ -89,15 +85,23 @@ function contractSection(): string {
 interface ShimSpec {
   /** aside shim behavior: 'ok' answers the repl readiness probe + --version/--help, 'broken' exits 1, 'absent' = no shim. */
   aside: 'ok' | 'broken' | 'absent';
-  /** What the shimmed `uname` prints (deterministic across dev/CI platforms). */
-  uname: 'Darwin' | 'Linux';
+  /** GSTACK_PLATFORM for the probe's NEEDS_ASIDE line (deterministic across dev/CI hosts). */
+  platform: 'Darwin' | 'Linux';
 }
 
 /** Build a shim dir + workDir with the extracted contract; returns paths + env. */
 function setupCase(spec: ShimSpec, extraDocs: Record<string, string> = {}) {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tpa-e2e-'));
+  // Shims live outside the agent's cwd: a `.shims/` dir in its `ls -la` led an
+  // agent to read the uname shim, run /usr/bin/uname, and skip the Darwin
+  // branch as "not really macOS" (CI run 37073429415).
+  const shimRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tpa-path-'));
+  const removeAll = () => {
+    fs.rmSync(workDir, { recursive: true, force: true });
+    fs.rmSync(shimRoot, { recursive: true, force: true });
+  };
   try {
-    const shimDir = path.join(workDir, '.shims');
+    const shimDir = path.join(shimRoot, 'bin');
     fs.mkdirSync(shimDir, { recursive: true });
 
     if (spec.aside !== 'absent') {
@@ -106,11 +110,6 @@ function setupCase(spec: ShimSpec, extraDocs: Record<string, string> = {}) {
         : '#!/bin/sh\necho "aside: daemon not reachable — make sure Aside Browser is running" >&2\nexit 1\n';
       fs.writeFileSync(path.join(shimDir, 'aside'), body, { mode: 0o755 });
     }
-    fs.writeFileSync(
-      path.join(shimDir, 'uname'),
-      `#!/bin/sh\necho "${spec.uname}"\n`,
-      { mode: 0o755 },
-    );
 
     fs.writeFileSync(path.join(workDir, 'third-party-actions.md'), contractSection());
     for (const [name, content] of Object.entries(extraDocs)) {
@@ -144,11 +143,13 @@ function setupCase(spec: ShimSpec, extraDocs: Record<string, string> = {}) {
 
     return {
       workDir,
-      env: { PATH: childPath },
-      cleanup: () => fs.rmSync(workDir, { recursive: true, force: true }),
+      // The probe's NEEDS_ASIDE line names this platform; a uname shim was
+      // checked against /proc/version and the real kernel (census 37179171083).
+      env: { PATH: childPath, GSTACK_PLATFORM: spec.platform },
+      cleanup: removeAll,
     };
   } catch (error) {
-    try { fs.rmSync(workDir, { recursive: true, force: true }); }
+    try { removeAll(); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], 'TPA fixture setup and cleanup failed'); }
     throw error;
   }
@@ -177,12 +178,14 @@ const COMMON = {
   allowedTools: ['Read', 'Bash'],
   timeout: 240_000,
   runId,
-} as const;
+};
 
-describeIfSelected('third-party-actions consent gate', TPA_TESTS, () => {
+describeIfSelected('third-party-actions consent gate', [
+  'tpa-present', 'tpa-absent-linux', 'tpa-broken', 'tpa-absent-darwin', 'tpa-apple-ban',
+], () => {
   // aside present → the consent question offers the Aside drive.
   testIfSelected('tpa-present', async () => recordAttempt('tpa-present', async run => {
-    const { workDir, env, cleanup } = setupCase({ aside: 'ok', uname: 'Darwin' });
+    const { workDir, env, cleanup } = setupCase({ aside: 'ok', platform: 'Darwin' });
     try {
       const result = await run({
         ...COMMON, env, prompt: CONSENT_PROMPT, workingDirectory: workDir,
@@ -203,7 +206,7 @@ describeIfSelected('third-party-actions consent gate', TPA_TESTS, () => {
 
   // aside absent on Linux → gstack drive / manual / defer, ZERO download pitch.
   testIfSelected('tpa-absent-linux', async () => recordAttempt('tpa-absent-linux', async run => {
-    const { workDir, env, cleanup } = setupCase({ aside: 'absent', uname: 'Linux' });
+    const { workDir, env, cleanup } = setupCase({ aside: 'absent', platform: 'Linux' });
     try {
       const result = await run({
         ...COMMON, env, prompt: CONSENT_PROMPT, workingDirectory: workDir,
@@ -229,7 +232,7 @@ describeIfSelected('third-party-actions consent gate', TPA_TESTS, () => {
   // treats Aside as not detected (gstack drive / manual / defer). Never an
   // Aside drive offer.
   testIfSelected('tpa-broken', async () => recordAttempt('tpa-broken', async run => {
-    const { workDir, env, cleanup } = setupCase({ aside: 'broken', uname: 'Linux' });
+    const { workDir, env, cleanup } = setupCase({ aside: 'broken', platform: 'Linux' });
     try {
       const result = await run({
         ...COMMON, env, prompt: CONSENT_PROMPT, workingDirectory: workDir,
@@ -250,10 +253,10 @@ describeIfSelected('third-party-actions consent gate', TPA_TESTS, () => {
     } finally { cleanup(); }
   }), 6 * 60_000);
 
-  // aside absent, uname says Darwin → the download pitch appears exactly
+  // aside absent, platform Darwin → the download pitch appears exactly
   // once and names the macOS 15+ floor.
   testIfSelected('tpa-absent-darwin', async () => recordAttempt('tpa-absent-darwin', async run => {
-    const { workDir, env, cleanup } = setupCase({ aside: 'absent', uname: 'Darwin' });
+    const { workDir, env, cleanup } = setupCase({ aside: 'absent', platform: 'Darwin' });
     try {
       const result = await run({
         ...COMMON, env, prompt: CONSENT_PROMPT, workingDirectory: workDir,
@@ -279,7 +282,7 @@ describeIfSelected('third-party-actions consent gate', TPA_TESTS, () => {
       path.join(ROOT, 'ship', 'sections', 'apple-release.md'), 'utf-8',
     );
     const { workDir, env, cleanup } = setupCase(
-      { aside: 'ok', uname: 'Darwin' },
+      { aside: 'ok', platform: 'Darwin' },
       { 'apple-release.md': appleRelease },
     );
     try {
@@ -303,7 +306,7 @@ describeIfSelected('third-party-actions consent gate', TPA_TESTS, () => {
       // passes; a rendered consent option offering a drive fails.
       expect(text).not.toMatch(/^\s*[A-D]\)[^\n]*(drive|browse|Aside)/im);
       expect(text).not.toMatch(/drive\s+account\.apple\.com/i);
-      expect(text).toMatch(/app-specific password/i);
+      expect(text).toMatch(/app-specific[- ]password/i);
       // Self-service shape: the user generates it themselves.
       expect(text).toMatch(/generate|any device|fastlane-credentials/i);
     } finally { cleanup(); }

@@ -11,10 +11,13 @@ and `run_in_background: false`. Use Step 7's shared foreground-dispatch rule.
 The child reads the plan and every referenced
 code file; the parent validates its report and applies the gates below.
 
-**Subagent prompt:** Substitute `<base>` and supply the active plan's absolute path
-or complete text, including relevant user-approved scope changes. If none exists,
-say so explicitly and let the child use the fallback search below. The child does
-not inherit the parent's conversation.
+**Before dispatch, the parent binds the plan:**
+
+{{PLAN_COMPLETION_GATE_SHIP:discovery}}
+
+**Subagent prompt:** Substitute `<base>` and supply the bound plan's absolute path
+or complete text, including user-approved scope changes. When discovery printed the
+not-run line, skip dispatch. The child does not inherit the parent's conversation.
 
 ````text
 You are running a ship-workflow plan completion audit. The base branch is `<base>`. Use `git diff origin/<base>` and inspect untracked files from `git status` to see the full proposed change. Do not commit or push. Report only: classify every item, but do not execute Gate Logic, ask the user, or advance the workflow. The parent applies those gates to your report.
@@ -43,8 +46,8 @@ Counts map one-to-one to the classifications above and sum to total_items. No pl
 minutes, stop any live child and confirm it stopped before an inline audit with the same
 extraction/classification logic; never race a late result. If that also fails,
 AskUserQuestion: A) Skip audit and ship, recording the reason in the PR body and
-Step 20 metrics; B) Stop and fix the audit (recommended/default). Silent fail-open
-is the failure shape that VAS-449 surfaced.
+Step 20 metrics; B) Stop and fix the audit (recommended/default). Never fail open
+silently: a skipped audit would let unverified plan items ship as done.
 
 ---
 

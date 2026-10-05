@@ -29,11 +29,12 @@ export function generateClaudeModelFlag(_ctx: TemplateContext): string {
 }
 
 export function generateSlugEval(ctx: TemplateContext): string {
-  return `eval "$(${ctx.paths.binDir}/gstack-slug 2>/dev/null)"`;
+  return `SLUG=$(${ctx.paths.binDir}/gstack-slug --get SLUG 2>/dev/null)`;
 }
 
 export function generateSlugSetup(ctx: TemplateContext): string {
-  return `eval "$(${ctx.paths.binDir}/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG`;
+  return `GSTACK_STATE_ROOT=$(${ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT); : "\${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+SLUG=$(${ctx.paths.binDir}/gstack-slug --get SLUG 2>/dev/null) && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"`;
 }
 
 export function generateBaseBranchDetect(_ctx: TemplateContext): string {
@@ -168,10 +169,11 @@ Use the supplied URL or first responder/staging/preview; ask if none. Test chang
 Visit every reachable page (5-15 minutes). Score health; document 5-10 evidenced issues, never invent any.
 
 ### Quick (\`--quick\`)
-30 seconds: homepage + top 5 navigation targets. Check loads/console/broken links; score per Health Score Rubric; skip detailed issues/checklist, never the shared loop's gates.
+3 minutes: homepage + top 5 navigation targets. Check loads/console/broken links; score per Health Score Rubric; skip detailed issues/checklist, never the shared loop's gates.
 
 ### Regression (\`--regression <baseline>\`)
 Run Full; append fixed/new issues and score delta. Preserve the supplied prior baseline.
+A missing or unreadable baseline is a missing prerequisite: it blocks the comparison, not the Full run.
 
 ## Workflow
 
@@ -346,7 +348,7 @@ Use \`[REDACTED]\` for credentials. Follow BROWSER SETUP safety/sentinel rules: 
 export function generateCoAuthorTrailer(ctx: TemplateContext): string {
   const { getHostConfig } = require('../../hosts/index');
   const hostConfig = getHostConfig(ctx.host);
-  return hostConfig.coAuthorTrailer || 'Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>';
+  return hostConfig.coAuthorTrailer || 'Co-Authored-By: Claude <noreply@anthropic.com>';
 }
 
 export function generateSetupCommand(ctx: TemplateContext): string {
@@ -392,9 +394,9 @@ export function generateChangelogWorkflow(ctx: TemplateContext): string {
    - **Voice:** Lead with what the user can now **do** that they couldn't before. Use plain language, not implementation details. Never mention TODOS.md, internal tracking, or contributor-facing details.
 
 6. **Cross-check:** Compare your CHANGELOG entry against the commit list from step 2.
-   Every commit must map to at least one bullet point. If any commit is unrepresented,
-   add it now. If the branch has N commits spanning K themes, the CHANGELOG must
-   reflect all K themes.
+   Every user-facing change in that list must be represented; add any that is missing.
+   Commits with no user-facing effect (merges, version bumps, fixes to work introduced
+   earlier on this branch) need no bullet. The entry must reflect every user-facing theme.
 
 **Do NOT ask the user to describe changes.** Infer from the diff and commit history.`;
 }

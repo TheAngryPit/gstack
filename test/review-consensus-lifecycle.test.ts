@@ -13,7 +13,7 @@ async function exercise(scenarios: Array<'success'|'timeout'|'wrong-report'|'bro
     beforeAll:(fn:any)=>setups.push(fn),afterAll:(fn:any)=>done.push(fn),
     describeIfSelected:(_title:string,names:string[],fn:any)=>{if(names.includes('review-army-consensus'))fn();},
     testConcurrentIfSelected:(name:string,fn:any,timeout:number)=>{expect(name).toBe('review-army-consensus');callbacks.push(fn);outer=timeout;},
-    createEvalCollector:()=>({}),finalizeEvalCollector:()=>{},logCost:()=>{},spawnSync:()=>({status:0}),path:fixturePath,os:{tmpdir:()=>'/tmp'},
+    createEvalCollector:()=>({}),finalizeEvalCollector:()=>{},logCost:()=>{},spawnSync:(_cmd:string,args:string[])=>({status:0,stdout:args[0]!=='diff'?'':args.includes('--shortstat')?' 1 file changed, 12 insertions(+)\n':'diff --git a/auth_controller.rb b/auth_controller.rb\n'}),path:fixturePath,os:{tmpdir:()=>'/tmp'},
     fs:{mkdirSync:()=>{},readdirSync:()=>[],mkdtempSync:(p:string)=>p+'owned',writeFileSync:(p:string,s:string)=>files.set(p,s),copyFileSync:()=>{},rmSync:()=>{},
       existsSync:(p:string)=>files.has(p),readFileSync:(p:string)=>p.startsWith(sourceRoot+fixturePath.sep)?'synthetic fixture bytes '.repeat(30):files.get(p)},
     extractSkillSections:()=> 'Review instructions',REVIEW_ARMY_E2E_SECTIONS:[],

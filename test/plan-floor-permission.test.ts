@@ -20,10 +20,10 @@ import croppedEdit from './fixtures/plan-edit-cropped-permission-1579.json';
 import {FORCING_FLOOR_CEO, FORCING_FLOOR_ENG, FORCING_FLOOR_DESIGN, FORCING_FLOOR_DEVEX} from './fixtures/forcing-finding-seeds';
 
 const ROOT = path.resolve(import.meta.dir, '..');
-const source = fs.readFileSync(path.join(ROOT, 'test/helpers/claude-pty-runner.ts'), 'utf8');
+const source = fs.readFileSync(path.join(ROOT, 'test/helpers/pty/runners/floor.ts'), 'utf8');
 const start = source.indexOf('export async function runPlanSkillFloorCheck(');
 if (start < 0) throw Error('Missing actual floor runner');
-const body = new Bun.Transpiler({loader:'ts'}).transformSync(source.slice(start).replace(/^export /, ''));
+const body = new Bun.Transpiler({loader:'ts'}).transformSync(source.slice(start).replace(/^export /gm, ''));
 const QUESTIONS = {
   ceo: {header:'Evidence', question:'The pricing plan has no developer interviews. Should we validate that pricing blocks adoption before launching?',
     multiSelect:false, options:[{label:'Interview developers',description:'Test whether pricing is the adoption barrier before changing the tier.'}, {label:'Launch now',description:'Keep the unvalidated premise and collect evidence after launch.'}]},
@@ -259,13 +259,14 @@ async function exercise(mode: Mode, kind: keyof typeof SEEDS = 'ceo', capture?: 
     },
   };
   const run = new Function(...Object.keys(boundary), body + '\nreturn runPlanSkillFloorCheck;')(...Object.values(boundary));
+  const driver: runner.PtyDriver = {launch: boundary.launchClaudePty, now: () => now, monotonic: () => now, sleep: boundary.Bun.sleep};
   try {
     let result: any, error: unknown;
     try {
       result = await run({skillName:`plan-${kind}-review`, slashCommand:`/plan-${kind}-review`, followUpPrompt:SEEDS[kind],
         productType:mode==='product-type'||mode.startsWith('dx-')?'sdk-documentation':undefined,
         devexSetupContext:mode.startsWith('dx-')&&mode!=='dx-undeclared'?dxCustom.reply:undefined,
-        requestedPlanPath:mode === 'captured' ? undefined : `/tmp/gstack-test-plan-${kind}-floor.md`, timeoutMs:100_000});
+        requestedPlanPath:mode === 'captured' ? undefined : `/tmp/gstack-test-plan-${kind}-floor.md`, timeoutMs:100_000, driver});
     } catch(caught) { if(!snapshotOptions?.interrupt)throw caught; error=caught; }
     expect(closed).toBe(1); expect(fs.existsSync(fixture!.cwd)).toBe(false);
     expect(recorders.every(recorder=>!fs.existsSync(recorder.file))).toBe(true);

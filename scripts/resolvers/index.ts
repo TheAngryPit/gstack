@@ -15,6 +15,7 @@
  */
 
 import type { TemplateContext, ResolverFn } from './types';
+import { getHostConfig } from '../../hosts/index';
 import { outsideVoiceFor, outsideVoiceGuard, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, generateOutsideVoiceRouting } from './outside-voice';
 
 // Domain modules
@@ -22,7 +23,11 @@ import { generatePreamble } from './preamble';
 import { generateTestFailureTriage } from './preamble';
 import { generateDesignMethodology, generateDesignHardRules, generateDesignOutsideVoices, generateDesignReviewLite, generateDesignSketch, generateDesignSetup, generateDesignMockup, generateDesignShotgunLoop, generateTasteProfile, generateUXPrinciples, generateOverusedFonts, generateDesignSlopBullets, generateDesignDetector, generateDesignMdCheck } from './design';
 import { generateTestBootstrap, generateTestCoverageAuditPlan, generateTestCoverageAuditShip, generateTestCoverageGateShip } from './testing';
-import { generateReviewDashboard, generatePlanFileReviewReport, generatePlanReviewApprovalCheck, generateExitPlanModeGate, generateAntiShortcutClause, generateSpecReviewLoop, generateBenefitsFrom, generateCodexSecondOpinion, generateAdversarialStep, generateCodexPlanReview, generateCodexDocReview, generatePlanCompletionAuditShip, generatePlanCompletionGateShip, generatePlanCompletionAuditReview, generatePlanVerificationExec, generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse } from './review';
+import { generateReviewDashboard, generatePlanFileReviewReport } from './review-dashboard';
+import { generatePlanReviewApprovalCheck, generateExitPlanModeGate, generatePlanCompletionAuditShip, generatePlanCompletionGateShip, generatePlanCompletionAuditReview, generatePlanVerificationExec } from './plan-gates';
+import { generateAntiShortcutClause, generateSpecReviewLoop, generateBenefitsFrom } from './spec-review';
+import { generateCodexSecondOpinion, generateAdversarialStep, generateCodexPlanReview, generateCodexDocReview } from './outside-voice-steps';
+import { generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse } from './review-scope';
 import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand } from './utility';
 import { generateLearningsSearch, generateLearningsLog } from './learnings';
 import { generateConfidenceCalibration } from './confidence';
@@ -38,11 +43,26 @@ import { generateThirdPartyActions } from './third-party-actions';
 import { generateAsideSetup, generateAsideCookbook, generateAsideResearch, generateUntrustedContentWarning, asideExecPrelude } from './aside';
 import { generateCommandReference, generateSnapshotFlags, generateBrowseSetup, generateBrowseFallback } from './browse';
 import { generateDesignDocDiscovery } from './design-doc-discovery';
-import { generateSharedLibsRubric } from './shared-libs';
+import { generateNativeOpinionModes } from './native-opinion-modes';
+import { generateGBrainHostMcp, generateGBrainHostIntro, generateGBrainHostTranscripts, generateSpecHostDispatch } from './host-setup';
+import { generateSharedLibsRubric, generateSafeGitPath } from './shared-libs';
 import { generateTestValueBar, generateTestValueMessage } from './test-value';
 import { generateQAScope, generateQAExploratory, generateQAFunctional, generateQAResource, generateQAReview, generateQAReviewPreflight, generateQAMethodReads } from './qa';
 
 export const RESOLVERS: Record<string, ResolverFn> = {
+  NATIVE_OPINION_MODES: generateNativeOpinionModes,
+  GBRAIN_HOST_MCP: generateGBrainHostMcp,
+  GBRAIN_HOST_INTRO: generateGBrainHostIntro,
+  GBRAIN_HOST_TRANSCRIPTS: generateGBrainHostTranscripts,
+  SPEC_HOST_DISPATCH: generateSpecHostDispatch,
+  HOST_GENERATED_FOOTER: (ctx) => ctx.host === 'codex' ? '🤖 Generated with [OpenAI Codex](https://openai.com/codex/)' : '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+  GBRAIN_TOKEN_STORAGE: (ctx) => ctx.host === 'codex' ? 'Token: referenced by environment-variable name in Codex MCP configuration; never write its value here' : 'Token: stored in ~/.claude.json (do not commit; never written to CLAUDE.md)',
+  GBRAIN_TOKEN_NOTE: (ctx) => ctx.host === 'codex' ? 'Never write the bearer value into AGENTS.md, an artifact, or command arguments. Codex MCP references the authorised environment-variable name; verify that the client receives it through its existing secret delivery mechanism.' : 'The bearer token is never written to CLAUDE.md; it lives only in ~/.claude.json with mode 0600.',
+  GBRAIN_CONFIG_LOCATION: (ctx) => ctx.host === 'codex' ? '{verified GBRAIN_HOME}/.gbrain/config.json (preserve the existing binding)' : '~/.gbrain/config.json (mode 0600)',
+  GBRAIN_SYNC_GUIDANCE: (ctx) => ctx.host === 'codex' ? 'Automatic sync requires a separately verified and authorised native lifecycle bridge; skill start alone is not proof of ingestion. Run /sync-gbrain only within the approved repository, source and downstream provider scope.' : 'The brain auto-syncs incrementally on every gstack skill start. Run /sync-gbrain to force-refresh, /sync-gbrain --full for full reindex.',
+  GBRAIN_TOKEN_LIFETIME: (ctx) => ctx.host === 'codex' ? 'For Codex, Step 5a references the bearer environment-variable name, not its value. Use only the existing authorised secret-delivery mechanism; do not create a secret store or persist the value in project files.' : 'Unsurfaced credentials must remain in the existing host secret store and be unset after registration.',
+  SPEC_WORKTREE_FAILURE: (ctx) => ctx.host === 'codex' ? '**If worktree creation fails:** stop dispatch, keep the issue and archived spec, record `spec_executed: false`, and report the exact failure. Do not execute against the current dirty checkout as a fallback.' : "**Error: worktree create fails** (disk full, path exists, etc.): print:\n\"Worktree create failed — `$ERROR`. Spawning agent in current dir instead. Your\nin-progress changes will be visible to the agent. Cancel with Ctrl+C if not\ndesired.\" Then fall back to current dir (still spawn).",
+  SPEC_HOST_EXECUTION: (ctx) => ctx.host === 'codex' ? 'Dispatch a native Codex worker in a fresh worktree after filing the issue.' : 'Spawn `claude -p` in a fresh worktree after filing the issue.',
   AUTOPLAN_PUBLICATION_HOOK: generateAutoplanPublicationHook,
   OUTSIDE_SELF_GUARD: (ctx, args) => outsideVoiceGuard({ ...ctx, host: args?.[0] === 'claude-code' ? 'codex' : 'claude' }),
   OUTSIDE_VOICE_ROUTING: generateOutsideVoiceRouting,
@@ -51,7 +71,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   OUTSIDE_PROVIDER: (ctx) => outsideVoiceFor(ctx).id,
   HOST_ID: (ctx) => ctx.host,
   OUTSIDE_PREFLIGHT: (ctx, args) => outsideVoicePreflight(ctx, { disabledBehavior: args?.[0] === 'opt-in' ? 'opt-in' : 'codex-only' }),
-  OUTSIDE_INVOCATION: (ctx, args) => outsideVoiceInvocation(ctx, { timeoutMs: args?.[0] === 'spec' ? 120000 : 600000, gate: args?.[0] === 'spec' ? 'spec' : 'review', reasoningEffort: args?.[0] === 'spec' ? 'medium' : 'high' }),
+  OUTSIDE_INVOCATION: (ctx, args) => outsideVoiceInvocation(ctx, { timeoutMs: args?.[0] === 'spec' ? 120000 : 540000, gate: args?.[0] === 'spec' ? 'spec' : 'review', reasoningEffort: args?.[0] === 'spec' ? 'medium' : 'high' }),
   OUTSIDE_PROVENANCE: (ctx, args) => outsideVoiceProvenance(ctx, args?.[0] ?? ctx.skillName),
   SLUG_EVAL: generateSlugEval,
   SLUG_SETUP: generateSlugSetup,
@@ -63,6 +83,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   THIRD_PARTY_ACTIONS: generateThirdPartyActions,
   DESIGN_DOC_DISCOVERY: generateDesignDocDiscovery,
   SHARED_LIBS_RUBRIC: generateSharedLibsRubric,
+  SAFE_GIT: generateSafeGitPath,
   SHARED_CODE_REUSE: generateSharedCodeReuse,
   UNTRUSTED_CONTENT_WARNING: generateUntrustedContentWarning,
   COMMAND_REFERENCE: generateCommandReference,
@@ -134,6 +155,11 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   DX_FRAMEWORK: generateDxFramework,
   TASTE_PROFILE: generateTasteProfile,
   BIN_DIR: (ctx) => ctx.paths.binDir,
+  // Literal bin dir for skills that skip the shared preamble, where
+  // $GSTACK_BIN is never set (#2906): the per-install root when rendering for
+  // one, else the host's default global root.
+  INSTALLED_ROOT: (ctx) => ctx.installRoot ? ctx.installRoot.replace(/\/+$/, '') : `~/${getHostConfig(ctx.host).globalRoot}`,
+  INSTALLED_BIN_DIR: (ctx) => ctx.installRoot ? `${ctx.installRoot.replace(/\/+$/, '')}/bin` : `~/${getHostConfig(ctx.host).globalRoot}/bin`,
   FOREGROUND_DISPATCH_NOTE: () => FOREGROUND_DISPATCH_NOTE,
   GBRAIN_CONTEXT_LOAD: generateGBrainContextLoad,
   GBRAIN_SAVE_RESULTS: generateGBrainSaveResults,

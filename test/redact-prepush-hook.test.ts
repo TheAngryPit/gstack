@@ -18,6 +18,7 @@ const PREPUSH = path.resolve(import.meta.dir, "..", "bin", "gstack-redact-prepus
 const REDACT = path.resolve(import.meta.dir, "..", "bin", "gstack-redact");
 
 let repo: string;
+let stateHome: string;
 
 function git(args: string[], cwd = repo): string {
   const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30_000 });
@@ -73,6 +74,7 @@ const FAKE_AWS_KEY = ['AKIA', '1234567890ABCDEF'].join('');
 
 beforeEach(() => {
   repo = fs.mkdtempSync(path.join(os.tmpdir(), "prepush-"));
+  stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "prepush-state-"));
   git(["init", "-q", "-b", "main"]);
   git(["config", "user.email", "t@example.com"]);
   git(["config", "user.name", "T"]);
@@ -81,6 +83,7 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(repo, { recursive: true, force: true });
+  fs.rmSync(stateHome, { recursive: true, force: true });
 });
 
 describe("pre-push hook gating", () => {
@@ -106,6 +109,85 @@ describe("pre-push hook gating", () => {
     const { code, stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
     expect(code).toBe(0);
     expect(stderr).toContain("MEDIUM");
+  });
+});
+
+// #2856: a 4-part release version is shaped like a public IPv4 address.
+// Assembled at runtime so this file's own pushed diff carries no IP-shaped
+// literal for the repo's pre-push scan to warn about.
+const RELEASE = ["1", "84", "1", "0"].join(".");
+const PUBLIC_IP = ["8", "8", "8", "8"].join(".");
+
+describe("pushed diffs larger than the engine cap are scanned in chunks (#2915)", () => {
+  const commitLarge = (tail: string): { base: string; head: string } => {
+    const base = git(["rev-parse", "HEAD"]);
+    fs.writeFileSync(path.join(repo, "large-a.txt"), "clean-a ".repeat(90_000));
+    fs.writeFileSync(path.join(repo, "large-b.txt"), "clean-b ".repeat(90_000) + tail);
+    git(["add", "large-a.txt", "large-b.txt"]);
+    git(["commit", "-q", "-m", "large diff"]);
+    return { base, head: git(["rev-parse", "HEAD"]) };
+  };
+
+  test("a clean two-file diff over the cap passes without input_too_large", () => {
+    const { base, head } = commitLarge("");
+    const { code, stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
+    expect(code).toBe(0);
+    expect(stderr).not.toContain("engine.input_too_large");
+  });
+
+  test("a credential in a later file's chunk still blocks", () => {
+    const { base, head } = commitLarge("\n" + FAKE_AWS_KEY + "\n");
+    const { code, stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
+    expect(code).toBe(1);
+    expect(stderr).toContain("aws.access_key");
+    expect(stderr).not.toContain("engine.input_too_large");
+  });
+});
+
+describe("release version exemption (#2856)", () => {
+  const mediums = (stderr: string): number => Number(/(\d+) MEDIUM finding/.exec(stderr)?.[1] ?? 0);
+  const commitAll = (files: Record<string, string>, msg: string): string => {
+    for (const [file, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+      fs.writeFileSync(path.join(repo, file), content);
+      git(["add", file]);
+    }
+    git(["commit", "-q", "-m", msg]);
+    return git(["rev-parse", "HEAD"]);
+  };
+
+  test("exempts only the VERSION file and the CHANGELOG release heading, not the same address elsewhere", () => {
+    const base = git(["rev-parse", "HEAD"]);
+    const head = commitAll({
+      "VERSION": `${RELEASE}\n`,
+      "CHANGELOG.md": `## [${RELEASE}] - 2026-10-01\n\n- Fixes.\n`,
+      "docs/links.md": `Admin console: http://${RELEASE}/admin\n`,
+      "deploy/net.conf": `server = ${RELEASE}\n`,
+    }, "release");
+    const { code, stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
+    expect(code).toBe(0);
+    expect(mediums(stderr)).toBe(2);
+  });
+
+  test("a version-only release push raises nothing, even with diff.noprefix set", () => {
+    git(["config", "diff.noprefix", "true"]);
+    const base = git(["rev-parse", "HEAD"]);
+    const head = commitAll({ "VERSION": `${RELEASE}\n`, "CHANGELOG.md": `## [${RELEASE}] - 2026-10-01\n` }, "bump");
+    const { stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
+    expect(stderr).not.toContain("MEDIUM");
+  });
+
+  test("a real public IP next to the word version is still flagged", () => {
+    const base = git(["rev-parse", "HEAD"]);
+    const head = commitAll({
+      "CHANGELOG.md": `## [${RELEASE}] - 2026-10-01 mirror ${PUBLIC_IP}\n- The version endpoint moved to ${PUBLIC_IP}.\n`,
+      "config/version.txt": `${RELEASE}\n`,
+      "VERSION": `${RELEASE}\nupstream ${PUBLIC_IP}\n`,
+    }, "not a release artifact");
+    const { stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
+    // heading tail + changelog body + config/version.txt + both VERSION lines
+    // (a two-line VERSION is not a whole-file version).
+    expect(mediums(stderr)).toBe(5);
   });
 });
 
@@ -352,10 +434,11 @@ describe("install / chaining", () => {
       cwd: repo,
       input: Buffer.from(line),
       encoding: "utf8",
-      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip" },
+      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip", GSTACK_HOME: stateHome },
       timeout: 30_000,
     });
     expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(stateHome, "security", "prepush-skip.jsonl"), "utf8")).toContain("env-skip");
     expect(fs.existsSync(seen)).toBe(true);
     expect(fs.readFileSync(seen, "utf8").trim()).toBe(
       `refs/heads/main ${sha} refs/heads/main ${ZERO}`,
@@ -375,7 +458,7 @@ describe("install / chaining", () => {
       cwd: repo,
       input: Buffer.from(`refs/heads/main ${"b".repeat(40)} refs/heads/main ${ZERO}\n`),
       encoding: "utf8",
-      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip" },
+      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip", GSTACK_HOME: stateHome },
       timeout: 30_000,
     });
     expect(r.status).toBe(1);
@@ -438,9 +521,10 @@ describe("install / chaining", () => {
       cwd: repo,
       input: Buffer.from(`refs/heads/main ${sha} refs/heads/main ${ZERO}\n`),
       encoding: "utf8",
-      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip" },
+      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip", GSTACK_HOME: stateHome },
     });
     expect(run.status).toBe(0);
+    expect(fs.readFileSync(path.join(stateHome, "security", "prepush-skip.jsonl"), "utf8")).toContain("env-skip");
     expect(fs.readFileSync(seen, "utf8").trim()).toBe("refs/heads/main");
   });
 

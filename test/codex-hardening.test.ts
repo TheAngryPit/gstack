@@ -1,4 +1,4 @@
-import { generateAdversarialStep } from '../scripts/resolvers/review';
+import { generateAdversarialStep } from '../scripts/resolvers/outside-voice-steps';
 import { RESOLVERS } from '../scripts/resolvers';
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import { describe, test, expect } from 'bun:test';
@@ -51,6 +51,44 @@ function tempHome(): string {
 }
 
 describe('gstack-codex-probe: auth probe', () => {
+  // #2192: custom OpenAI-compatible providers name their credential variable
+  // in config.toml [model_providers.<id>] env_key; a set variable is auth.
+  const withConfig = (toml: string, env: Record<string, string | undefined> = {}) => {
+    const home = tempHome();
+    try {
+      fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), toml);
+      return runProbe({ snippet: '_gstack_codex_auth_probe', env, home });
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  };
+  const MIMO = '[model_providers.mimo]\nenv_key = "MIMO_API_KEY"\n';
+
+  test('#2192: a provider env_key whose variable is set → AUTH_OK', () => {
+    const r = withConfig(MIMO, { MIMO_API_KEY: 'tp-test-key' });
+    expect([r.stdout.trim(), r.status]).toEqual(['AUTH_OK', 0]);
+    const several = withConfig('[model_providers.a]\nenv_key = "MISSING_A"\n\n[model_providers.b]\nenv_key = \'MIMO_API_KEY\'  # inline comment\n', { MIMO_API_KEY: 'k' });
+    expect(several.stdout.trim()).toBe('AUTH_OK');
+  });
+
+  test('#2192: a provider env_key that is unset or blank → AUTH_FAILED naming the key', () => {
+    for (const value of [undefined, '   \t\n']) {
+      const r = withConfig(MIMO, { MIMO_API_KEY: value });
+      expect([r.stdout.trim(), r.status]).toEqual(['AUTH_FAILED', 1]);
+      expect(r.stderr).toContain('custom provider key (MIMO_API_KEY)');
+    }
+  });
+
+  test('#2192: commented env_key lines and env_key outside [model_providers.*] never count', () => {
+    const toml = '[model_providers.mimo]\n# env_key = "DEPRECATED_KEY"\nenv_key = "MIMO_API_KEY"\n[profiles.work]\nenv_key = "PROFILE_KEY"\n';
+    expect(withConfig(toml, { DEPRECATED_KEY: 'old', PROFILE_KEY: 'p' }).stdout.trim()).toBe('AUTH_FAILED');
+  });
+
+  test('#2192: malformed config.toml or a non-identifier env_key → AUTH_FAILED, no crash', () => {
+    expect(withConfig('\x00\x01 garbage \xff[broken\n=no=\n').stdout.trim()).toBe('AUTH_FAILED');
+    const injected = withConfig('[model_providers.x]\nenv_key = "A;touch /tmp/never"\n');
+    expect([injected.stdout.trim(), injected.status]).toEqual(['AUTH_FAILED', 1]);
+  });
+
   test('CODEX_API_KEY set → AUTH_OK', () => {
     const home = tempHome();
     try {
@@ -278,13 +316,14 @@ describe('gstack-codex-probe: timeout wrapper + namespace hygiene', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-gto-stub-'));
     try {
       const stub = path.join(dir, 'gtimeout');
-      fs.writeFileSync(stub, '#!/bin/bash\necho gtimeout_chosen_$1\n');
+      fs.writeFileSync(stub, '#!/bin/bash\necho gtimeout_chosen "$@"\n');
       fs.chmodSync(stub, 0o755);
       const r = runProbe({
         snippet: `_gstack_codex_timeout_wrapper 5 echo nope`,
         env: { PATH: `${dir}:/bin:/usr/bin` },
       });
-      expect(r.stdout.trim()).toBe('gtimeout_chosen_5');
+      // The KILL escalation (#2776) precedes the duration, as timeout(1) requires.
+      expect(r.stdout.trim()).toBe('gtimeout_chosen -k 10 5 echo nope');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -308,6 +347,48 @@ describe('gstack-codex-probe: timeout wrapper + namespace hygiene', () => {
         env: { PATH: dir },
       });
       expect(r.stdout).toContain('rc=124');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const native of [false, true]) test(`${native ? 'bash-native watchdog' : 'timeout(1)'} KILLs a child that ignores TERM after the grace period (#2776)`, () => {
+    // An uncooperative provider used to outlive its deadline, so the outer
+    // tool gate killed the whole call and the partial output was lost.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-watchdog-stubborn-'));
+    try {
+      for (const tool of native ? ['bash', 'sleep', 'cat'] : []) {
+        const resolved = spawnSync('bash', ['-c', `command -v ${tool}`], { timeout: 5000 });
+        fs.symlinkSync(resolved.stdout.toString().trim(), path.join(dir, tool));
+      }
+      const stubborn = path.join(dir, 'stubborn');
+      fs.writeFileSync(stubborn, `#!${spawnSync('bash', ['-c', 'command -v bash'], { timeout: 5000 }).stdout.toString().trim()}\ntrap '' TERM\necho partial\nsleep 30\necho late\n`, { mode: 0o755 });
+      const r = runProbe({
+        snippet: `_GSTACK_CODEX_KILL_AFTER=1 _gstack_codex_timeout_wrapper 1 "${stubborn}"; echo "rc=$?"`,
+        env: native ? { PATH: dir } : {},
+      });
+      expect(r.stdout).toContain('partial');
+      expect(r.stdout).not.toContain('late');
+      expect(r.stdout).toContain('rc=124');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const native of [false, true]) test(`E5: ${native ? 'bash-native watchdog' : 'timeout(1)'} passes the caller's stdin to the command (#1674)`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-watchdog-stdin-'));
+    try {
+      for (const tool of native ? ['bash', 'sleep', 'cat', 'printf'] : []) {
+        const resolved = spawnSync('bash', ['-c', `command -v ${tool}`], { timeout: 5000 });
+        const target = resolved.stdout.toString().trim();
+        if (target.startsWith('/')) fs.symlinkSync(target, path.join(dir, tool));
+      }
+      // A redirect onto the wrapper is how callers feed `codex exec -`; a
+      // backgrounded command without job control would otherwise read /dev/null.
+      const input = path.join(dir, 'prompt.txt');
+      fs.writeFileSync(input, 'prompt on stdin');
+      const r = runProbe({ snippet: `_gstack_codex_timeout_wrapper 5 cat < "${input}"; echo " rc=$?"`, env: native ? { PATH: dir } : {} });
+      expect(r.stdout).toBe('prompt on stdin rc=0\n');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -524,7 +605,7 @@ describe('codex review-mode section Step 2A: PROMPT + --base mutual exclusion gu
 // which downstream reads as "Codex reviewed and found nothing".
 describe('codex timeout wrapper: /review + /ship diff passes', () => {
   const WRAPPED_SITES = [
-    'scripts/resolvers/review.ts', // generator (source of truth)
+    'scripts/resolvers/outside-voice-steps.ts', // generator (source of truth)
     'review/sections/adversarial.md', // review section (Step 4.8 carved out of the skeleton)
     'ship/sections/adversarial.md', // ship section source
   ];
@@ -534,7 +615,7 @@ describe('codex timeout wrapper: /review + /ship diff passes', () => {
   const BASH_GATE_MS = 600000;
 
   for (const relPath of WRAPPED_SITES) {
-    const read = () => relPath === 'scripts/resolvers/review.ts'
+    const read = () => relPath === 'scripts/resolvers/outside-voice-steps.ts'
       ? generateAdversarialStep({ host: 'claude', paths: HOST_PATHS.claude, skillName: 'review', tmplPath: 'review/SKILL.md.tmpl' })
       : fs.readFileSync(path.join(ROOT, relPath), 'utf8');
 
@@ -602,13 +683,16 @@ describe('codex skeleton+sections union: review sandbox + fail-closed gate + tim
   for (const relPath of ['codex tmpl union', 'codex rendered union'] as const) {
     const read = () => readCodexUnion(relPath === 'codex tmpl union' ? 'tmpl' : 'rendered');
 
-    test(`${relPath}: (a) every scoped codex review invocation pins sandbox_mode="read-only"`, () => {
+    test(`${relPath}: (a) every scoped codex review invocation pins sandbox_mode from the selected sandbox`, () => {
       const invocations = read()
         .split('\n')
         .filter((l) => /_gstack_codex_timeout_wrapper\s+\d+\s+codex\s+review\b/.test(l));
       expect(invocations.length).toBeGreaterThanOrEqual(1);
       for (const line of invocations) {
-        expect(line).toContain('sandbox_mode="read-only"');
+        // _gstack_codex_select_model sets read-only (full access only for
+        // GSTACK_CODEX_NO_SANDBOX=1, test/codex-model-probe.test.ts); :? stops
+        // an unselected command instead of inheriting config.toml's default.
+        expect(line).toContain('sandbox_mode=\\"${_GSTACK_CODEX_SANDBOX:?}\\"');
         // `codex review` has no -s/--sandbox flag (verified 0.147.0) — the
         // config override is the only lever. `-s read-only` here would fail
         // at argv parsing, which check (b) would then read as a gate FAIL.
@@ -622,15 +706,37 @@ describe('codex skeleton+sections union: review sandbox + fail-closed gate + tim
       expect(content).not.toContain(
         'If no `[P1]` markers are found (only `[P2]` or no findings) — the gate is **PASS**',
       );
-      // The new rule: FAIL on non-zero exit, empty output, and untagged
-      // output; [P0] recognized as blocking; PASS reachable only through the
-      // explicit tagged-advisory-only branch.
+      // The rule: FAIL on non-zero exit and empty output; [P0] recognized as
+      // blocking; untagged completed output is UNVERIFIED (#2769) — neither a
+      // PASS nor a FAIL; PASS reachable only through the explicit
+      // tagged-advisory-only branch, which now includes P3.
       expect(content).toContain('The gate FAILS CLOSED');
       expect(content).toContain('`_CODEX_EXIT` is non-zero (including 124) → **GATE: FAIL**');
       expect(content).toContain('empty or whitespace-only → **GATE: FAIL**');
-      expect(content).toContain('untagged output');
       expect(content).toContain('`[P0]`');
       expect(content).toContain('PASS is only reachable through check 5');
+    });
+
+    test(`${relPath}: (b2) a clean untagged review is UNVERIFIED, and P2/P3-only output can PASS (#2769)`, () => {
+      const content = read();
+      expect(content).toContain(
+        'anywhere → **GATE: UNVERIFIED** (Codex completed and tagged nothing; read\n      the output above)',
+      );
+      expect(content).toContain('GATE: UNVERIFIED (Codex completed and tagged nothing; read the output above)');
+      expect(content).toContain('(only P2/P3 advisory) →\n      **GATE: PASS**');
+      expect(content).not.toContain('**GATE: FAIL** (fail-closed: untagged output');
+      expect(content).toContain('"unverified" if UNVERIFIED');
+      // The captured clean review from the real CLI carries no severity tag, so
+      // check 4 is the branch it takes; the captured P2 review takes check 5.
+      const fixtures = path.join(ROOT, 'test', 'fixtures', 'codex-review');
+      const clean = fs.readFileSync(path.join(fixtures, 'clean-review.stdout.txt'), 'utf-8');
+      const p2 = fs.readFileSync(path.join(fixtures, 'p2-review.stdout.txt'), 'utf-8');
+      const tagged = (t: string) => /\[P[0-3]\]|(^|\s)P[0-3]:/m.test(t);
+      const blocking = (t: string) => /\[P[01]\]|(^|\s)P[01]:/m.test(t);
+      expect(clean.trim().length).toBeGreaterThan(0);
+      expect(tagged(clean)).toBe(false);
+      expect(tagged(p2)).toBe(true);
+      expect(blocking(p2)).toBe(false);
     });
 
     test(`${relPath}: (c) every Bash gate sits strictly above its section's wrapper budgets`, () => {

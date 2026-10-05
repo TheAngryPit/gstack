@@ -7,7 +7,7 @@
 | Surfaces / scope | {API, CLI, job, worker, webhook; changed and adjacent contracts} |
 | Runtime / native tools | {VERSIONS AND REPOSITORY-SUPPORTED COMMANDS} |
 | Fixture ownership / destinations | {ISOLATED ROOT, STORES, DOWNSTREAM TARGETS} |
-| Duration / stop reason | {MEASURED DURATION, COMPLETE OR BOUND/BLOCKER} |
+| Probe budget / guarded command time / stop reason | {CONFIGURED LIMIT / SUM OF CAPTURE durationMs / COMPLETE OR BOUND/BLOCKER} |
 
 ## Contract outcomes
 
@@ -33,6 +33,7 @@ evidence and regression baselines. Do not combine their scores or outcomes.
 ## Discoveries and permanent tests
 
 Link each `exploration-NNN.json` checkpoint, saved before its next probe, in this report.
+Each checkpoint receipt prints its `link`; `.qa-evidence/NNN` capture folders are not checkpoints.
 Use one Markdown entry per checkpoint, for example:
 
 - [checkpoint 001](exploration-001.json) — how this observation shaped the next probe.

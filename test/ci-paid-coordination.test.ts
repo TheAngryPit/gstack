@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { buildRunManifest, collectPaidTestFiles, type PaidRunManifest, type SliceResult } from '../scripts/test-paid-shards';
+import { buildRunManifest, collectPaidTestFiles, shardCaseId, shardTrial, type PaidRunManifest, type SliceResult } from '../scripts/test-paid-shards';
 import { STRICT_RETRY_CASE_BUDGETS } from './helpers/eval-budgets';
 import { approvedCookieWorkflowSource, manualReviewFixture } from './helpers/manual-judge-review-fixture';
 
@@ -16,6 +16,11 @@ type Job = {
   permissions: Record<string, string>;
   steps: Step[];
 };
+/** A passing trial record for an isolated trial shard (the executor's current result schema). */
+const trialRecord = (entry: PaidRunManifest['entries'][number]) => entry.trial ? { trial: {
+  case: shardCaseId(entry.file)!, trial: shardTrial(entry.file)!, ...entry.trial, outcome: 'passed' as const, cost_usd: 0, duration_ms: 1,
+} } : {};
+
 const workflows = ['evals.yml', 'evals-periodic.yml'].map(name => ({
   name,
   jobs: (Bun.YAML.parse(fs.readFileSync(path.join(ROOT, '.github/workflows', name), 'utf8')) as {
@@ -69,7 +74,19 @@ describe('paid CI coordination stays off the eval image', () => {
   for (const { name, jobs } of workflows) {
     test(`${name}: planning is independent of image startup and has no dependency install`, () => {
       const planner = jobs['plan-slices'];
-      expect(planner.needs).toBeUndefined();
+      if (name === 'evals.yml') {
+        // The PR lane plans after its two tiny coordination jobs (push-burst debounce, base-ref receipt recovery), never after the image.
+        expect(planner.needs).toEqual(['debounce', 'recover-receipts']);
+        for (const id of ['debounce', 'recover-receipts']) {
+          const job = jobs[id] as Job & { 'runs-on'?: string };
+          expect(job.container, id).toBeUndefined();
+          expect(job['runs-on'], id).toBe('ubuntu-24.04');
+          expect(job.needs ?? [], id).not.toContain('build-image');
+          expect(JSON.stringify(job.steps), id).not.toMatch(/secrets\.|restore-deps|bun install|bun run build/);
+        }
+      } else {
+        expect(planner.needs).toBeUndefined();
+      }
       expect(planner.container).toBeUndefined();
       expect(planner.permissions).toEqual({ contents: 'read' });
       const checkout = planner.steps.find(step => step.uses?.startsWith('actions/checkout@'))!;
@@ -112,10 +129,11 @@ describe('paid CI coordination stays off the eval image', () => {
       if (name === 'evals.yml') expect(report.permissions).toEqual({ contents: 'read' });
     });
 
-    test(`${name}: failure logs include the hidden spool directory without uploading the rest of the cache`, () => {
-      const logs = jobs['eval-slices'].steps.find(step => step.with?.name === 'paid-slice-${{ matrix.slice }}-logs');
+    test(`${name}: shard logs include the hidden spool directory without uploading the rest of the cache`, () => {
+      const logs = jobs['eval-slices'].steps.find(step => step.with?.name === 'paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}');
       expect(logs?.uses).toStartWith('actions/upload-artifact@');
-      expect(logs?.if).toBe('failure()');
+      // A failed trial no longer reds its runner; its log is still the evidence.
+      expect(logs?.if).toBe('always()');
       expect(logs?.with?.['include-hidden-files']).toBe(true);
       expect(String(logs?.with?.path).trim().split('\n')).toEqual([
         '/home/runner/.cache/gstack-paid-shard-*.log',
@@ -123,22 +141,45 @@ describe('paid CI coordination stays off the eval image', () => {
       ]);
       const hiddenUploads = Object.values(jobs).flatMap(job => job.steps).filter(step => step.with?.['include-hidden-files']);
       const captures = hiddenUploads.filter(step => step.with?.name === 'native-captures-${{ env.EVALS_RUN_ID }}');
-      expect(captures).toHaveLength(name === 'evals.yml' ? 1 : 2);
+      // evals-periodic's host-run Codex job mounts $RUNNER_TEMP/eval-home as the container's HOME.
+      const hostHome = (pattern: string) => pattern.replace('${{ runner.temp }}/eval-home/', '~/');
+      expect(captures).toHaveLength(name === 'evals.yml' ? 1 : name === 'evals-periodic.yml' ? 3 : 2);
       for (const capture of captures) {
         expect(capture.if).toBe('always()');
-        expect(String(capture.with?.path).trim().split('\n')).toEqual([
+        expect(String(capture.with?.path).trim().split('\n').map(hostHome)).toEqual([
           '~/.gstack/projects/*/e2e-runs', '~/.gstack/projects/*/evals/qa-callers',
           '~/.gstack-dev/e2e-runs', '~/.gstack-dev/evals/qa-callers',
         ]);
       }
-      expect(hiddenUploads.filter(step => !captures.includes(step))).toEqual([logs]);
+      const codexLogs = name === 'evals-periodic.yml'
+        ? jobs['eval-codex-slices'].steps.find(step => step.with?.name === 'paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}') : undefined;
+      if (codexLogs) {
+        expect(codexLogs.if).toBe('always()');
+        // The container sets TMPDIR under HOME, so shard logs land in the mounted HOME's cache.
+        expect(String(codexLogs.with?.path).trim().split('\n').map(hostHome)).toEqual(['~/.cache/gstack-paid-shard-*.log']);
+      }
+      expect(hiddenUploads.filter(step => !captures.includes(step))).toEqual(codexLogs ? [logs!, codexLogs] : [logs!]);
     });
   }
 
-  test('PR planning preserves the fork and Dependabot trust boundaries without the needs chain', () => {
-    expect(workflows[0].jobs['plan-slices'].if).toBe(
-      "github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)",
-    );
+  test('PR planning preserves the fork and Dependabot trust boundaries across the coordination jobs', () => {
+    const jobs = workflows[0].jobs;
+    const trust = "github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)";
+    // !cancelled() lets planning proceed when debounce/recovery were skipped or failed (reuse is then off); the trust clause still gates it.
+    expect(jobs['plan-slices'].if).toBe(`\${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.debounce.outputs.superseded != 'true' && ${trust} }}`);
+    // The coordination jobs never run for Dependabot or for a fork PR either (recovery also serves an explicit pr_receipts dispatch).
+    for (const name of ['build-image', 'debounce', 'recover-receipts', 'plan-slices']) {
+      expect(jobs[name].if).toContain("github.repository == 'garrytan/gstack'");
+    }
+    expect(jobs.debounce.if).toContain("github.actor != 'dependabot[bot]'");
+    expect(jobs.debounce.if).toContain("github.event_name == 'pull_request'");
+    expect(jobs.debounce.if).toContain('github.event.pull_request.head.repo.full_name == github.repository');
+    expect(jobs['recover-receipts'].if).toContain("github.actor != 'dependabot[bot]'");
+    expect(jobs['recover-receipts'].if).toContain("(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository");
+    expect(jobs['recover-receipts'].if).toContain("(github.event_name == 'workflow_dispatch' && inputs.pr_receipts != '')");
+    // Only recovery holds actions: read, and it runs base-ref code; the planner keeps contents: read.
+    expect(jobs['recover-receipts'].permissions).toEqual({ contents: 'read', actions: 'read' });
+    expect(jobs['plan-slices'].permissions).toEqual({ contents: 'read' });
   });
 });
 
@@ -217,6 +258,7 @@ describe('dependency-free CI planner and report execution', () => {
             executedTests: STRICT_RETRY_CASE_BUDGETS.find(budget => budget.file === entry.file)?.cases ?? 1,
             skippedTests: 0,
             ...(entry.budget ? { budget: entry.budget } : {}),
+            ...trialRecord(entry),
           })),
         };
         fs.writeFileSync(path.join(reportDir, `slice-${sliceIndex}.json`), JSON.stringify(result));
@@ -248,7 +290,8 @@ describe('dependency-free CI planner and report execution', () => {
       const red = run(['--report', reportDir], tier);
       expect(red.status).toBe(1);
       expect(red.stderr).toContain(`${failed.outcomes[0].files[0]}: failed`);
-      expect(red.stdout).toContain('3 executed, 0 reused; 1 passed, 2 failed, 0 manual accepted (unscored; no score-cache credit) (6 attempt records from 1 collectors)');
+      // Paid evals never retry: every record counts, a later pass never hides an earlier failure.
+      expect(red.stdout).toContain('6 executed, 0 reused; 2 passed, 4 failed, 0 manual accepted (unscored; no score-cache credit) (6 attempt records from 1 collectors');
       expect(red.stdout).toContain('3 cases with multiple attempts this run:');
       expect(red.stdout).not.toMatch(/passed only on retry|not blocking/);
 
@@ -274,7 +317,7 @@ describe('dependency-free CI planner and report execution', () => {
       outcomes: manifest.entries.filter(entry => entry.status === 'planned').map(entry => ({
         files: [entry.file], status: 'passed', exitCode: 0, elapsedMs: 1,
         executedTests: STRICT_RETRY_CASE_BUDGETS.find(budget => budget.file === entry.file)?.cases ?? 1,
-        skippedTests: 0, ...(entry.budget ? { budget: entry.budget } : {}),
+        skippedTests: 0, ...(entry.budget ? { budget: entry.budget } : {}), ...trialRecord(entry),
       })),
     };
     const slicePath = path.join(reportDir, 'slice-1.json');

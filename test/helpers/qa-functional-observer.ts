@@ -72,7 +72,7 @@ export interface QAWriteObservation {
   limits: string[];
 }
 
-export async function observeQAWrites(root: string, options: { reportDirectory?: string; evidenceProducer?: boolean } = {}) {
+export async function observeQAWrites(root: string, options: { reportDirectory?: string; evidenceProducer?: boolean; atomicTargets?: string[]; atomicWriteMode?: QAMode } = {}) {
   if (process.platform !== 'linux') throw new Error('QA write observer unavailable: Linux inotify required');
   if (fs.realpathSync(root) !== root) throw new Error('Observer root must be canonical');
   let reportDirectory: string | undefined;
@@ -82,7 +82,10 @@ export async function observeQAWrites(root: string, options: { reportDirectory?:
     reportDirectory = path.relative(root, directory);
   }
   const transientFile = (relative: string) => qaWriteAllowed(relative, 'qa-only')
-    || (reportDirectory !== undefined && relative.startsWith(reportDirectory + path.sep));
+    || (reportDirectory !== undefined && relative.startsWith(reportDirectory + path.sep))
+    || (options.atomicTargets ?? []).some(target => relative.startsWith(target + '.tmp.') && /^\.tmp\.[1-9]\d*\.[0-9a-f]{12}$/.test(relative.slice(target.length)))
+    || (options.atomicWriteMode !== undefined && /\.tmp\.[1-9]\d*\.[0-9a-f]{12}$/.test(relative)
+      && qaWriteAllowed(relative.replace(/\.tmp\.[1-9]\d*\.[0-9a-f]{12}$/, ''), options.atomicWriteMode));
   const before = qaTreeSnapshot(root);
   const { dlopen, FFIType, ptr } = await import('bun:ffi');
   const libc = dlopen('libc.so.6', {
@@ -95,6 +98,7 @@ export async function observeQAWrites(root: string, options: { reportDirectory?:
   const events: QAWriteObservation['events'] = [];
   const failures: string[] = [];
   const publications = new Map<string, { temporary: string; dev: number; ino: number; bytes: string; parentDev: number; parentIno: number; mode: number }>();
+  const pendingLinks = new Map<string, { target: string; dev: number; ino: number; mode: number; bytes: string }>();
   let stopped = false;
   const observedPath = (relative: string, knownPair = false): string => {
     try {
@@ -136,7 +140,7 @@ export async function observeQAWrites(root: string, options: { reportDirectory?:
           || !canonicalUTC(state.startedAt) || !canonicalUTC(state.deadlineAt)
           || Date.parse(state.deadlineAt) > Date.parse(state.startedAt) + state.budgetMs)) throw error;
         if (!isDeadline && (!state || typeof state !== 'object' || Array.isArray(state))) throw error;
-        if (targetName.startsWith('exploration-') && Object.keys(state).sort().join(',') !== 'hypothesis,nextCommand,observationCommand,observed') throw error;
+        if (targetName.startsWith('exploration-') && !['hypothesis,nextCommand,observationCommand,observed', 'hypothesis,nextArgv,nextCapture,observationArgv,observationCapture,observed'].includes(Object.keys(state).sort().join(','))) throw error;
         if (targetName === 'receipt.json' && (state.version !== 1 || !/^\d{3}$/.test(state.id) || !['complete', 'incomplete', 'sensitive'].includes(state.status))) throw error;
         if (targetName === 'evidence.json' && (!Array.isArray(state.evidence) || !Array.isArray(state.limits))) throw error;
         const final = fs.lstatSync(target);
@@ -150,6 +154,18 @@ export async function observeQAWrites(root: string, options: { reportDirectory?:
         publications.set(relativeTarget, publication);
         return target;
       } catch (publicationError) {
+        if (receipt === undefined && (publicationError as NodeJS.ErrnoException).code === 'ENOENT' && temporaryName.test(basename)) {
+          let linking: number | undefined;
+          try { linking = fs.openSync(path.join(parent, basename), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+          catch (openError) { if ((openError as NodeJS.ErrnoException).code === 'ENOENT') return path.join(parent, basename); }
+          if (linking !== undefined) try {
+            const entry = fs.fstatSync(linking);
+            if (entry.isFile() && entry.nlink === 2 && entry.uid === parentStat.uid && (entry.mode & 0o777) === mode) {
+              pendingLinks.set(relative, { target: path.relative(root, target), dev: entry.dev, ino: entry.ino, mode, bytes: fs.readFileSync(linking, 'utf8') });
+              return path.join(parent, basename);
+            }
+          } finally { fs.closeSync(linking); }
+        }
         try { return ownedPath(root, relative); } catch { throw publicationError; }
       } finally { if (receipt !== undefined) fs.closeSync(receipt); }
     }
@@ -241,6 +257,13 @@ export async function observeQAWrites(root: string, options: { reportDirectory?:
             || fs.readFileSync(target, 'utf8') !== publication.bytes) throw new Error('Evidence publication did not settle unchanged');
         } catch (error) { failures.push(String(pathFailure(root, relative, error))); }
       }
+      for (const [temporary, pending] of pendingLinks) {
+        try {
+          const entry = fs.lstatSync(ownedPath(root, pending.target));
+          if (fs.existsSync(ownedPath(root, temporary)) || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.nlink !== 1
+            || (entry.mode & 0o777) !== pending.mode || fs.readFileSync(ownedPath(root, pending.target), 'utf8') !== pending.bytes) throw new Error('Evidence publication did not settle unchanged');
+        } catch (error) { failures.push(String(pathFailure(root, temporary, error))); }
+      }
       let after: Record<string, string> = {};
       try { after = qaTreeSnapshot(root); } catch (error) { failures.push(String(error)); }
       fs.closeSync(fd);
@@ -260,7 +283,13 @@ export function qaWriteVerdict(observation: QAWriteObservation, mode: QAMode): s
   return failures;
 }
 
+/** Asking an installed gstack QA helper for its own usage text is read-only and always declared. */
+export function qaHelperUsageCommand(command: string): boolean {
+  return /^bun (?:[\w./-]+\/)?bin\/gstack-qa-(?:evidence|deadline)(?: --help)?$/.test(command.trim());
+}
+
 export function qaCommandAllowed(command: string, root?: string): boolean {
+  if (qaHelperUsageCommand(command)) return true;
   const producer = root ? qaEvidenceCommand(command, { cwd: root, reportRoot: path.join(root, 'qa-reports'), executable: path.join(root, 'bin/gstack-qa-evidence') }) : undefined;
   if (producer) {
     try { ownedPath(root!, 'bin/gstack-qa-evidence'); } catch { return false; }

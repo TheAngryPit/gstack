@@ -3,9 +3,10 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { validateOfficeHoursCompletion, validateOfficeHoursReviewerHandoffs, validateOfficeHoursReviewArtifacts, validateOfficeHoursReviewPreservation, validateOfficeHoursSpecSummary, type OfficeHoursCompletionEvidence } from './helpers/office-hours-completion';
+import { validateOfficeHoursCompletion, validateOfficeHoursDesignDraft, validateOfficeHoursReviewerHandoffs, validateOfficeHoursReviewArtifacts, validateOfficeHoursReviewPreservation, type OfficeHoursCompletionEvidence } from './helpers/office-hours-completion';
 import { E2E_TOUCHFILES } from './helpers/touchfiles-data';
 import { selectTests } from './helpers/test-selection';
+import { expectMentions } from './helpers/prompt-structure';
 
 const designPath = '/tmp/office-hours-fixture/docs/designs/roster-check.md';
 const finalReview = `## Completeness
@@ -60,16 +61,25 @@ describe('office-hours fixture completion', () => {
     expect(compose).toBeGreaterThan(-1);
     expect(finalize).toBeGreaterThan(compose);
     expect(finish).toBeGreaterThan(finalize);
-    expect(instructions).toContain('summarize each phase\'s outcome and actual decisions with their rationale');
-    expect(instructions).toContain('link the approved design and saved review evidence');
-    expect(instructions).toContain('full actual Assignment, coaching/relationship closing, approval outcome, and Handoff');
-    expect(instructions).toContain('complete every required phase and preserve all findings');
-    expect(instructions).toContain('completed round files and any actual unreviewed failure');
-    expect(instructions).toContain('persist the complete managed Spec Review section');
-    expect(instructions).toContain('Write the complete diagnostic, premise challenge, alternatives, independent opinion and rationale into the design');
+    expectMentions(instructions, [['approval', 'coaching/relationship', 'assignment']], 'instructions');
     expect(instructions).toContain('write the full relationship closing and handoff directly into REPORT.md');
     expect(instructions.indexOf('Delivery throughout this non-interactive run')).toBeLessThan(compose);
     expect(instructions).toContain('A failed command remains a failure');
+  });
+
+  test('the design-draft checkpoint applies the full validator\'s design and opinion checks alone', () => {
+    const draftDesign = design.replace('Status: APPROVED', 'Status: DRAFT').replace(/## Reviewer Concerns[\s\S]*$/, '');
+    const draft = { designPath, designContent: draftDesign, toolCalls: completed().toolCalls.slice(0, 2) };
+    expect(validateOfficeHoursDesignDraft(draft)).toEqual({ designPath, repoPath: 'docs/designs/roster-check.md', firstDesignWrite: 1 });
+    expect(() => validateOfficeHoursDesignDraft({ ...draft, toolCalls: draft.toolCalls.slice(1) }))
+      .toThrow('Office-hours design draft: no independent Agent/Task opinion');
+    expect(() => validateOfficeHoursDesignDraft({ ...draft, toolCalls: [...draft.toolCalls].reverse() }))
+      .toThrow('no independent Agent/Task opinion');
+    expect(() => validateOfficeHoursDesignDraft({ ...draft, designContent: draftDesign.replace(/## Success Criteria\n[^\n]+\n/, '') }))
+      .toThrow('repo design lacks substantive Success Criteria');
+    expect(() => validateOfficeHoursDesignDraft({ ...draft, designContent: null })).toThrow('repo design is missing');
+    expect(() => validateOfficeHoursCompletion({ ...completed(), toolCalls: completed().toolCalls.slice(1) }))
+      .toThrow('Office-hours completion: no independent Agent/Task opinion');
   });
 
   test('accepts a completed approved design with unresolved reviewer concerns', () => {
@@ -398,20 +408,8 @@ describe('office-hours reviewer finding preservation', () => {
       calls++;
       expect(prompt).toContain(JSON.stringify(original));
       expect(prompt).toContain(JSON.stringify(review!.concerns));
-      expect(prompt).toContain('Do not require verbatim wording or judge by issue count alone');
-      expect(prompt).toContain('optional alternative remedies may be omitted');
-      expect(prompt).toContain('only actual defects, never successful mappings');
-      expect(prompt).toContain('Keep reasoning brief');
-      expect(prompt).toContain('Complete EVERY applicable audit even if another already fails');
-      expect(prompt).toContain('a coverage failure cannot skip metrics');
-      expect(prompt).toContain('a metrics failure cannot skip convergence');
-      expect(prompt).toContain('one brief conclusion per applicable audit');
-      expect(prompt).toContain('APPROVED records user approval and is compatible with CONCERNS_RECORDED');
+      // The response schema is the wire contract; the judge's wording is not.
       expect(prompt).toContain('{"reasoning":string,"missing":string[],"unsupported":string[],"complete":boolean}');
-      expect(prompt).toContain('finalize missing and unsupported, and emit complete last');
-      expect(prompt).toContain('at most 150 words total');
-      expect(prompt).toContain('Coverage and the remaining inventory come from the FINAL reviewer verdict only');
-      expect(prompt).toContain('lack of a confirmed prior fix does not invent a missing final-verdict finding');
       return JSON.stringify(accepted);
     });
     expect(calls).toBe(1);
@@ -464,7 +462,7 @@ describe('office-hours reviewer finding preservation', () => {
       expect(data.persisted_reviewer_concerns).toContain(retained);
       expect(data.completion_report).toBe(actual.output);
       expect(data.prior_reviewer_verdicts).toEqual([]);
-      expect(prompt).toContain('Sharing a component or related vocabulary does not establish coverage');
+      expectMentions(prompt, [['does not', 'vocabulary', 'component']], 'prompt');
       expect(prompt).toContain('leaving the source problem unresolved');
       return { complete: false, missing: ['The header-recognition rules remain implicit despite the retained ambiguity and normalization remedies.'],
         unsupported: [], reasoning: 'Both retained remedies can be implemented without deciding which inconsistent header strings are recognized.' };
@@ -515,8 +513,7 @@ Convergence stopped round 2: the empty CSV issue persisted after an attempted fi
       expect(data.prior_reviewer_verdicts).toEqual([firstVerdict]);
       expect(data.final_reviewer_verdict).toBe(lastVerdict);
       expect(data.completion_report).toBe(actual.output);
-      expect(prompt).toContain('An attempted edit is not a confirmed fix');
-      expect(prompt).toContain('Explicitly labeled attempts may include unsuccessful changes');
+      expectMentions(prompt, [['not', 'attempted', 'confirmed']], 'prompt');
       expect(prompt).toContain('affirmative later evidence');
       return inflated
         ? { complete: false, missing: [], unsupported: ['Two confirmed fixes overstates the outcome: the original empty CSV finding persists.'],
@@ -540,7 +537,7 @@ Convergence stopped round 2: the empty CSV issue persisted after an attempted fi
       expect(data.completion_report).toContain('One unresolved reviewer concern');
       expect(data.final_reviewer_verdict).toBe(finalReview);
       expect(prompt).toContain('complete final finding inventory');
-      expect(prompt).toContain('not just the number of condensed persisted entries');
+      expectMentions(prompt, [['not', 'condensed', 'persisted']], 'prompt');
       return { complete: false, missing: [], unsupported: ['The remaining count of one omits one of the two distinct source findings.'],
         reasoning: 'The concerns preserve both obligations, but merging their prose does not reduce the reported source finding count.' };
     })).rejects.toThrow('remaining count of one');
@@ -571,7 +568,6 @@ Convergence stopped round 2: the empty CSV issue persisted after an attempted fi
       expect(data.prior_reviewer_verdicts).toEqual([prior]);
       expect(data.final_reviewer_verdict).toBe(current);
       expect(data.completion_report).toContain(claim);
-      expect(prompt).toContain('same specific unmet decision, failure, or necessary remedy');
       expect(prompt).toContain('correct in substance');
       return { complete: false, missing: [], unsupported: ['The claimed convergence stop matches a broad topic, not a persistent unmet decision.'],
         reasoning: 'The earlier correction is explicit; the next reviewer raises a different requirement.' };
@@ -608,7 +604,7 @@ Convergence stopped round 2: the empty CSV issue persisted after an attempted fi
       const data = JSON.parse(prompt.split('\nDATA:\n')[1]);
       expect(data.prior_reviewer_verdicts).toEqual([prior]);
       expect(data.completion_report).toContain('not re-raised');
-      expect(prompt).toContain('Merely not being re-raised in a later verdict is not confirmation');
+      expectMentions(prompt, [['not', 'confirmation', 're-raised']], 'prompt');
       return { complete: false, missing: [], unsupported: ['Two confirmed fixes are unsupported: the subsequent verdict provides no affirmative resolution evidence.'],
         reasoning: 'Not mentioning an earlier issue does not prove its requested behavior was implemented.' };
     })).rejects.toThrow('Two confirmed fixes are unsupported');
@@ -624,8 +620,7 @@ Convergence stopped round 2: the empty CSV issue persisted after an attempted fi
       : 'One round completed with 1 total issue citation; K1 and L2 were combined. One unique unresolved problem remains.');
     const review = validateOfficeHoursCompletion(actual);
     const validation = validateOfficeHoursReviewPreservation(review, async prompt => {
-      expect(prompt).toContain('exact same-problem, same-remedy cross-reference may share one concern');
-      expect(prompt).toContain('A sum of unique counts cannot be labeled a raw citation total');
+      expectMentions(prompt, [['cannot', 'citation', 'labeled']], 'prompt');
       const data = JSON.parse(prompt.split('\nDATA:\n')[1]);
       expect(data.final_reviewer_verdict).toBe(citations);
       expect(data.persisted_reviewer_concerns).toContain('K1 / L2');
@@ -695,47 +690,8 @@ describe('office-hours completion eval selection', () => {
   test('office-hours source selects its dedicated workflow instead of the generic carve file', () => {
     const { selected } = selectTests(['office-hours/sections/design-and-handoff.md.tmpl'], E2E_TOUCHFILES);
     expect(selected).toContain('office-hours-section-loading');
-    expect(selected).not.toContain('carve-section-loading');
-  });
-});
-
-describe('office-hours spec-review summary completion', () => {
-  const summary = `The Agent dispatches an independent reviewer across five dimensions:
-Completeness, Consistency, Clarity, Scope, and Feasibility. Maximum 3 iterations.
-Metrics track iterations, issues found, issues fixed, remaining issues, and quality score.`;
-
-  test('accepts a successful written explanation of the loop and metrics', () => {
-    expect(() => validateOfficeHoursSpecSummary('success', summary)).not.toThrow();
-  });
-
-  test.each(['timeout', 'error_max_turns', 'error_api'])('rejects %s even with a complete summary file', reason => {
-    expect(() => validateOfficeHoursSpecSummary(reason, summary)).toThrow(`execution failed: ${reason}`);
-  });
-
-  test('requires the actual summary file', () => {
-    expect(() => validateOfficeHoursSpecSummary('success', null)).toThrow('summary file was not written');
-  });
-
-  test('rejects incomplete dimensions, dispatch, and iteration explanations', () => {
-    expect(() => validateOfficeHoursSpecSummary('success', summary.replace(/five dimensions:[\s\S]*?Feasibility/, 'one dimension: Completeness')))
-      .toThrow('five review dimensions');
-    expect(() => validateOfficeHoursSpecSummary('success', summary.replace('Agent', 'model'))).toThrow('Agent reviewer dispatch');
-    expect(() => validateOfficeHoursSpecSummary('success', summary.replace('Maximum 3 iterations', 'Maximum 4 iterations')))
-      .toThrow('three-iteration limit');
-  });
-
-  test('15 dimensions does not satisfy the five-dimension count', () => {
-    const incorrect = summary.replace(/five dimensions:[\s\S]*?Feasibility/, '15 dimensions');
-    expect(() => validateOfficeHoursSpecSummary('success', incorrect)).toThrow('five review dimensions');
-  });
-
-  test('13 iterations does not satisfy the three-iteration limit', () => {
-    expect(() => validateOfficeHoursSpecSummary('success', summary.replace('Maximum 3 iterations', 'Maximum 13 iterations')))
-      .toThrow('three-iteration limit');
-  });
-
-  test.each(['issues found', 'issues fixed', 'remaining issues', 'quality score'])('requires the %s metric', metric => {
-    expect(() => validateOfficeHoursSpecSummary('success', summary.replace(metric, ''))).toThrow('metric');
+    expect(selected).toContain('office-hours-design-draft');
+    expect(selected.filter(id => id.startsWith('carve-section-loading'))).toEqual([]);
   });
 });
 

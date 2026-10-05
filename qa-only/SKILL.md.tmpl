@@ -71,9 +71,9 @@ If neither exists, use git diff analysis.
 
 ## Select Surfaces and Isolation
 
-Load the shared preparation gate now: complete its scope and selected-method Reads,
+Load the shared preparation gate now (the exploratory STOP just below): complete its scope and selected-method Reads,
 await their results, and select the surfaces. Defer charters, clocks and probes to
-Run the Selected Checks, after report ownership and conditional browser setup below.
+Run the Selected Checks; its §1 then reuses the REPORT_DIR resolved under Prepare Report Artifacts.
 
 {{SECTION:exploratory}}
 
@@ -83,8 +83,8 @@ For mixed Regression, the argument is the prior combined report. Resolve its fun
 replay evidence and browser baseline links first, then give each method its own baseline.
 A missing baseline blocks that surface's regression coverage, not independent checks.
 In mixed runs, use the user's surface order, defaulting to functional then browser.
-Finish one surface's probes before starting the next surface's clock; any supplied
-absolute deadline still applies to both. Do not reset a clock when switching surfaces.
+Each surface's clock starts with its probes; finish one surface before starting the
+next. A supplied absolute deadline is shared; switching surfaces does not extend it.
 
 ## Prepare Report Artifacts
 
@@ -137,7 +137,7 @@ During browser discovery, observe behavior without reading source to diagnose it
 
 ### Assemble the report
 
-After probing stops, load the finalization procedure below. Use retained evidence;
+After probing stops, load the finalization procedure below. Order: exploratory §4 annotations and materialize, then this procedure, then the final report Write. Use retained evidence;
 this step does not authorize more probes or restart an expired clock.
 Do not preload reporting. To recover from an accidental early Read:
 If already read, issue another Read now and await its
@@ -177,7 +177,7 @@ permissions or fixed paths override them. Do not create a forbidden second copy.
 Use this session's existing project slug and state directory for the project copy.
 If unknown or not writable within the supplied permissions, report that copy as
 blocked; still write the permitted local report. Do not run state-setup helpers.
-Write identical content to `~/.gstack/projects/{slug}/{user}-{branch}-test-outcome-{datetime}.md`.
+Write identical content to `$GSTACK_STATE_ROOT/projects/{slug}/{user}-{branch}-test-outcome-{datetime}.md` (the state root this session resolved).
 Get `{user}`/`{branch}` from `git config user.name`/`git branch --show-current`
 (fallbacks: `unknown-user`/`detached`); sanitize like `{target}`. Use UTC `YYYYMMDDTHHMMSSZ`.
 If that destination exists, choose a fresh suffixed filename; never replace a prior report.
@@ -195,8 +195,8 @@ The shared loop's mixed-surface split applies only to clocks and checkpoints:
 | Mixed: browser probes | `$REPORT_DIR/browser` |
 | Mixed: functional probes | `$REPORT_DIR/functional` |
 
-Each probe directory holds its own `exploration-NNN.json` sequence and, only when
-timed, `deadline.json`. Caller-fixed paths override this layout. Do not reassign
+Each probe directory holds its own `exploration-NNN.json` sequence, `annotations.json`
+and materialize step, and, only when timed, `deadline.json`. Caller-fixed paths override this layout. Do not reassign
 `REPORT_DIR` to a surface directory or move the shared browser artifact paths.
 
 ## Additional Rules (qa-only specific)
