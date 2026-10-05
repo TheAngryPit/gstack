@@ -124,35 +124,8 @@ helper. FOUND counts finding observations across rounds; FIXED counts only
 reviewer-confirmed resolutions. An unavailable score is null, never invented.`;
 }
 
-export function generateSpecReviewLoop(_ctx: TemplateContext): string {
-  if (_ctx.skillName === 'office-hours') {
-    const officeHours = generateOfficeHoursSpecReviewLoop();
-    if (_ctx.host !== 'codex') return officeHours;
-    const legacyDispatch = `Use the Agent tool with \`run_in_background: false\` and its returned \`dispatch\`
-string unchanged as the prompt. The reviewer must Read the entire prepared prompt
-file before reviewing the design. Do not recreate the prompt, copy selected fields,
-or summarize prior findings. A parent Read does not deliver the file to the reviewer.
-The reviewer has fresh context and cannot see the brainstorming conversation.
-Its prepared contract requires a complete JSON Write and an identical JSON response.
-It protects the required coaching and Assignment sections, distinguishes unknown
-customer facts from committed behavior, and requires evidence for every prior status.`;
-    if (!officeHours.includes(legacyDispatch)) throw new Error('Codex office-hours review dispatch anchor drift');
-    return officeHours.replace(legacyDispatch, `Dispatch the complete helper-produced \`dispatch\` string as a fresh task through
-the native worker API advertised by this Codex session; do not reconstruct its
-prompt or drop the saved evidence paths. If the API is \`collaboration.spawn_agent\`,
-use \`fork_turns: "none"\`, preserve the selected main model and effort, and omit
-unselected overrides. The worker reads the entire prepared prompt file and design,
-including the complete findings schema, all five review dimensions, coaching contract
-and preceding JSON. It writes a complete verdict JSON and returns the identical JSON.
-Preserve the required coaching and Assignment sections, distinguish unknown customer
-facts from committed behavior, and require evidence for every prior status. Retain
-the actual handle and await terminal completion before checking files, fixing findings,
-or dispatching another round. A new context does not prove a different model.`)
-      .replace('If the subagent fails, times out, or is unavailable — stop the loop and present the',
-        'If the native worker fails, times out, or is unavailable — stop the loop and present the');
-  }
-  const ceo = _ctx.skillName === 'plan-ceo-review';
-  if (_ctx.host === 'codex') return `${ceo ? '####' : '##'} Spec Review Loop
+function generateCodexSpecReviewLoop(ctx: TemplateContext, ceo: boolean): string {
+  return `${ceo ? '####' : '##'} Spec Review Loop
 
 Run the independent review before presenting the final document. Follow
 the calling workflow's existing approval and artifact rules; reviewer findings do
@@ -161,7 +134,7 @@ ${ceo ? 'Attempt the CEO review; a failed or unavailable reviewer may continue o
 
 **Dispatch a fresh native reviewer:**
 
-${generateCodexNativeReview(_ctx, 'spec document review')}
+${generateCodexNativeReview(ctx, 'spec document review')}
 Review all five dimensions:
 1. **Completeness** — requirements and edge cases.
 2. **Consistency** — no contradictions.
@@ -191,7 +164,7 @@ amendments. Keep both inputs consistent after each approved revision.
 
 Recording the **0H spec-review metrics** is required when writing is permitted,
 even if the reviewer failed. Resolve GSTACK_STATE_ROOT through the installed
-\`${_ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT\`; a failed or empty
+\`${ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT\`; a failed or empty
 resolution, failed mkdir or failed append stops the review before claiming completion.
 When writing is forbidden, show the actual fields as not persisted and continue
 without writing. Record skill, UTC ts, iterations, issues_found, issues_fixed,
@@ -202,9 +175,40 @@ latest attempt's reported 1–10 grade after both complete inputs; missing, inva
 or unavailable grades are JSON null. Label earlier grades prior review score.
 List unresolved issues under "## Reviewer Concerns" in the CEO summary, citing
 the owning input; show full reviewer output on request.` : `Resolve GSTACK_STATE_ROOT through the installed
-\`${_ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT\` and append best-effort
+\`${ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT\` and append best-effort
 metrics to GSTACK_STATE_ROOT/analytics/spec-review.jsonl using actual values.
 Optional telemetry does not override the calling workflow's artifact or approval gates.`}`;
+}
+
+export function generateSpecReviewLoop(_ctx: TemplateContext): string {
+  if (_ctx.skillName === 'office-hours') {
+    const officeHours = generateOfficeHoursSpecReviewLoop();
+    if (_ctx.host !== 'codex') return officeHours;
+    const legacyDispatch = `Use the Agent tool with \`run_in_background: false\` and its returned \`dispatch\`
+string unchanged as the prompt. The reviewer must Read the entire prepared prompt
+file before reviewing the design. Do not recreate the prompt, copy selected fields,
+or summarize prior findings. A parent Read does not deliver the file to the reviewer.
+The reviewer has fresh context and cannot see the brainstorming conversation.
+Its prepared contract requires a complete JSON Write and an identical JSON response.
+It protects the required coaching and Assignment sections, distinguishes unknown
+customer facts from committed behavior, and requires evidence for every prior status.`;
+    if (!officeHours.includes(legacyDispatch)) throw new Error('Codex office-hours review dispatch anchor drift');
+    return officeHours.replace(legacyDispatch, `Dispatch the complete helper-produced \`dispatch\` string as a fresh task through
+the native worker API advertised by this Codex session; do not reconstruct its
+prompt or drop the saved evidence paths. If the API is \`collaboration.spawn_agent\`,
+use \`fork_turns: "none"\`, preserve the selected main model and effort, and omit
+unselected overrides. The worker reads the entire prepared prompt file and design,
+including the complete findings schema, all five review dimensions, coaching contract
+and preceding JSON. It writes a complete verdict JSON and returns the identical JSON.
+Preserve the required coaching and Assignment sections, distinguish unknown customer
+facts from committed behavior, and require evidence for every prior status. Retain
+the actual handle and await terminal completion before checking files, fixing findings,
+or dispatching another round. A new context does not prove a different model.`)
+      .replace('If the subagent fails, times out, or is unavailable — stop the loop and present the',
+        'If the native worker fails, times out, or is unavailable — stop the loop and present the');
+  }
+  const ceo = _ctx.skillName === 'plan-ceo-review';
+  if (_ctx.host === 'codex') return generateCodexSpecReviewLoop(_ctx, ceo);
   return `${ceo ? '####' : '##'} Spec Review Loop
 
 Run an adversarial review before presenting the final document to the user.
