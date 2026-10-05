@@ -87,7 +87,7 @@ describe('shared-code skill distribution', () => {
           expect(parent).toContain('Valid INFORMATIONAL advisories remain advisory in every category, including simplification');
           expect(parent).toContain('contradictory CRITICAL/advisory metadata cannot establish a skipped defect or advisory decision');
         }
-        if (host.name !== 'codex' && !host.suppressedResolvers?.includes('REVIEW_ARMY')) {
+        if (!host.suppressedResolvers?.includes('REVIEW_ARMY')) {
           const stages = ['#### 1. Parse outputs', '#### 2. Validate severity', '#### 3. Identify and merge',
             '#### 4. Apply specialist confidence gates', '#### 5. Score and present specialists'];
           const positions = stages.map(stage => parent.indexOf(stage));
@@ -105,10 +105,13 @@ describe('shared-code skill distribution', () => {
     });
   }
 
-  test('Codex keeps the core check when Review Army is suppressed', () => {
+  test('Codex keeps the core shared-code check with native Review Army', () => {
     const codex = ALL_HOST_CONFIGS.find(host => host.name === 'codex')!;
     const review = rendered(codex, 'review');
-    expect(review).not.toContain('### Dispatch specialists');
+    expect(review).toContain('### Dispatch native specialists');
+    expect(review).toContain('### Step 4.6: Collect and merge findings');
+    expect(review).toContain('#### 1. Parse outputs');
+    expect(review).toContain('SPECIALIST REVIEW: N findings');
     expect(review).toContain('### Shared-code evaluation rubric');
     expect(review).toContain('sharedLibsFingerprint');
     expect(review).toContain('advisory');

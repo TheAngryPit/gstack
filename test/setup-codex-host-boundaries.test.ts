@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { readFileSync, mkdtempSync, mkdirSync, realpathSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve, join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -48,6 +48,7 @@ test('minimal Codex runtime includes native lifecycle assets without Claude asse
   const target = join(fixture, 'runtime');
   mkdirSync(join(source, 'hosts/codex/hooks'), { recursive: true });
   mkdirSync(join(source, 'hosts/claude/hooks'), { recursive: true });
+  writeFileSync(join(source, 'hosts/codex/hooks/native-hook'), 'codex lifecycle asset');
   const start = setup.indexOf('create_codex_runtime_root() {');
   const end = setup.indexOf('\n}', start) + 2;
   const linkDistsStart = setup.indexOf('_link_runtime_dists() {');
@@ -58,8 +59,8 @@ test('minimal Codex runtime includes native lifecycle assets without Claude asse
       encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, timeout: 5000,
     });
     expect(result.status).toBe(0);
-    expect(realpathSync(join(target, 'hosts/codex'))).toBe(realpathSync(join(source, 'hosts/codex')));
-    expect(() => realpathSync(join(target, 'hosts/claude'))).toThrow();
+    expect(readFileSync(join(target, 'hosts/codex/hooks/native-hook'), 'utf8')).toBe('codex lifecycle asset');
+    expect(existsSync(join(target, 'hosts/claude'))).toBe(false);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
@@ -78,7 +79,8 @@ for (const [first, last] of [
     const block = setup.slice(start, end + last.length);
     // Unset source/home variables plus nounset fail before any accidental
     // invocation if the host guard regresses. No real config/home is touched.
-    const result = spawnSync(bash, ['-uc', `INSTALL_CLAUDE=0\n${block}`], {
+    const result = spawnSync(bash, ['-u', '-s'], {
+      input: `INSTALL_CLAUDE=0\n${block}`,
       encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, timeout: 5000,
     });
     expect(result.status).toBe(0);

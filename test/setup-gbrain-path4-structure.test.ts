@@ -132,7 +132,7 @@ describe('setup-gbrain Path 4 (Remote MCP) — structural contract', () => {
 
   test('Step 8 explicitly says the bearer is never written to CLAUDE.md', () => {
     // Token-leak regression guard. CLAUDE.md is committed in many projects.
-    expect(claudeMdPersist).toMatch(/bearer token is \*\*never\*\* written to CLAUDE\.md/);
+    expect(claudeMdPersist).toMatch(/bearer token is \*{0,2}never\*{0,2} written to CLAUDE\.md/i);
   });
 
   test('Step 9 smoke test on Path 4 prints a placeholder, never the real token', () => {
