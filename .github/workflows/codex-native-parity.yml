@@ -26,6 +26,8 @@ jobs:
         run: |
           bun run typecheck
           bun run typecheck:test
+      - name: Preflight native portability and fork CI contracts
+        run: bun test test/module-size-ratchet.test.ts test/skill-check-host-selection.test.ts test/question-tuning-registry-path.test.ts test/shared-libs-rendering.test.ts test/free-tests-workflow-wiring.test.ts test/setup-codex-host-boundaries.test.ts
       - name: Verify native Codex parity against pinned upstream
         run: bun test test/codex-native-parity.test.ts test/codex-native-source-parity.test.ts test/codex-native-complete-output.test.ts test/codex-section-loading.test.ts
       - name: Generate every host without installing
