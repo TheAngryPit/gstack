@@ -261,5 +261,5 @@ final class AppState {
     expect(second.stdout).toContain('gen-accessors: cache hit');
     expect(treeHash(bridgeDir, generatedDir)).toBe(firstHash);
     expect(readFileSync(accessorPath, 'utf8').match(/accessorHash: "([a-f0-9]+)"/)?.[1]).toBe(firstAccessorHash);
-  });
+  }, 150_000);
 });

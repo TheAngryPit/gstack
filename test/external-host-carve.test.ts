@@ -54,14 +54,10 @@ describe('C4: external section pointers', () => {
     test(`${config.name}: ship and plan-ceo-review point to sections in the installed layout`, () => {
       const ship = sectionPath(context(config.name, 'ship'), 'ship', 'tests');
       const plan = sectionPath(context(config.name, 'plan-ceo-review'), 'plan-ceo-review', 'review-sections');
-      if (config.name === 'codex') {
-        expect(ship).toBe('`$GSTACK_ROOT/.agents/skills/gstack-ship/sections/tests.md`');
-        expect(plan).toBe('`$GSTACK_ROOT/.agents/skills/gstack-plan-ceo-review/sections/review-sections.md`');
-      } else {
-        expect(ship).toBe('`sections/tests.md` relative to the installed `gstack-ship` SKILL.md directory');
-        expect(plan).toBe('`sections/review-sections.md` relative to the installed `gstack-plan-ceo-review` SKILL.md directory');
-        expect(ship).not.toContain('$GSTACK_ROOT');
-      }
+      expect(ship).toBe('`sections/tests.md` relative to the installed `gstack-ship` SKILL.md directory');
+      expect(plan).toBe('`sections/review-sections.md` relative to the installed `gstack-plan-ceo-review` SKILL.md directory');
+      expect(ship).not.toContain('$GSTACK_ROOT');
+      expect(plan).not.toContain('$GSTACK_ROOT');
     });
   }
 
@@ -81,13 +77,10 @@ describe('C4: ship and plan-ceo-review are carved on every external host', () =>
           ...manifest.sections.map(s => fs.readFileSync(path.join(dir, 'sections', s.file), 'utf8'))].join('\n');
         expect(text).not.toMatch(new RegExp(`\\$GSTACK_ROOT/${skill}/sections/`));
         const relativePointers = [...text.matchAll(new RegExp(`\`sections/([\\w.-]+)\` relative to the installed \`gstack-${skill}\` SKILL\\.md directory`, 'g'))].map(m => m[1]);
-        const rootedPointers = config.name === 'codex'
-          ? [...text.matchAll(new RegExp(`\\$GSTACK_ROOT/\\.agents/skills/gstack-${skill}/sections/([\\w.-]+)`, 'g'))].map(m => m[1])
-          : [];
-        const pointers = [...new Set([...relativePointers, ...rootedPointers])];
-        expect(pointers.length).toBeGreaterThan(0);
+        const rootedPointer = new RegExp(`\\$GSTACK_ROOT/(?:\\.agents/skills/)?gstack-${skill}/sections/[\\w.-]+`);
+        expect(text).not.toMatch(rootedPointer);
+        expect(relativePointers.length).toBeGreaterThan(0);
         for (const file of relativePointers) expect(fs.existsSync(path.join(dir, 'sections', file)), `${skill}/sections/${file}`).toBe(true);
-        for (const file of rootedPointers) expect(fs.existsSync(path.join(renders.all, '.agents', 'skills', `gstack-${skill}`, 'sections', file)), `${skill}/sections/${file}`).toBe(true);
         expect(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8')).toContain('## Section index');
       }
     });
@@ -127,7 +120,8 @@ describe('C4: ship and plan-ceo-review are carved on every external host', () =>
 
     const autoplanDir = skillDir(codex, renders.all, 'autoplan');
     const ceoPhase = fs.readFileSync(path.join(autoplanDir, 'sections', 'ceo-phase.md'), 'utf8');
-    expect(ceoPhase).toContain('$GSTACK_ROOT/.agents/skills/gstack-autoplan/sections/phase-close.md');
+    expect(ceoPhase).toContain('`sections/phase-close.md` relative to the installed `gstack-autoplan` SKILL.md directory');
+    expect(ceoPhase).not.toContain('$GSTACK_ROOT/.agents/skills/gstack-autoplan/sections/phase-close.md');
     const closePath = path.join(autoplanDir, 'sections', 'phase-close.md');
     expect(fs.existsSync(closePath)).toBe(true);
     const close = fs.readFileSync(closePath, 'utf8').replace(/\s+/g, ' ');
