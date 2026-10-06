@@ -106,6 +106,21 @@ describe.skipIf(process.platform === 'win32')('CSO Docker nonrecursive bind moun
     expect(args).toContain(`type=bind,src=${path.join(fs.realpathSync(f.root), path.basename(f.socket))},dst=/run/cso-registry.sock,readonly,bind-recursive=disabled`);
   });
 
+  test('registry socket rejects final symlinks and comma paths before Docker create', async () => {
+    const f = fixture(), alias = path.join(f.root, 'socket-alias.sock');
+    fs.symlinkSync(f.socket, alias);
+    const create = (registrySocket: string) => f.group.createContainer({ role: 'app', image: f.image, command: ['/bin/sleep', '1'], registrySocket });
+    await expect(create(alias)).rejects.toThrow('Registry broker mount must be one owned Unix socket');
+    const commaDirectory = path.join(f.root, 'comma,directory');
+    fs.mkdirSync(commaDirectory, { mode: 0o700 });
+    const commaSocket = path.join(commaDirectory, 'r.sock');
+    const listener = Bun.listen({ unix: commaSocket, socket: { data() {} } });
+    restores.push(() => listener.stop(true));
+    await expect(create(commaSocket)).rejects.toThrow('Registry broker mount must be one owned Unix socket');
+    expect(f.calls.some(call => call[0] === 'create')).toBe(false);
+    expect(fs.existsSync(path.join(f.root, 'resources.journal'))).toBe(false);
+  });
+
   test('unsafe bind paths and permissions fail before Docker create', async () => {
     const f = fixture(), link = path.join(f.root, 'link');
     fs.symlinkSync(f.directory, link);
