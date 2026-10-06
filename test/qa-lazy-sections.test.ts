@@ -16,6 +16,7 @@ const ROOT = path.resolve(import.meta.dir, '..');
 const owned = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-qa-sections-'));
 const rendered = path.join(owned, 'rendered');
 const setup = fs.readFileSync(path.join(ROOT, 'setup'), 'utf8');
+const registry = fs.readFileSync(path.join(ROOT, 'bin/gstack-install-registry.sh'), 'utf8');
 const QA_SKILLS = ['qa', 'qa-only'];
 const REPORT_TEMPLATE = fs.readFileSync(path.join(ROOT, 'qa/templates/functional-report-template.md'), 'utf8');
 const GENERATED_REPORT = '<!-- AUTO-GENERATED from qa/templates/functional-report-template.md — do not edit directly -->\n<!-- Regenerate: bun run gen:skill-docs -->\n' + REPORT_TEMPLATE;
@@ -36,6 +37,13 @@ function setupFunction(name: string): string {
   const end = setup.indexOf('\n}\n', start);
   if (start < 0 || end < 0) throw new Error(`Missing setup function ${name}`);
   return setup.slice(start, end + 2);
+}
+
+function registryFunction(name: string): string {
+  const start = registry.indexOf(`${name}() {`);
+  const end = registry.indexOf('\n}\n', start);
+  if (start < 0 || end < 0) throw new Error(`Missing registry function ${name}`);
+  return registry.slice(start, end + 2);
 }
 
 beforeAll(async () => {
@@ -539,6 +547,7 @@ describe('installed QA pointers', () => {
     '_owned_for_windows_refresh', '_sidecar_root_user_owned', '_prune_stale_generated', '_skill_source_exists',
     '_link_runtime_dists', '_copy_skill_md', '_skill_copy_hash', '_skill_copy_unmodified', '_preserve_skill_copy_edits', '_record_skill_copies',
   ].map(setupFunction).join('\n')
+    + '\n' + ['_gstack_skill_copies_lock', '_gstack_skill_copies_unlock'].map(registryFunction).join('\n')
     // Install-registry rows (setup's _setup_arm_* / _setup_row) are not under test here.
     + '\n_setup_arm_begin() { :; }\n_setup_arm_publish() { :; }\n_setup_row() { :; }';
   const kiroStart = setup.indexOf('# 6. Install for Kiro CLI');
