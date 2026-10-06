@@ -94,7 +94,7 @@ describe('D2: navigation guard', () => {
 
   test('a missing click target preserves its action timeout without another locator wait', async () => {
     await run('goto', [`${base}/safe`]);
-    await expect(run('click', ['#missing'])).rejects.toThrow(/click: Timeout 5000ms exceeded/);
+    expect(await refusal('click', ['#missing'])).toMatch(/click: Timeout 5000ms exceeded/);
     expect(bm.getActiveSession().getPage().url()).toBe(`${base}/safe`);
   }, 12_000);
 
