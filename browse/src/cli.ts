@@ -2109,9 +2109,6 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
   // Playwright — but on macOS 26 the GPU process can survive that close and
   // spin at ~800% CPU forever. The state snapshot read above still carries
   // the launched child's identity; reap a verified survivor.
-  // Reap only after the daemon has finished its own shutdown: killing Chromium
-  // while the daemon is still closing reads as a crash, and the daemon exits(1)
-  // without removing its state file.
   if (command === 'stop') {
     const daemonStopped = await reapAfterDaemonShutdown(state);
     if (daemonStopped) {

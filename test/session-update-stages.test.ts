@@ -276,7 +276,6 @@ describe.skipIf(process.platform === 'win32')('gstack-session-update Bun floor (
     await waitFor(fx, /HELD bun-too-old/, 2);
     expect(head(fx)).toBe(before);
 
-    // After `bun upgrade` the next session start resumes the update on its own.
     expireThrottle(fx);
     runHook(fx, { bun: '1.4.0' });
     await waitFor(fx, /UPDATED from=1\.0\.0 to=1\.1\.0/);

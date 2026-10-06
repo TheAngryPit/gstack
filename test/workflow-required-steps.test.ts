@@ -1,12 +1,3 @@
-/**
- * Required workflow steps (C1 follow-up, 2026-10-04). The qa workflow judge
- * passed a /qa bundle with "Phase 10: Report" removed and the review judge
- * passed /review with "Step 3: Get the diff" removed, so the judges do not
- * cover a missing step. This deterministic check does: every pinned step or
- * phase heading of the judged workflow skills must still be in the generated
- * SKILL.md or section file, in order. The pinned list was derived from the
- * templates' step headings; a new step heading must be added to it.
- */
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';

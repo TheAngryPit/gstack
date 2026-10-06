@@ -41,9 +41,6 @@ describe('upgrade setup recovery ownership', () => {
   });
 });
 
-// The approved updater replaces the old inline Git pull flow. Keep a focused
-// guard for the current manual-origin route; the legacy Bun-floor runtime
-// behavior remains covered by session-update-stages.test.ts.
 test('manual origins cannot enter trusted-fork activation', () => {
   expect(template).toContain('Other origins stay manual');
   expect(template).toContain('UPDATE_LANE=manual-origin');

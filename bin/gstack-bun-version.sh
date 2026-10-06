@@ -1,9 +1,8 @@
 # shellcheck shell=bash
 # gstack-bun-version.sh — the one source for the Bun versions gstack needs.
 # Sourced, never executed: ./setup refuses or warns from it before writing
-# anything, and bin/gstack-session-update and /gstack-upgrade read the
-# INCOMING release's floor (gstack_bun_incoming_hold) before advancing a
-# live checkout. test/bun-version-drift.test.ts
+# anything, and bin/gstack-session-update-legacy checks the incoming release's
+# floor before advancing a live checkout. test/bun-version-drift.test.ts
 # keeps it equal to package.json engines.bun, every CI pin, setup's install
 # hint and README. Bash 3.2 builtins only.
 #
@@ -58,8 +57,8 @@ gstack_bun_status() {
   fi
 }
 
-# gstack_bun_incoming_hold <git-dir> <rev> — the pre-advance check shared by
-# the auto-updater and /gstack-upgrade. Reads the floor from <rev>'s copy of
+# gstack_bun_incoming_hold <git-dir> <rev> — the pre-advance check used by
+# the legacy session updater. Reads the floor from <rev>'s copy of
 # this file and checks the `bun` setup will run (first on PATH). Below that
 # floor it prints the held reason and returns 0; otherwise it prints nothing
 # and returns 1 (no bun, no floor in <rev>, or an unparseable version, which
