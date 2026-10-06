@@ -97,6 +97,15 @@ describe.skipIf(process.platform === 'win32')('CSO Docker nonrecursive bind moun
     expect(fs.readFileSync(path.join(f.root, 'resources.journal'), 'utf8')).toBe(`container:${f.id}\n`);
   });
 
+  test('registry socket resolves a symlinked parent before Docker create', async () => {
+    const f = fixture(), alias = path.join(f.root, 'socket-parent');
+    fs.symlinkSync(f.root, alias, 'dir');
+    const socket = path.join(alias, path.basename(f.socket));
+    expect(await f.group.createContainer({ role: 'app', image: f.image, command: ['/bin/sleep', '1'], registrySocket: socket })).toBe(f.id);
+    const args = f.calls.find(call => call[0] === 'create')!;
+    expect(args).toContain(`type=bind,src=${path.join(fs.realpathSync(f.root), path.basename(f.socket))},dst=/run/cso-registry.sock,readonly,bind-recursive=disabled`);
+  });
+
   test('unsafe bind paths and permissions fail before Docker create', async () => {
     const f = fixture(), link = path.join(f.root, 'link');
     fs.symlinkSync(f.directory, link);
