@@ -79,6 +79,12 @@ describe('D2: navigation guard', () => {
     expect(bm.getActiveSession().getPage().url()).toBe('about:blank');
   }, 30_000);
 
+  test('a missing click target preserves its action timeout without another locator wait', async () => {
+    await run('goto', [`${base}/safe`]);
+    await expect(run('click', ['#missing'])).rejects.toThrow(/click: Timeout 5000ms exceeded/);
+    expect(bm.getActiveSession().getPage().url()).toBe(`${base}/safe`);
+  }, 12_000);
+
   test('ordinary redirects and the next command still work after a block', async () => {
     const result = await run('goto', [`${base}/to-safe`]);
     expect(result).toContain('Navigated to');
