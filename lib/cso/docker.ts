@@ -1,8 +1,7 @@
 import * as fs from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { canonical, CsoError, MAX_OUTPUT, sha256 } from './contracts';
 import { spawn } from 'node:child_process';
-import { dirname } from 'node:path';
 import { GROUP_LIMITS, Role, ROLE_LIMITS, Lease, admit, markSupervised, release, total } from './admission';
 import { childEnvironment, commandTimeoutMs, executable, runProcess } from './process';
 import { secureDirectory } from './state';
@@ -795,14 +794,11 @@ export class DockerGroup {
     }
     if (spec.readonlyArchiveDirectory) directoryMount(spec.readonlyArchiveDirectory, '/archives', true);
     if (spec.registrySocket) {
-      const stat = fs.lstatSync(spec.registrySocket),
-        real = fs.realpathSync(spec.registrySocket);
-      if (
-        !stat.isSocket() ||
-        stat.isSymbolicLink() ||
-        real.includes(',') ||
-        (process.getuid && stat.uid !== process.getuid())
-      )
+      const stat = fs.lstatSync(spec.registrySocket);
+      if (!stat.isSocket() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid()))
+        throw new CsoError('UNSAFE_PATH', 'Registry broker mount must be one owned Unix socket');
+      const real = join(fs.realpathSync(dirname(spec.registrySocket)), basename(spec.registrySocket));
+      if (real.includes(','))
         throw new CsoError('UNSAFE_PATH', 'Registry broker mount must be one owned Unix socket');
       args.push(
         '--mount',
