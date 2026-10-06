@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { runBashScript } from './helpers/bash-script';
 
 const setup = fs.readFileSync(path.resolve(import.meta.dir, '../setup'), 'utf8');
+const registry = fs.readFileSync(path.resolve(import.meta.dir, '../bin/gstack-install-registry.sh'), 'utf8');
 const banner = '<!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->\n<!-- Regenerate: bun run gen:skill-docs -->';
 const skill = (name: string, body: string) => `---\nname: ${name}\n---\n${banner}\n${body}\n`;
 const put = (file: string, value: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value); };
@@ -14,6 +15,12 @@ const fn = (name: string) => {
   if (start < 0 || end < 0) throw new Error(`missing setup helper: ${name}`);
   return setup.slice(start, end + 2);
 };
+const registryFn = (name: string) => {
+  const start = registry.indexOf(`${name}() {`);
+  const end = registry.indexOf('\n}\n', start);
+  if (start < 0 || end < 0) throw new Error(`missing registry helper: ${name}`);
+  return registry.slice(start, end + 2);
+};
 const blockStart = setup.indexOf('# 6. Install for Kiro CLI');
 const block = setup.slice(blockStart, setup.indexOf('# 6b.', blockStart));
 const helpers = [
@@ -22,7 +29,8 @@ const helpers = [
   '_gstack_generated_header', '_backup_skill_md', '_prune_stale_generated',
   '_skill_source_exists', '_owned_for_windows_refresh', '_cleanup_weak_dir',
   '_copy_skill_md', '_skill_copy_hash', '_skill_copy_unmodified', '_preserve_skill_copy_edits', '_record_skill_copies',
-].map(fn).join('\n');
+  '_gstack_skill_copies_lock', '_gstack_skill_copies_unlock',
+].map((name) => name.startsWith('_gstack_skill_copies_') ? registryFn(name) : fn(name)).join('\n');
 
 describe.skipIf(process.platform === 'win32')('native Kiro setup installation', () => {
   for (const windowsCopy of [0, 1]) {

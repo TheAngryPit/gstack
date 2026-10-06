@@ -1,284 +1,582 @@
 #!/usr/bin/env bash
-# gstack-session-update — auto-update gstack on session start (team mode)
-#
-# Called by Claude Code SessionStart hook. Must be fast and non-fatal.
-# The entire update runs in background (forked). The hook itself exits
-# immediately so session startup is never delayed.
-#
-# Stages (B11): pull, setup and migrations are tracked separately. The
-# "just upgraded" marker is written only when every stage succeeded. A failed
-# stage is persisted in $STATE_DIR/session-update-pending and retried even
-# when HEAD did not move, with backoff (the update-check interval, then 6h,
-# then 24h). While a stage is pending, each session start prints one line
-# naming it and the repair command; nothing else is ever printed.
-#
-# Exit 0 always — errors must never block a Claude Code session.
-
+# Exact-SHA, CI-gated updater for registered Codex installs on the trusted fork.
 set +e
 
 GSTACK_DIR="${GSTACK_DIR:-$HOME/.claude/skills/gstack}"
-# Hook: source the state-root twin (never spawn gstack-paths); a broken
-# install exits 0 silently, like every other error here.
-. "$(cd "$(dirname "$0")" && pwd)/gstack-state-root.sh" 2>/dev/null || exit 0  # best-effort: must never block a session start
-STATE_DIR="$(gstack_state_root; printf x)"; STATE_DIR="${STATE_DIR%x}"
+_requested_gstack_dir="$GSTACK_DIR"
+if [ "${1:-}" != "--recover-interrupted" ]; then
+  _origin="$(git -C "$GSTACK_DIR" config --get remote.origin.url 2>/dev/null || true)"
+  _origin="${_origin%/}"
+  case "$_origin" in
+    https://github.com/TheAngryPit/gstack|https://github.com/TheAngryPit/gstack.git|git@github.com:TheAngryPit/gstack|git@github.com:TheAngryPit/gstack.git|ssh://git@github.com/TheAngryPit/gstack|ssh://git@github.com/TheAngryPit/gstack.git) ;;
+    *)
+      if [ "${1:-}" = "--apply-candidate" ]; then
+        echo "UPDATE_DEFERRED untrusted_origin; source and registered runtimes were retained"
+        exit 0
+      fi
+      [ -x "$GSTACK_DIR/bin/gstack-session-update-legacy" ] \
+        && exec bash "$GSTACK_DIR/bin/gstack-session-update-legacy" "$@"
+      exit 0
+      ;;
+  esac
+fi
 
-# Egress receipt helpers (_receipted_git): fail-open — an update pull must
-# never block a session over a receipt hiccup.
-. "$(cd "$(dirname "$0")" && pwd)/gstack-egress-lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || exit 0
+if [ -z "$GSTACK_DIR" ]; then GSTACK_DIR="$HOME/.claude/skills/gstack"; fi
+GSTACK_DIR="$(cd "$GSTACK_DIR" 2>/dev/null && pwd -P)" || GSTACK_DIR="$_requested_gstack_dir"
+if [ -f "$GSTACK_DIR/bin/gstack-state-root.sh" ]; then
+  LIB_DIR="$GSTACK_DIR/bin"
+else
+  _state_hint="${GSTACK_STATE_ROOT:-${GSTACK_HOME:-${GSTACK_STATE_DIR:-$HOME/.gstack}}}"
+  LIB_DIR="$_state_hint/session-update-recovery/lib"
+  [ "${1:-}" = --recover-interrupted ] && [ -f "$LIB_DIR/gstack-state-root.sh" ] || exit 0
+fi
+. "$LIB_DIR/gstack-state-root.sh" 2>/dev/null || exit 0 # best-effort: without the state helper the optional session update cannot run safely
+gstack_state_root_select
+STATE_DIR="$_gstack_sr_root"
+GSTACK_STATE_ROOT="$STATE_DIR"
+export GSTACK_STATE_ROOT
+. "$LIB_DIR/gstack-install-registry.sh" 2>/dev/null || exit 0 # best-effort: without registry helpers the optional update cannot identify installs safely
+RECOVERY_ONLY=0
+if [ "${1:-}" = --recover-interrupted ]; then
+  RECOVERY_ONLY=1
+fi
+
 THROTTLE_FILE="$STATE_DIR/.last-session-update"
 LOCK_DIR="$STATE_DIR/.setup-lock"
 LOG_FILE="$STATE_DIR/analytics/session-update.log"
 PENDING_FILE="$STATE_DIR/session-update-pending"
-THROTTLE_SECONDS=3600  # 1 hour
+JOURNAL_FILE="$STATE_DIR/session-update-transaction"
+MARKER_FILE="$STATE_DIR/just-upgraded-from"
+THROTTLE_SECONDS=3600
+TASK_TMPDIR=/tmp
+[ -z "$TMPDIR" ] || TASK_TMPDIR="$TMPDIR"
+MANUAL_SHA=""
+UPDATE_SUCCEEDED=0
+
+install_recovery_runner() {
+  local bundle="$STATE_DIR/session-update-recovery" lib="$STATE_DIR/session-update-recovery/lib" tmp
+  [ "$RECOVERY_ONLY" = 0 ] || return 0
+  mkdir -p "$lib" || return 1
+  cp "$GSTACK_DIR/bin/gstack-session-update" "$lib/gstack-session-update" || return 1
+  cp "$GSTACK_DIR/bin/gstack-state-root.sh" "$lib/gstack-state-root.sh" || return 1
+  cp "$GSTACK_DIR/bin/gstack-install-registry.sh" "$lib/gstack-install-registry.sh" || return 1
+  chmod 700 "$lib/gstack-session-update" || return 1
+  tmp="$bundle/source-path.tmp.$$"
+  printf '%s\n' "$GSTACK_DIR" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$bundle/source-path" || return 1
+  tmp="$bundle/state-path.tmp.$$"
+  printf '%s\n' "$STATE_DIR" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$bundle/state-path" || return 1
+  cat > "$bundle/recover.tmp.$$" <<'RECOVERY'
+#!/usr/bin/env bash
+set -eu
+RECOVERY_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+export GSTACK_STATE_ROOT="$(cat "$RECOVERY_DIR/state-path")"
+export GSTACK_DIR="$(cat "$RECOVERY_DIR/source-path")"
+exec bash "$RECOVERY_DIR/lib/gstack-session-update" --recover-interrupted
+RECOVERY
+  chmod 700 "$bundle/recover.tmp.$$" && mv -f "$bundle/recover.tmp.$$" "$bundle/recover" || return 1
+  [ -x "$bundle/recover" ]
+}
+
+codex_only_registered_source() {
+  local host scope project dest root source version prefix render updated model commit
+  while IFS=$'\t' read -r host scope project dest root source version prefix render updated model commit; do
+    [ "$source" = "$GSTACK_DIR" ] || continue
+    [ "$host" = codex ] || return 1
+  done < <(gstack_install_registry_rows)
+  return 0
+}
+runtime_artifacts_match() {
+  local sha="$1" binary metadata artifact_sha=""
+  for binary in browse/dist/browse design/dist/design make-pdf/dist/pdf; do
+    [ -x "$GSTACK_DIR/$binary" ] || return 1
+    metadata="$(cat "$GSTACK_DIR/${binary%/*}/.version" 2>/dev/null)"
+    [[ "$metadata" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+    [ -z "$artifact_sha" ] && artifact_sha="$metadata"
+    [ "$metadata" = "$artifact_sha" ] || return 1
+  done
+  git -C "$GSTACK_DIR" cat-file -e "$artifact_sha^{commit}" 2>/dev/null || return 1
+  git -C "$GSTACK_DIR" merge-base --is-ancestor "$artifact_sha" "$sha" 2>/dev/null || return 1
+  git -C "$GSTACK_DIR" diff --quiet "$artifact_sha" "$sha" -- \
+    browse design make-pdf lib package.json bun.lock bun.lockb scripts/build.sh \
+    scripts/build-app.sh scripts/build-cso.sh scripts/build-cso-windows.ps1 \
+    scripts/write-version-files.sh bin/gstack-global-discover.ts
+}
 
 log_entry() {
   mkdir -p "$(dirname "$LOG_FILE")"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $1" >> "$LOG_FILE" 2>/dev/null || true  # best-effort: logging never blocks a session
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$LOG_FILE" 2>/dev/null || true
 }
-pending_get() { sed -n "s/^$1=//p" "$PENDING_FILE" 2>/dev/null | head -1; }
-# pending_save — persist the P_* stage state; nothing pending removes the file.
-pending_save() {
-  if [ -z "$P_STAGES" ] && [ -z "$P_PULL" ]; then rm -f "$PENDING_FILE"; return 0; fi
-  printf 'stages=%s\nfrom=%s\nfailures=%s\nnext=%s\nreason=%s\npull=%s\n' \
-    "$P_STAGES" "$P_FROM" "$P_FAILURES" "$P_NEXT" "$P_REASON" "$P_PULL" > "$PENDING_FILE.tmp.$$" \
-    && mv -f "$PENDING_FILE.tmp.$$" "$PENDING_FILE"
+candidate_value() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$STATE_DIR/update-candidate" 2>/dev/null; }
+pending_message() {
+  [ -f "$PENDING_FILE" ] || return 0
+  _reason="$(sed -n 's/^reason=//p' "$PENDING_FILE" | head -1)"
+  [ -z "$_reason" ] || echo "gstack auto-update is deferred ($_reason); no files were discarded. Retry with /gstack-upgrade or wait for the next session."
 }
-
-# ── Guard: gstack must be a git repo ──
-if [ ! -d "$GSTACK_DIR/.git" ]; then
-  exit 0
-fi
-
-# ── Guard: team mode must be enabled ──
-AUTO=$("$GSTACK_DIR/bin/gstack-config" get auto_upgrade 2>/dev/null || true)
-if [ "$AUTO" != "true" ]; then
-  exit 0
-fi
-
-# ── A stage that did not finish: one line per session start, with the fix ──
-if [ -f "$PENDING_FILE" ]; then
-  _P_STAGES="$(pending_get stages)"; _P_REASON="$(pending_get reason)"; _P_PULL="$(pending_get pull)"
-  if [ -n "$_P_STAGES" ]; then
-    _P_FIX="cd $GSTACK_DIR && ./setup"
-    case "$_P_REASON" in bun*) _P_FIX="install Bun (https://bun.sh), then $_P_FIX" ;; esac
-    echo "gstack auto-update: ${_P_STAGES} did not finish (${_P_REASON:-unknown reason}); installed skills may be out of date. gstack retries automatically. Fix now: $_P_FIX"
-  elif [ -n "$_P_PULL" ]; then
-    echo "gstack auto-update: git pull did not finish ($_P_PULL); gstack is not updating. Fix now: cd $GSTACK_DIR && git pull --ff-only && ./setup"
+defer_update() {
+  local reason="$1" failures=0 delay next now tmp
+  if [ -n "$MANUAL_SHA" ]; then printf 'reason=%s\n' "$reason" > "$PENDING_FILE"; return 0; fi
+  failures="$(sed -n 's/^failures=//p' "$PENDING_FILE" 2>/dev/null | head -1)"
+  case "$failures" in ''|*[!0-9]*) failures=0 ;; esac
+  failures=$((failures + 1))
+  case "$failures" in 1) delay=3600 ;; 2) delay=21600 ;; *) delay=86400 ;; esac
+  now="$(date +%s)"; next=$((now + delay)); tmp="$PENDING_FILE.tmp.$$"
+  printf 'reason=%s\nfailures=%s\nnext=%s\n' "$reason" "$failures" "$next" > "$tmp" \
+    && chmod 600 "$tmp" && mv -f "$tmp" "$PENDING_FILE"
+}
+safe_repo_path() {
+  local tab newline
+  case "$1" in /*) ;; *) return 1 ;; esac
+  tab=$'\t'; newline=$'\n'
+  case "$1" in *"$tab"*|*"$newline"*) return 1 ;; esac
+  [ "$1" != / ]
+}
+link_points_into_checkout() {
+  local entry="$1" link target
+  [ -L "$entry" ] || return 1
+  link="$(readlink "$entry" 2>/dev/null)" || return 1
+  case "$link" in /*) target="$link" ;; *) target="$(dirname "$entry")/$link" ;; esac
+  case "$target" in "$GSTACK_DIR"/*) return 0 ;; esac
+  return 1
+}
+link_points_into_registered_render() {
+  local entry="$1" link target host scope project dest root source version prefix render updated model commit derived
+  [ -L "$entry" ] || return 1
+  link="$(readlink "$entry" 2>/dev/null)" || return 1
+  case "$link" in /*) target="$link" ;; *) target="$(dirname "$entry")/$link" ;; esac
+  while IFS=$'\t' read -r host scope project dest root source version prefix render updated model commit; do
+    [ "$host" = codex ] && [ "$source" = "$GSTACK_DIR" ] && [ "$root" = "$dest/gstack" ] || continue
+    case "$render" in /*) case "$target" in "$render"/*) return 0 ;; esac ;; esac
+    derived="$(gstack_install_render_dir codex "$root" 2>/dev/null)" || continue
+    case "$target" in "$derived"/*) return 0 ;; esac
+  done < <(gstack_install_registry_rows)
+  return 1
+}
+owned_codex_entry() {
+  local entry="$1" owner
+  link_points_into_checkout "$entry" && return 0
+  [ -L "$entry/SKILL.md" ] && link_points_into_checkout "$entry/SKILL.md" && return 0
+  link_points_into_registered_render "$entry" && return 0
+  if [ -f "$entry/.gstack-owned" ]; then
+    owner="$(cat "$entry/.gstack-owned" 2>/dev/null)"
+    [ "$owner" = "$GSTACK_DIR" ] && return 0
   fi
-fi
-
-# ── Throttle: skip if checked recently ──
-if [ -f "$THROTTLE_FILE" ]; then
-  LAST=$(cat "$THROTTLE_FILE" 2>/dev/null || echo 0)
-  NOW=$(date +%s)
-  ELAPSED=$(( NOW - LAST ))
-  if [ "$ELAPSED" -lt "$THROTTLE_SECONDS" ]; then
-    exit 0
-  fi
-fi
-
-# ── Fork to background: zero latency on session start ──
-(
-  # Prevent git from prompting for credentials (would hang the background process)
-  export GIT_TERMINAL_PROMPT=0
-
-  mkdir -p "$STATE_DIR"
-
-  # ── Acquire lockfile (skip if another session is running setup) ──
-  #
-  # Staleness has two independent detectors (#2613):
-  #  1. PID liveness — the pidfile records the HOLDER subshell's PID and a
-  #     dead PID means reclaim. ($BASHPID, never $$: $$ expands to the PARENT
-  #     hook's PID even inside this backgrounded subshell, and the parent
-  #     exits immediately — so every later session judged the lock stale and
-  #     rm -rf'd a LIVE holder's lock, letting concurrent updaters in.)
-  #  2. Hard TTL on the heartbeat mtime — reclaim regardless of kill -0, so a
-  #     recycled PID or a hung holder can't wedge the lock forever. The
-  #     holder touches the pidfile at step boundaries (after the pull, after
-  #     setup), so a legitimately-slow run keeps itself alive. The TTL also
-  #     bounds the missing/empty-pidfile states: inside the window they mean
-  #     "just acquired, between mkdir and echo" and are respected.
-  LOCK_TTL_MINUTES=30
-  lock_is_expired() {
-    _hb="$LOCK_DIR/pid"
-    [ -f "$_hb" ] || _hb="$LOCK_DIR"
-    [ -n "$(find "$_hb" -maxdepth 0 -mmin +$LOCK_TTL_MINUTES 2>/dev/null)" ]
-  }
-  # Reclaim is TOCTOU-safe via atomic mv-aside: `rm -rf` then `mkdir` lets TWO
-  # contenders both judge the lock stale, both remove it, and both win the
-  # mkdir (one rm can land between the other's rm and mkdir). `mv` of the lock
-  # dir is atomic — exactly one contender's mv succeeds; the loser's mv fails
-  # (ENOENT) and it backs off. The winner reaps the moved-aside dir at leisure.
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    if lock_is_expired; then
-      mv "$LOCK_DIR" "$LOCK_DIR.reap.$$" 2>/dev/null || { log_entry "SKIP lock_contested"; exit 0; }
-      rm -rf "$LOCK_DIR.reap.$$" 2>/dev/null
-      mkdir "$LOCK_DIR" 2>/dev/null || { log_entry "SKIP lock_contested"; exit 0; }
-      log_entry "RECLAIMED lock_ttl_expired"
-    elif [ -f "$LOCK_DIR/pid" ]; then
-      LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo 0)
-      if [ "$LOCK_PID" -gt 0 ] 2>/dev/null && ! kill -0 "$LOCK_PID" 2>/dev/null; then
-        # Stale lock — mv aside atomically (see reclaim note above), re-acquire
-        mv "$LOCK_DIR" "$LOCK_DIR.reap.$$" 2>/dev/null || { log_entry "SKIP lock_contested"; exit 0; }
-        rm -rf "$LOCK_DIR.reap.$$" 2>/dev/null
-        mkdir "$LOCK_DIR" 2>/dev/null || { log_entry "SKIP lock_contested"; exit 0; }
-      else
-        # Live holder — or an empty/non-numeric pidfile inside the TTL
-        # window (the -gt test fails on garbage, landing here by design).
-        log_entry "SKIP locked_by=$LOCK_PID"
-        exit 0
-      fi
-    else
-      # Missing pidfile inside the TTL window: just-acquired (mkdir→echo race).
-      log_entry "SKIP locked_no_pid"
-      exit 0
-    fi
-  fi
-
-  # Write the HOLDER's PID for stale lock detection (see #2613 note above;
-  # macOS ships bash 3.2 with no BASHPID — the sh child's $PPID IS this
-  # subshell, so the fallback is exact there). MYPID is captured once at
-  # write time so the trap below can prove ownership before removing.
-  MYPID="${BASHPID:-$(sh -c 'echo $PPID')}"
-  echo "$MYPID" > "$LOCK_DIR/pid" 2>/dev/null
-
-  # In-flight heartbeat: the step-boundary touches below only fire AFTER the
-  # pull / setup return, so a legitimately-slow step (cold clone, huge setup)
-  # older than the TTL got reclaimed while ALIVE. This background loop
-  # freshens the pidfile mtime every 5 minutes for as long as we still own
-  # the lock (ownership re-checked each beat: if another updater reclaimed
-  # and wrote its own pid, the loop exits instead of touching THEIR file).
-  ( while :; do sleep 300; [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$MYPID" ] || exit 0; touch "$LOCK_DIR/pid" 2>/dev/null; done ) &
-  HB_PID=$!
-
-  # Clean up lock on exit — ownership-checked: after a TTL reclaim by another
-  # updater, $LOCK_DIR belongs to the NEW holder, and an unconditional rm -rf
-  # here would delete the live holder's lock (cascading reclaims). Remove the
-  # lock ONLY while $LOCK_DIR/pid still contains MYPID; always stop the
-  # heartbeat.
-  trap 'kill "$HB_PID" 2>/dev/null; [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$MYPID" ] && rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
-
-  # ── Pull latest ──
-  OLD_HEAD=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)
-  UPDATE_URL=$(git -C "$GSTACK_DIR" remote get-url origin 2>/dev/null || echo "")
-  UPDATE_HOST="${UPDATE_URL#*://}"; UPDATE_HOST="${UPDATE_HOST#*@}"; UPDATE_HOST="${UPDATE_HOST%%[/:]*}"
-  # --autostash: locally-patched TRACKED files are the NORM on installs, not
-  # the exception — skill-prefix mode rewrites frontmatter names and
-  # `gstack-config gbrain-refresh` renders brain blocks into SKILL.md. A bare
-  # --ff-only refuses over those edits, so auto-upgrade wedged permanently
-  # (observed: 308 consecutive PULL_FAILED with the reason discarded, #2566).
-  # Capture stderr: the log must carry WHY a pull failed, never just the code.
-  PULL_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/gstack-session-pull-XXXXXX" 2>/dev/null || echo "")
-  GSTACK_HOME="$STATE_DIR" _receipted_git open session-update "${UPDATE_HOST:-unknown}" gstack-self-update-pull "auto_upgrade=true" \
-    bash -c 'git -C "$1" pull --ff-only --autostash -q 2>"${2:-/dev/null}"' _ "$GSTACK_DIR" "$PULL_ERR_FILE"
-  PULL_EXIT=$?
-  NEW_HEAD=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)
-
-  # Heartbeat: pull done — keep the TTL clock fresh for the setup step.
-  touch "$LOCK_DIR/pid" 2>/dev/null
-
-  # Record check time regardless of outcome
-  date +%s > "$THROTTLE_FILE" 2>/dev/null
-
-  P_STAGES="$(pending_get stages)"; P_FROM="$(pending_get from)"; P_REASON="$(pending_get reason)"
-  P_FAILURES="$(pending_get failures)"; P_NEXT="$(pending_get next)"; P_PULL=""
-  case "$P_FAILURES" in ''|*[!0-9]*) P_FAILURES=0 ;; esac
-  case "$P_NEXT" in ''|*[!0-9]*) P_NEXT=0 ;; esac
-
-  if [ "$PULL_EXIT" -ne 0 ]; then
-    PULL_REASON=$(head -c 300 "$PULL_ERR_FILE" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
-    log_entry "PULL_FAILED exit=$PULL_EXIT reason=${PULL_REASON:-unknown}"
-    P_PULL="exit $PULL_EXIT: $(printf '%s' "${PULL_REASON:-no error output}" | head -c 160)"
-    pending_save
-    # Autostash pop conflict leaves the stash behind and the tree half-merged.
-    # The local patches are REGENERABLE (prefix renames, gbrain blocks), so
-    # recover to a clean upstream tree and re-render them below rather than
-    # leaving conflict markers in a live install.
-    if grep -qi "autostash" "$PULL_ERR_FILE" 2>/dev/null; then
-      git -C "$GSTACK_DIR" checkout -q -- . 2>/dev/null
-      git -C "$GSTACK_DIR" stash drop -q 2>/dev/null
-      log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1"
-      _PREFIX_CFG=$("$GSTACK_DIR/bin/gstack-config" get skill_prefix 2>/dev/null || echo false)
-      "$GSTACK_DIR/bin/gstack-patch-names" "$GSTACK_DIR" "$_PREFIX_CFG" >/dev/null 2>&1 || true  # best-effort: regenerable prefix rewrite
-      "$GSTACK_DIR/bin/gstack-config" gbrain-refresh >/dev/null 2>&1 || true  # best-effort: regenerable gbrain blocks
-    fi
-    rm -f "$PULL_ERR_FILE" 2>/dev/null
-    exit 0
-  fi
-  rm -f "$PULL_ERR_FILE" 2>/dev/null
-  # Re-render local patches over the fresh tree (both tools are idempotent
-  # no-ops when the feature is unconfigured); the autostash pop usually
-  # preserves them, but a clean re-render costs nothing and self-heals.
-  _PREFIX_CFG=$("$GSTACK_DIR/bin/gstack-config" get skill_prefix 2>/dev/null || echo false)
-  "$GSTACK_DIR/bin/gstack-patch-names" "$GSTACK_DIR" "$_PREFIX_CFG" >/dev/null 2>&1 || true  # best-effort: regenerable prefix rewrite
-  "$GSTACK_DIR/bin/gstack-config" gbrain-refresh >/dev/null 2>&1 || true  # best-effort: regenerable gbrain blocks
-
-  # ── Run setup when HEAD moved, or retry a pending stage after its backoff ──
-  NOW=$(date +%s)
-  RUN_SETUP=0
-  if [ "$OLD_HEAD" != "$NEW_HEAD" ]; then
-    log_entry "UPDATING old=$OLD_HEAD new=$NEW_HEAD"
-    RUN_SETUP=1
-    P_FAILURES=0
-    [ -n "$P_FROM" ] || P_FROM=$(git -C "$GSTACK_DIR" show "$OLD_HEAD:VERSION" 2>/dev/null || echo "unknown")
-  elif [ -n "$P_STAGES" ]; then
-    if [ "$NOW" -ge "$P_NEXT" ]; then
-      log_entry "RETRY_PENDING stages=$P_STAGES attempt=$((P_FAILURES + 1))"
-      RUN_SETUP=1
-    else
-      log_entry "PENDING_BACKOFF stages=$P_STAGES next=$P_NEXT"
-    fi
-  fi
-
-  if [ "$RUN_SETUP" -eq 1 ]; then
-    FAILED_STAGE="" FAIL_REASON=""
-    if command -v bun >/dev/null 2>&1; then
-      SETUP_OUT=$(mktemp "${TMPDIR:-/tmp}/gstack-session-setup-XXXXXX" 2>/dev/null || echo /dev/null)
-      ( cd "$GSTACK_DIR" && ./setup -q --refresh-registered ) >"$SETUP_OUT" 2>&1
-      SETUP_EXIT=$?
-      # Heartbeat: setup done (either way) — refresh the TTL clock.
-      touch "$LOCK_DIR/pid" 2>/dev/null
-      if [ "$SETUP_EXIT" -ne 0 ]; then
-        _MIG="$(grep -o 'migration [^ ]* failed' "$SETUP_OUT" 2>/dev/null | head -1)"
-        if [ -n "$_MIG" ]; then
-          FAILED_STAGE="migrations" FAIL_REASON="$_MIG"
-        else
-          _LAST="$(grep -v '^[[:space:]]*$' "$SETUP_OUT" 2>/dev/null | tail -1 | head -c 160)"
-          FAILED_STAGE="setup" FAIL_REASON="./setup exited $SETUP_EXIT${_LAST:+: $_LAST}"
-        fi
-      fi
-      [ "$SETUP_OUT" = /dev/null ] || rm -f "$SETUP_OUT"
-    else
-      FAILED_STAGE="setup" FAIL_REASON="bun not found on PATH"
-      log_entry "SETUP_SKIPPED bun_missing"
-    fi
-
-    if [ -z "$FAILED_STAGE" ]; then
-      # Every stage succeeded: now the next skill preamble may say "just upgraded".
-      echo "${P_FROM:-unknown}" > "$STATE_DIR/just-upgraded-from" 2>/dev/null
-      rm -f "$STATE_DIR/last-update-check" 2>/dev/null
-      rm -f "$STATE_DIR/update-snoozed" 2>/dev/null
-      log_entry "UPDATED from=${P_FROM:-unknown} to=$(cat "$GSTACK_DIR/VERSION" 2>/dev/null || echo unknown)"
-      P_STAGES="" P_FROM="" P_FAILURES=0 P_NEXT=0 P_REASON=""
-      pending_save
-    else
-      P_FAILURES=$((P_FAILURES + 1))
-      case "$P_FAILURES" in 1) _WAIT=$THROTTLE_SECONDS ;; 2) _WAIT=21600 ;; *) _WAIT=86400 ;; esac
-      P_STAGES="$FAILED_STAGE" P_NEXT=$((NOW + _WAIT)) P_REASON="$FAIL_REASON"
-      pending_save
-      [ "$FAILED_STAGE" = setup ] && [ "$FAIL_REASON" != "bun not found on PATH" ] && log_entry "SETUP_FAILED reason=$FAIL_REASON"
-      [ "$FAILED_STAGE" = migrations ] && log_entry "MIGRATIONS_FAILED reason=$FAIL_REASON"
-      log_entry "PENDING stages=$FAILED_STAGE attempt=$P_FAILURES next_retry_in=${_WAIT}s"
-    fi
+  return 1
+}
+snapshot_path() {
+  local path="$1" rel="$2" dest="$3"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    mkdir -p "$(dirname "$dest")" || return 1
+    cp -a "$path" "$dest" || return 1
+    printf '%s\t%s\n' "$path" "$rel" >> "$TXN/paths.tsv"
   else
-    pending_save
-    [ -n "$P_STAGES" ] || log_entry "UP_TO_DATE head=$OLD_HEAD"
+    printf '%s\t-\n' "$path" >> "$TXN/paths.tsv"
   fi
-# The detached subshell must own its stdio: it inherits the session hook's
-# pipes, and once the hook exits and the caller closes them, any child that
-# writes (git pull's autostash notice, setup output) dies of SIGPIPE —
-# observed as PULL_FAILED exit=141 with an empty stderr capture. All
-# observability goes through LOG_FILE.
-) >/dev/null 2>&1 &
+}
+valid_txn_path() {
+  local txn="$1" parent prefix suffix
+  parent="$(dirname "$GSTACK_DIR")"
+  prefix="$parent/$(basename "$GSTACK_DIR").update-"
+  case "$txn" in "$prefix"*) suffix="${txn#"$prefix"}" ;; *) return 1 ;; esac
+  case "$suffix" in ''|*/*|*[!A-Za-z0-9]*) return 1 ;; esac
+  [ -d "$txn" ] && [ "$(cat "$txn/owner" 2>/dev/null)" = "$GSTACK_DIR" ]
+}
+allowed_restore_path() {
+  local path="$1" host scope project dest root source version prefix render updated model commit derived
+  case "$path" in "$STATE_DIR/installs.tsv"|"$STATE_DIR/skill-copies.tsv") return 1 ;; esac
+  [ -f "$TXN/installs.tsv" ] || return 1
+  while IFS=$'\t' read -r host scope project dest root source version prefix render rest; do
+    [ "$host" = codex ] && [ "$source" = "$GSTACK_DIR" ] || continue
+    [ "$root" = "$dest/gstack" ] || continue
+    case "$path" in
+      "$root") return 0 ;;
+      "$render") [ "$render" != committed ] && [ "$render" != - ] && return 0 ;;
+      "$dest"/gstack*) return 0 ;;
+    esac
+    derived="$(gstack_install_render_dir codex "$root" 2>/dev/null)" || derived=""
+    [ -n "$derived" ] && [ "$path" = "$derived" ] && return 0
+  done < "$TXN/installs.tsv"
+  return 1
+}
+snapshot_registered_runtime() {
+  local host scope project dest root source version prefix render updated model commit idx=0 entry snapshot_render current_source_commit
+  current_source_commit="$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" || { log_entry "SNAPSHOT_INVALID source_head_unavailable"; return 1; }
+  : > "$TXN/paths.tsv"
+  [ -f "$STATE_DIR/installs.tsv" ] && cp -p "$STATE_DIR/installs.tsv" "$TXN/installs.tsv" || : > "$TXN/installs.tsv"
+  [ -f "$STATE_DIR/skill-copies.tsv" ] && cp -p "$STATE_DIR/skill-copies.tsv" "$TXN/skill-copies.tsv" || : > "$TXN/skill-copies.tsv"
+  : > "$TXN/roots.txt"
+  while IFS=$'\t' read -r host scope project dest root source version prefix render updated model commit; do
+    [ "$source" != "$GSTACK_DIR" ] || [ "$host" = codex ] || { log_entry "SNAPSHOT_INVALID unsupported_host=$host"; return 1; }
+    [ "$host" = codex ] && [ "$source" = "$GSTACK_DIR" ] || continue
+    case "$scope" in global|project) ;; *) log_entry "SNAPSHOT_INVALID scope=$scope"; return 1 ;; esac
+    safe_repo_path "$dest" && safe_repo_path "$root" || { log_entry "SNAPSHOT_INVALID path"; return 1; }
+    [ "$root" = "$dest/gstack" ] || { log_entry "SNAPSHOT_INVALID root_mapping"; return 1; }
+    case "$model" in ''|-) log_entry "SNAPSHOT_INVALID model_missing"; return 1 ;; *[!A-Za-z0-9._-]*|-*) log_entry "SNAPSHOT_INVALID model_format"; return 1 ;; esac
+    [[ "$commit" =~ ^[0-9a-f]{40,64}$ ]] && [ "$commit" = "$current_source_commit" ] || { log_entry "SNAPSHOT_INVALID source_commit row=$commit head=$current_source_commit"; return 1; }
+    case "$prefix" in true|false) ;; *) log_entry "SNAPSHOT_INVALID prefix"; return 1 ;; esac
+    case "$render" in committed|-) ;; /*) safe_repo_path "$render" || { log_entry "SNAPSHOT_INVALID render_path"; return 1; } ;; *) log_entry "SNAPSHOT_INVALID render"; return 1 ;; esac
+    case "$root/" in "$GSTACK_DIR/"*) log_entry "SNAPSHOT_INVALID runtime_inside_source"; return 1 ;; esac
+    idx=$((idx + 1))
+    snapshot_path "$root" "runtime-$idx" "$TXN/paths/runtime-$idx" || { log_entry "SNAPSHOT_INVALID runtime_copy"; return 1; }
+    snapshot_render="$render"
+    if [ "$snapshot_render" = committed ] || [ "$snapshot_render" = - ]; then
+      if [ "$root" != "$HOME/.codex/skills/gstack" ]; then
+        snapshot_render="$(gstack_install_render_dir codex "$root" 2>/dev/null)" || { log_entry "SNAPSHOT_INVALID render_path_unavailable"; return 1; }
+      else
+        snapshot_render=""
+      fi
+    fi
+    if [ -n "$snapshot_render" ]; then
+      idx=$((idx + 1))
+      snapshot_path "$snapshot_render" "render-$idx" "$TXN/paths/render-$idx" || { log_entry "SNAPSHOT_INVALID render_copy"; return 1; }
+    fi
+    printf '%s\n' "$dest" >> "$TXN/destinations.txt"
+    printf '%s\n' "$root" >> "$TXN/roots.txt"
+    for entry in "$dest"/gstack*; do
+      { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+      owned_codex_entry "$entry" || continue
+      idx=$((idx + 1))
+      snapshot_path "$entry" "entry-$idx" "$TXN/paths/entry-$idx" || { log_entry "SNAPSHOT_INVALID entry_copy"; return 1; }
+    done
+  done < "$TXN/installs.tsv"
+  [ "$idx" -gt 0 ]
+}
+write_journal() {
+  local phase="$1" from="$2" target="$3" txn="$4" tmp="$JOURNAL_FILE.tmp.$$"
+  printf 'schema=1\nphase=%s\nsource=%s\nfrom=%s\ntarget=%s\ntransaction=%s\n' "$phase" "$GSTACK_DIR" "$from" "$target" "$txn" > "$tmp" || return 1
+  chmod 600 "$tmp" && mv -f "$tmp" "$JOURNAL_FILE"
+}
+restore_registered_runtime() {
+  local dest entry path rel target_version target_sha="$1"
+  [ -f "$TXN/destinations.txt" ] || return 1
+  while IFS= read -r dest; do
+    safe_repo_path "$dest" || return 1
+    for entry in "$dest"/gstack*; do
+      { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+      owned_codex_entry "$entry" || continue
+      rm -rf "$entry" || return 1
+    done
+  done < "$TXN/destinations.txt"
+  while IFS=$'\t' read -r path rel; do
+    [ -n "$path" ] || continue
+    allowed_restore_path "$path" || return 1
+    if [ "$rel" = - ]; then
+      rm -rf "$path" || return 1
+    else
+      case "$rel" in installs.tsv|skill-copies.tsv|runtime-[0-9]*|render-[0-9]*|entry-[0-9]*) ;; *) return 1 ;; esac
+      case "$rel" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+      [ -e "$TXN/paths/$rel" ] || [ -L "$TXN/paths/$rel" ] || return 1
+      mkdir -p "$(dirname "$path")" || return 1
+      rm -rf "$path" || return 1
+      cp -a "$TXN/paths/$rel" "$path" || return 1
+    fi
+  done < "$TXN/paths.tsv"
+  target_version="$(cat "$TXN/target-version" 2>/dev/null)"
+  gstack_install_registry_restore_codex_snapshot "$TXN/installs.tsv" "$GSTACK_DIR" "$target_version" "$target_sha" || return 1
+  gstack_skill_copies_restore_snapshot "$TXN/skill-copies.tsv" "$TXN/roots.txt" || return 1
+}
+rollback_transaction() {
+  local txn="$1" from="$2" target="$3" current status dest root path rel
+  TXN="$txn"
+  valid_txn_path "$txn" || { log_entry "ROLLBACK_FAILED invalid_transaction"; return 1; }
+  write_journal rolling_back "$from" "$target" "$txn" || return 1
+  current="$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)"
+  if [ "$current" = "$target" ] || [ "$current" = "$from" ]; then
+    status="$(git -C "$GSTACK_DIR" status --porcelain --untracked-files=all 2>/dev/null)"
+  elif [ ! -e "$GSTACK_DIR" ] && [ ! -L "$GSTACK_DIR" ]; then
+    status=""
+  else
+    status="unreadable"
+  fi
+  if { [ "$current" != "$target" ] && [ "$current" != "$from" ] && { [ -e "$GSTACK_DIR" ] || [ -L "$GSTACK_DIR" ]; }; } || [ -n "$status" ]; then
+    log_entry "ROLLBACK_DEFERRED source_changed head=$current dirty=$([ -n "$status" ] && echo yes || echo no) snapshot=$txn"
+    return 1
+  fi
+  if [ "$current" = "$target" ]; then
+    [ -d "$txn/source-old/.git" ] || { log_entry "ROLLBACK_FAILED old_source_snapshot_missing"; return 1; }
+    mv "$GSTACK_DIR" "$txn/source-new" || return 1
+  fi
+  if [ ! -e "$GSTACK_DIR" ] && [ ! -L "$GSTACK_DIR" ]; then
+    [ -d "$txn/source-old/.git" ] || { log_entry "ROLLBACK_FAILED old_source_snapshot_missing"; return 1; }
+    mv "$txn/source-old" "$GSTACK_DIR" || return 1
+  fi
+  if [ "$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" != "$from" ]; then
+    log_entry "ROLLBACK_FAILED source_snapshot_sha_mismatch snapshot=$txn"
+    return 1
+  fi
+  if ! restore_registered_runtime "$target"; then
+    log_entry "ROLLBACK_FAILED runtime_restore_failed snapshot=$txn"
+    return 1
+  fi
+  while IFS=$'\t' read -r path rel; do
+    [ -n "$path" ] || continue
+    case "$path" in "$STATE_DIR/installs.tsv"|"$STATE_DIR/skill-copies.tsv") ;; *) continue ;; esac
+    if [ "$rel" = - ]; then [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+    else cmp -s "$TXN/paths/$rel" "$path" || return 1
+    fi
+  done < "$TXN/paths.tsv"
+  while IFS= read -r dest; do
+    root="$dest/gstack"
+    [ -e "$root" ] || [ -L "$root" ] || return 1
+    [ -x "$root/bin/gstack-config" ] || [ -f "$root/bin/gstack-config" ] || return 1
+    GSTACK_HOME="$STATE_DIR" "$root/bin/gstack-config" get auto_upgrade >/dev/null 2>&1 || return 1
+  done < "$txn/destinations.txt"
+  rm -f "$JOURNAL_FILE"
+  rm -rf "$txn"
+  log_entry "ROLLED_BACK from=$from target=$target restored_runtime=1"
+  return 0
+}
+recover_interrupted_transaction() {
+  local phase source from target txn current
+  [ -f "$JOURNAL_FILE" ] || return 0
+  phase="$(sed -n 's/^phase=//p' "$JOURNAL_FILE" | head -1)"
+  source="$(sed -n 's/^source=//p' "$JOURNAL_FILE" | head -1)"
+  from="$(sed -n 's/^from=//p' "$JOURNAL_FILE" | head -1)"
+  target="$(sed -n 's/^target=//p' "$JOURNAL_FILE" | head -1)"
+  txn="$(sed -n 's/^transaction=//p' "$JOURNAL_FILE" | head -1)"
+  [ "$(sed -n 's/^schema=//p' "$JOURNAL_FILE" | head -1)" = 1 ] && [ "$source" = "$GSTACK_DIR" ] \
+    && [[ "$from" =~ ^[0-9a-f]{40,64}$ && "$target" =~ ^[0-9a-f]{40,64}$ ]] && valid_txn_path "$txn" || return 1
+  current="$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)"
+  case "$phase:$current" in
+    preparing:"$from"|prepared:"$from"|activating:"$from")
+      rm -f "$JOURNAL_FILE" "$PENDING_FILE"; rm -rf "$txn"
+      log_entry "INTERRUPTED_BEFORE_ACTIVATION cleaned=1"; return 0 ;;
+    activating:"$target"|active:"$target"|rolling_back:"$target"|rolling_back:"$from"|rolling_back:)
+      rollback_transaction "$txn" "$from" "$target"; return $? ;;
+    *) log_entry "RECOVERY_BLOCKED phase=$phase head=$current snapshot=$txn"; return 1 ;;
+  esac
+}
+acquire_lock() {
+  local lock_pid reap="$LOCK_DIR.reap.$$" holder ttl stale
+  ttl="${GSTACK_UPDATE_LOCK_TTL_MINUTES:-30}"
+  case "$ttl" in ''|*[!0-9]*) ttl=30 ;; esac
+  [ "$ttl" -gt 0 ] || ttl=30
+  mkdir -p "$STATE_DIR" || return 1
+  if mkdir "$LOCK_DIR" 2>/dev/null; then :
+  elif [ -f "$LOCK_DIR/pid" ]; then
+    lock_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+    if [[ "$lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
+      log_entry "SKIP locked_by=$lock_pid"; return 2
+    fi
+    mv "$LOCK_DIR" "$reap" 2>/dev/null || { log_entry "SKIP lock_contested"; return 2; }
+    rm -rf "$reap"
+    mkdir "$LOCK_DIR" 2>/dev/null || { log_entry "SKIP lock_contested"; return 2; }
+  else
+    stale=""
+    [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin "+$ttl" 2>/dev/null)" ] && stale=1
+    if [ -z "$stale" ]; then log_entry "SKIP locked_no_pid"; return 2; fi
+    mv "$LOCK_DIR" "$reap" 2>/dev/null || { log_entry "SKIP lock_contested"; return 2; }
+    if [ -f "$reap/pid" ] || [ -z "$(find "$reap" -maxdepth 0 -mmin "+$ttl" 2>/dev/null)" ]; then
+      mv "$reap" "$LOCK_DIR" 2>/dev/null || true
+      log_entry "SKIP lock_contested"; return 2
+    fi
+    rm -rf "$reap"
+    mkdir "$LOCK_DIR" 2>/dev/null || { log_entry "SKIP lock_contested"; return 2; }
+  fi
+  holder="${BASHPID:-$$}"
+  printf '%s\n' "$holder" > "$LOCK_DIR/pid" || return 1
+  LOCK_HOLDER="$holder"
+  return 0
+}
+resolve_candidate() {
+  local out
+  if [ -n "$MANUAL_SHA" ]; then
+    [ "$(candidate_value commit)" = "$MANUAL_SHA" ] || { echo "manual SHA is not the persisted candidate"; return 1; }
+    out="$("$GSTACK_DIR/bin/gstack-update-candidate" verify 2>&1)" || { echo "$out"; return 1; }
+    [ "$out" = "$MANUAL_SHA" ] || return 1
+    printf '%s\n' "$out"
+    return 0
+  fi
+  if [ -f "$STATE_DIR/update-candidate" ]; then
+    out="$("$GSTACK_DIR/bin/gstack-update-candidate" verify 2>&1)" && {
+      [ -n "$out" ] && printf '%s\n' "$out" && return 0
+    }
+    log_entry "CANDIDATE_REVALIDATION_FAILED reason=$(printf '%s' "$out" | tr '\n' ' ' | head -c 120)"
+    rm -f "$STATE_DIR/update-candidate"
+  fi
+  out="$("$GSTACK_DIR/bin/gstack-update-candidate" resolve 2>&1)" || { echo "$out"; return 1; }
+  case "$out" in
+    UP_TO_DATE\ *) echo "$out"; return 2 ;;
+    UPGRADE_AVAILABLE\ *) printf '%s\n' "$(printf '%s' "$out" | awk '{print $4}')" ;;
+    *) echo "candidate resolver returned an invalid response"; return 1 ;;
+  esac
+}
+update_worker() {
+  local lock_rc output target from version old_version dirty stash_before stash_after txn candidate_result setup_out setup_rc row host scope project dest root source row_version prefix render updated model commit installed_scope installed_project installed_root installed_source installed_prefix installed_render installed_model installed_commit rc
+  if [ "$RECOVERY_ONLY" = 1 ]; then
+    local attempt=0 recovery_owner
+    while :; do
+      acquire_lock; lock_rc=$?
+      [ "$lock_rc" -eq 0 ] && break
+      recovery_owner="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+      [[ "$recovery_owner" =~ ^[0-9]+$ ]] && kill -0 "$recovery_owner" 2>/dev/null || return 1
+      attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || return 1
+      sleep 0.1
+    done
+    trap '[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$LOCK_HOLDER" ] && rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+    recover_interrupted_transaction || return 1
+    [ ! -f "$JOURNAL_FILE" ] || return 1
+    echo "RECOVERED interrupted GStack transaction; source restored at $GSTACK_DIR"
+    return 0
+  fi
+  acquire_lock; lock_rc=$?
+  [ "$lock_rc" -eq 0 ] || return 0
+  UPDATE_SUCCEEDED=0
+  trap '[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$LOCK_HOLDER" ] && rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+  if [ -z "$MANUAL_SHA" ]; then date +%s > "$THROTTLE_FILE"; fi
+  install_recovery_runner || { log_entry "UPDATE_DEFERRED recovery_runner_unavailable"; return 0; }
+  if ! recover_interrupted_transaction; then
+    log_entry "UPDATE_DEFERRED recovery_required"
+    defer_update recovery_required
+    return 0
+  fi
+  if ! codex_only_registered_source; then
+    log_entry "UPDATE_DEFERRED native_codex_only_non_codex_registered"
+    defer_update native_codex_only_non_codex_registered
+    return 0
+  fi
+  candidate_result="$(resolve_candidate)"; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    rm -f "$PENDING_FILE"
+    log_entry "UP_TO_DATE head=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)"
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
+    output="$(printf '%s' "$candidate_result" | tr '\n' ' ' | head -c 180)"
+    log_entry "UPDATE_DEFERRED reason=$output"
+    defer_update "$output"
+    return 0
+  fi
+  target="$(printf '%s' "$candidate_result" | tail -1)"
+  [[ "$target" =~ ^[0-9a-f]{40,64}$ ]] || { log_entry "UPDATE_DEFERRED candidate_sha_invalid"; defer_update candidate_sha_invalid; return 0; }
+  from="$(candidate_value previous)"
+  version="$(candidate_value version)"
+  old_version="$(git -C "$GSTACK_DIR" show "$from:VERSION" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$old_version" ] || old_version=unknown
+  [ "$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" = "$from" ] || { log_entry "UPDATE_DEFERRED local_head_changed"; defer_update local_head_changed; return 0; }
+  dirty="$(git -C "$GSTACK_DIR" status --porcelain --untracked-files=all 2>/dev/null)"
+  if [ -n "$dirty" ]; then
+    log_entry "UPDATE_DEFERRED dirty_checkout files=$(printf '%s\n' "$dirty" | wc -l | tr -d ' ')"
+    defer_update working_tree_not_clean
+    return 0
+  fi
+  [ -d "$GSTACK_DIR/.git" ] && [ ! -L "$GSTACK_DIR/.git" ] || { log_entry "UPDATE_DEFERRED unsupported_git_worktree_layout"; defer_update unsupported_git_worktree_layout; return 0; }
+  if ! runtime_artifacts_match "$target"; then
+    log_entry "UPDATE_DEFERRED runtime_artifact_identity_unknown"
+    defer_update runtime_artifact_identity_unknown
+    return 0
+  fi
+  git -C "$GSTACK_DIR" merge-base --is-ancestor "$from" "$target" 2>/dev/null || { log_entry "UPDATE_DEFERRED target_not_fast_forward"; defer_update target_not_fast_forward; return 0; }
+  stash_before="$(git -C "$GSTACK_DIR" stash list --format='%gd:%H' 2>/dev/null)"
+  txn="$(mktemp -d "$(dirname "$GSTACK_DIR")/$(basename "$GSTACK_DIR").update-XXXXXX" 2>/dev/null)" || { log_entry "UPDATE_DEFERRED snapshot_dir_unavailable"; defer_update snapshot_dir_unavailable; return 0; }
+  TXN="$txn"
+  printf '%s\n' "$GSTACK_DIR" > "$txn/owner"
+  printf '%s\n' "$version" > "$txn/target-version" || { rm -f "$JOURNAL_FILE"; rm -rf "$txn"; return 0; }
+  mkdir -p "$txn/paths"
+  write_journal preparing "$from" "$target" "$txn" || { rm -rf "$txn"; return 0; }
+  cp -a "$GSTACK_DIR" "$txn/source-old" || { rm -f "$JOURNAL_FILE"; rm -rf "$txn"; log_entry "UPDATE_DEFERRED source_snapshot_failed"; return 0; }
+  if ! snapshot_registered_runtime; then
+    rm -f "$JOURNAL_FILE"; rm -rf "$txn"
+    log_entry "UPDATE_DEFERRED codex_registry_invalid_or_empty"
+    defer_update registered_codex_target_unavailable
+    return 0
+  fi
+  write_journal prepared "$from" "$target" "$txn" || return 0
+  output="$("$GSTACK_DIR/bin/gstack-update-candidate" verify 2>&1)"
+  if [ "$?" -ne 0 ] || [ "$output" != "$target" ]; then
+    rm -f "$JOURNAL_FILE"; rm -rf "$txn"
+    log_entry "UPDATE_DEFERRED authority_changed_before_activation"
+    defer_update required_workflow_revalidation_failed
+    return 0
+  fi
+  dirty="$(git -C "$GSTACK_DIR" status --porcelain --untracked-files=all 2>/dev/null)"
+  [ -z "$dirty" ] && [ "$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" = "$from" ] || {
+    rm -f "$JOURNAL_FILE"; rm -rf "$txn"; log_entry "UPDATE_DEFERRED checkout_changed_during_snapshot"; return 0;
+  }
+  write_journal activating "$from" "$target" "$txn" || return 0
+  if ! git -C "$GSTACK_DIR" merge --ff-only "$target" >/dev/null 2>&1; then
+    rm -f "$JOURNAL_FILE"; rm -rf "$txn"; log_entry "UPDATE_DEFERRED fast_forward_failed"; return 0
+  fi
+  [ "$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" = "$target" ] || { rollback_transaction "$txn" "$from" "$target"; return 0; }
+  write_journal active "$from" "$target" "$txn" || { rollback_transaction "$txn" "$from" "$target"; return 0; }
+  setup_out="$(mktemp "$TASK_TMPDIR/gstack-session-codex-refresh.XXXXXX" 2>/dev/null)" || setup_out=/dev/null
+  _refresh_token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [[ "$_refresh_token" =~ ^[0-9a-f]{32}$ ]] || { rollback_transaction "$txn" "$from" "$target"; return 0; }
+  printf '%s\n' "$_refresh_token" > "$txn/refresh-token" && chmod 600 "$txn/refresh-token" || { rollback_transaction "$txn" "$from" "$target"; return 0; }
+  GSTACK_SETUP_AUTO_CODEX_REFRESH=1 GSTACK_SETUP_REFRESH_PARENT=1 GSTACK_SETUP_REFRESH_TOKEN="$_refresh_token" GSTACK_SETUP_REFRESH_TRANSACTION="$txn" \
+    GSTACK_SKIP_COREUTILS=1 GSTACK_SKIP_PLAYWRIGHT=1 GSTACK_SETUP_SKIP_CSO_BUILD=1 \
+    GSTACK_SETUP_SKIP_CSO_IMAGES=1 GSTACK_HOME="$STATE_DIR" \
+    bash "$GSTACK_DIR/setup" --refresh-registered --host codex -q > "$setup_out" 2>&1
+  setup_rc=$?
+  if [ "$setup_rc" -eq 0 ]; then
+    while IFS=$'\t' read -r host scope project dest root source row_version prefix render updated model commit; do
+      [ "$host" = codex ] && [ "$source" = "$GSTACK_DIR" ] || continue
+      row="$(gstack_install_registry_rows | awk -F '\t' -v d="$dest" '$1 == "codex" && $4 == d { print $2 "\t" $3 "\t" $5 "\t" $6 "\t" $8 "\t" $9 "\t" $11 "\t" $12; exit }')"
+      IFS=$'\t' read -r installed_scope installed_project installed_root installed_source installed_prefix installed_render installed_model installed_commit <<< "$row"
+      [ "$installed_scope" = "$scope" ] && [ "$installed_project" = "$project" ] \
+        && [ "$installed_root" = "$root" ] && [ "$installed_source" = "$GSTACK_DIR" ] \
+        && [ "$installed_prefix" = "$prefix" ] && [ "$installed_model" = "$model" ] \
+        && [ "$installed_commit" = "$target" ] && [ -s "$root/SKILL.md" ] \
+        && [ -x "$root/bin/gstack-config" ] || { setup_rc=1; break; }
+      [ "$render" = committed ] || [ -d "$installed_render" ] || { setup_rc=1; break; }
+      GSTACK_HOME="$STATE_DIR" "$root/bin/gstack-config" get auto_upgrade >/dev/null 2>&1 || { setup_rc=1; break; }
+    done < "$txn/installs.tsv"
+  fi
+  stash_after="$(git -C "$GSTACK_DIR" stash list --format='%gd:%H' 2>/dev/null)"
+  [ "$stash_before" = "$stash_after" ] || setup_rc=1
+  if [ "$setup_rc" -ne 0 ]; then
+    if [ "$setup_out" != /dev/null ] && [ -f "$setup_out" ]; then output="$(tail -c 280 "$setup_out" | tr '\n' ' ')"; rm -f "$setup_out"; else output=setup_failed; fi
+    log_entry "SETUP_FAILED rollback=started reason=$output"
+    defer_update setup_failed
+    rollback_transaction "$txn" "$from" "$target" || return 0
+    return 0
+  fi
+  [ "$setup_out" = /dev/null ] || rm -f "$setup_out"
+  [ "$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" = "$target" ] || { rollback_transaction "$txn" "$from" "$target"; return 0; }
+  [ -z "$(git -C "$GSTACK_DIR" status --porcelain --untracked-files=all 2>/dev/null)" ] || { rollback_transaction "$txn" "$from" "$target"; return 0; }
+  printf '%s\n' "$old_version" > "$MARKER_FILE"
+  rm -f "$PENDING_FILE" "$STATE_DIR/last-update-check" "$STATE_DIR/update-snoozed" "$JOURNAL_FILE" "$STATE_DIR/update-candidate"
+  rm -rf "$txn"
+  date +%s > "$THROTTLE_FILE"
+  log_entry "UPDATED from=$old_version to=$version sha=$target codex_registry_verified=1"
+  UPDATE_SUCCEEDED=1
+  return 0
+}
 
+if [ "$1" = "--apply-candidate" ]; then
+  [[ "$2" =~ ^[0-9a-f]{40,64}$ ]] || { echo "usage: gstack-session-update --apply-candidate <sha>" >&2; exit 2; }
+  MANUAL_SHA="$2"
+  update_worker
+  if [ "$UPDATE_SUCCEEDED" = 1 ]; then
+    echo "UPDATED $MANUAL_SHA; registered Codex runtimes verified"
+  elif [ -f "$JOURNAL_FILE" ]; then
+    echo "UPDATE_RECOVERY_REQUIRED snapshot=$(sed -n 's/^transaction=//p' "$JOURNAL_FILE" | head -1)"
+  else
+    _why="$(sed -n 's/^reason=//p' "$PENDING_FILE" 2>/dev/null | head -1)"
+    if [ "$_why" = setup_failed ] && tail -50 "$LOG_FILE" 2>/dev/null | grep -q 'ROLLED_BACK from='; then _why=setup_failed_rolled_back; fi
+    if [ -z "$_why" ] && tail -50 "$LOG_FILE" 2>/dev/null | grep -q "SETUP_FAILED rollback=started"; then _why=setup_failed_rolled_back; fi
+    echo "UPDATE_DEFERRED ${_why:-candidate_not_activated}; source and registered runtimes were retained"
+  fi
+  exit $?
+fi
+
+if [ "${1:-}" = "--recover-interrupted" ]; then
+  update_worker
+  exit $?
+fi
+
+AUTO="$("$GSTACK_DIR/bin/gstack-config" get auto_upgrade 2>/dev/null || true)"
+[ "$AUTO" = true ] || exit 0
+pending_message
+if [ -f "$PENDING_FILE" ]; then
+  NEXT="$(sed -n 's/^next=//p' "$PENDING_FILE" 2>/dev/null | head -1)"
+  case "$NEXT" in ''|*[!0-9]*) NEXT=0 ;; esac
+  [ "$NEXT" -eq 0 ] || [ "$(date +%s)" -ge "$NEXT" ] || exit 0
+fi
+if [ -f "$THROTTLE_FILE" ]; then
+  LAST="$(cat "$THROTTLE_FILE" 2>/dev/null || echo 0)"
+  case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
+  [ $(( $(date +%s) - LAST )) -ge "$THROTTLE_SECONDS" ] || exit 0
+fi
+( update_worker ) >/dev/null 2>&1 &
 exit 0

@@ -10,28 +10,28 @@ import * as path from 'path';
 const ROOT = path.resolve(import.meta.dir, '..');
 const read = (p: string) => fs.readFileSync(path.join(ROOT, p), 'utf-8');
 
-describe('gstack-upgrade template: ff-only precedes the gated reset (#2517)', () => {
+describe('gstack-upgrade template: exact-SHA transactional activation', () => {
   const tmpl = read('gstack-upgrade/SKILL.md.tmpl');
 
-  test('git pull --ff-only runs before any reset --hard', () => {
-    const ff = tmpl.indexOf('git pull --ff-only --autostash');
-    const reset = tmpl.indexOf('git reset --hard origin/main');
-    expect(ff).toBeGreaterThan(-1);
-    expect(reset).toBeGreaterThan(-1);
-    expect(ff).toBeLessThan(reset);
+  test('the accepted commit is pinned by its required latest Actions attempts', () => {
+    expect(tmpl).toContain('UPGRADE_AVAILABLE <old> <new> <sha>');
+    expect(tmpl).toContain('required latest Actions attempts');
+    expect(tmpl).toContain('exact SHA from UPGRADE_AVAILABLE');
+    expect(tmpl).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
   });
 
-  test('the ff path carries the FF_OK success gate that skips the fallback', () => {
-    expect(tmpl).toContain('FF_OK');
-    expect(tmpl.indexOf('FF_OK')).toBeLessThan(tmpl.indexOf('git reset --hard origin/main'));
+  test('the skill leaves source activation and rollback to the transactional updater', () => {
+    expect(tmpl).toContain('gstack-session-update owns trusted-fork activation, rollback, and verification');
+    expect(tmpl).toContain('On failure after activation began, the updater restores the retained source');
+    expect(tmpl).toContain('never call it current');
   });
 
-  test('the destructive fallback is gated on unpushed commits, not just a clean tree', () => {
-    // A clean tree with unpushed local commits is NOT safe for reset --hard.
-    expect(tmpl).toContain('git rev-list origin/main..HEAD');
-    expect(tmpl.indexOf('git rev-list origin/main..HEAD')).toBeLessThan(
-      tmpl.indexOf('git reset --hard origin/main'),
-    );
+  test('model-run commands contain no source-mutating Git fallback', () => {
+    const commands = [...tmpl.matchAll(/^(`{3,}|~{3,})bash\n([\s\S]*?)\n\1$/gm)].map(match => match[2]);
+    expect(commands.length).toBeGreaterThan(0);
+    for (const command of commands) {
+      expect(command).not.toMatch(/\bgit\s+(pull|reset|stash|fetch|clone|checkout|merge)\b/);
+    }
   });
 });
 

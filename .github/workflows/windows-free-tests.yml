@@ -21,6 +21,8 @@ name: Windows Free Tests
 # diagnostics, Dia on macOS) are dispatch-only in native-qualification.yml.
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:

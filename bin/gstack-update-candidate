@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# Resolve and revalidate the one trusted fork commit eligible for activation.
+set -euo pipefail
+
+GSTACK_DIR="${GSTACK_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+. "$(dirname "$0")/gstack-state-root.sh"
+gstack_state_root_select
+STATE_DIR="$_gstack_sr_root"
+CANDIDATE_FILE="$STATE_DIR/update-candidate"
+TRUSTED_REPOSITORY="TheAngryPit/gstack"
+. "$(dirname "$0")/gstack-egress-lib.sh"
+
+# Each workflow is identified by repository + canonical path + exact workflow
+# ID, then gated by its stable aggregate job. Optional jobs may be skipped.
+WORKFLOWS=(free-tests.yml windows-free-tests.yml codex-native-parity.yml)
+JOBS=(free-tests windows-free-tests parity)
+
+fail() { printf 'UPDATE_FAILED %s\n' "$1"; exit 1; }
+gh_api() {
+  GSTACK_HOME="$STATE_DIR" _gstack_egress_run open update-check github.com github-actions-read "update_check!=false" --no-payload gh api "$@"
+}
+record_value() { awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$CANDIDATE_FILE" 2>/dev/null; }
+version_not_older() {
+  awk -v candidate="$1" -v installed="$2" 'function norm(v) { sub(/^0+/, "", v); return v == "" ? "0" : v }
+    BEGIN { nc=split(candidate,c,"."); ni=split(installed,i,"."); n=(nc>ni?nc:ni)
+      for (k=1; k<=n; k++) { a=norm(k<=nc?c[k]:"0") ""; b=norm(k<=ni?i[k]:"0") ""
+        if (length(a)>length(b)) exit 0
+        if (length(a)<length(b)) exit 1
+        if (a>b) exit 0
+        if (a<b) exit 1
+      }
+      exit 0
+    }'
+}
+
+repo_slug() {
+  local remote="$1" path
+  case "$remote" in
+    https://github.com/*) path="${remote#https://github.com/}" ;;
+    ssh://git@github.com/*) path="${remote#ssh://git@github.com/}" ;;
+    git@github.com:*) path="${remote#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  path="${path%/}"; path="${path%.git}"
+  [[ "$path" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s\n' "$path"
+}
+
+workflow_identity() {
+  local repo="$1" workflow="$2"
+  gh_api "repos/$repo/actions/workflows/$workflow" \
+    --jq "select(.path == \".github/workflows/$workflow\") | .id" 2>/dev/null
+}
+
+latest_run_and_jobs() {
+  local repo="$1" workflow="$2" required_job="$3" sha="$4" workflow_id="$5"
+  local row run_id listed_attempt status conclusion event head_sha branch path repository head_repository
+  local run latest_fields latest_attempt jobs job_row job_status job_conclusion
+  row="$(gh_api "repos/$repo/actions/workflows/$workflow_id/runs?branch=main&head_sha=$sha&event=push&per_page=100" \
+    --jq '.workflow_runs | sort_by(.created_at, .id) | last | [.id,.run_attempt,.status,(.conclusion // "-"),.event,.head_sha,.head_branch,.path,.repository.full_name,(.head_repository.full_name // "-")] | @tsv' 2>/dev/null)" || return 1
+  IFS=$'\t' read -r run_id listed_attempt status conclusion event head_sha branch path repository head_repository <<< "$row"
+  [[ "$run_id" =~ ^[0-9]+$ && "$listed_attempt" =~ ^[0-9]+$ ]] || return 1
+  [ "$status" = completed ] && [ "$conclusion" = success ] && [ "$event" = push ] \
+    && [ "$head_sha" = "$sha" ] && [ "$branch" = main ] && [ "$repository" = "$repo" ] \
+    && [ "$path" = ".github/workflows/$workflow" ] \
+    && [ "$head_repository" = "$repo" ] || return 1
+
+  # The run endpoint is the authoritative current run_attempt. A previous
+  # successful attempt must never authorize a pending or failed rerun.
+  latest_fields="$(gh_api "repos/$repo/actions/runs/$run_id" \
+    --jq "select(.id == $run_id and .workflow_id == $workflow_id and .head_sha == \"$sha\" and .run_attempt == $listed_attempt and .status == \"completed\" and .conclusion == \"success\" and .event == \"push\" and .head_branch == \"main\" and .path == \".github/workflows/$workflow\" and .repository.full_name == \"$repo\" and .head_repository.full_name == \"$repo\") | [.run_attempt,.status,.conclusion,.event,.head_sha,.head_branch,.path,.repository.full_name,.head_repository.full_name] | @tsv" 2>/dev/null)" || return 1
+  [ "$latest_fields" = "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$listed_attempt" completed success push "$sha" main ".github/workflows/$workflow" "$repo" "$repo")" ] || return 1
+  latest_attempt="$listed_attempt"
+  jobs="$(gh_api --paginate "repos/$repo/actions/runs/$run_id/attempts/$latest_attempt/jobs?per_page=100" \
+    --jq ".jobs[] | select(.name == \"$required_job\") | [.status,(.conclusion // \"-\")] | @tsv" 2>/dev/null)" || return 1
+  [ "$(printf '%s\n' "$jobs" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 1 ] || return 1
+  job_row="$jobs"
+  IFS=$'\t' read -r job_status job_conclusion <<< "$job_row"
+  [ "$job_status" = completed ] && [ "$job_conclusion" = success ] || return 1
+  printf '%s\t%s\n' "$run_id" "$latest_attempt"
+}
+
+# This bounded updater keeps installed generated runtime outputs from the
+# prior commit. If any source or dependency input to those outputs
+# outputs changes, refuse before activation until a separately reviewed local
+# build path exists; executable presence alone is not candidate proof.
+runtime_inputs_unchanged() {
+  local from="$1" target="$2"
+  git -C "$GSTACK_DIR" diff --quiet "$from" "$target" -- \
+    browse design make-pdf lib package.json bun.lock bun.lockb scripts/build.sh \
+    scripts/build-app.sh scripts/build-cso.sh scripts/build-cso-windows.ps1 \
+    scripts/write-version-files.sh bin/gstack-global-discover.ts
+}
+
+save_candidate() {
+  local repo="$1" previous="$2" commit="$3" tree="$4" version="$5" records="$6" tmp
+  mkdir -p "$STATE_DIR" || return 1
+  tmp="$CANDIDATE_FILE.tmp.$$"
+  {
+    printf 'schema=1\nrepository=%s\nref=refs/heads/main\nprevious=%s\ncommit=%s\ntree=%s\nversion=%s\n' \
+      "$repo" "$previous" "$commit" "$tree" "$version"
+    printf '%s' "$records"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" && mv -f "$tmp" "$CANDIDATE_FILE"
+}
+
+resolve_candidate() {
+  local origin repo line remote_sha fetched_sha previous tree version local_version runs="" i workflow job workflow_id run remote_host
+  origin="$(git -C "$GSTACK_DIR" config --get remote.origin.url 2>/dev/null)" || fail missing_origin
+  repo="$(repo_slug "$origin")" || fail unsupported_origin
+  [ "$repo" = "$TRUSTED_REPOSITORY" ] || fail untrusted_origin
+  previous="$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" || fail missing_head
+  [[ "$previous" =~ ^[0-9a-f]{40,64}$ ]] || fail invalid_local_head
+  remote_host="${origin#*://}"; remote_host="${remote_host#*@}"; remote_host="${remote_host%%[/:]*}"
+  line="$(GSTACK_HOME="$STATE_DIR" _receipted_git open update-check "$remote_host" version-ls-remote "update_check!=false" \
+    bash -c 'GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 git -C "$1" ls-remote "$2" refs/heads/main 2>/dev/null' _ "$GSTACK_DIR" "$origin" | head -1)" || fail remote_unavailable
+  remote_sha="${line%%[[:space:]]*}"
+  [[ "$remote_sha" =~ ^[0-9a-f]{40,64}$ ]] || fail main_ref_unavailable
+  local_version="$(git -C "$GSTACK_DIR" show "$previous:VERSION" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$remote_sha" = "$previous" ]; then
+    rm -f "$CANDIDATE_FILE"
+    printf 'UP_TO_DATE %s %s\n' "$local_version" "$previous"
+    return 0
+  fi
+  GSTACK_HOME="$STATE_DIR" _receipted_git open update-check "$remote_host" version-fetch "update_check!=false" \
+    env GIT_TERMINAL_PROMPT=0 git -C "$GSTACK_DIR" fetch --no-tags --no-write-fetch-head "$origin" "$remote_sha" >/dev/null 2>&1 || fail candidate_fetch_failed
+  fetched_sha="$(git -C "$GSTACK_DIR" rev-parse "$remote_sha^{commit}" 2>/dev/null)" || fail invalid_candidate_commit
+  [ "$fetched_sha" = "$remote_sha" ] || fail candidate_ref_changed
+  git -C "$GSTACK_DIR" merge-base --is-ancestor "$previous" "$remote_sha" 2>/dev/null || fail candidate_diverged
+  runtime_inputs_unchanged "$previous" "$remote_sha" || fail runtime_build_required
+  tree="$(git -C "$GSTACK_DIR" rev-parse "$remote_sha^{tree}" 2>/dev/null)" || fail candidate_tree_unavailable
+  version="$(git -C "$GSTACK_DIR" show "$remote_sha:VERSION" 2>/dev/null | tr -d '[:space:]')"
+  echo "$version" | grep -qE '^[0-9]+([.][0-9]+)+$' || fail candidate_version_invalid
+  [ -n "$local_version" ] || local_version=unknown
+  if [ "$local_version" != unknown ]; then
+    version_not_older "$version" "$local_version" || fail candidate_version_regressed
+  fi
+  command -v gh >/dev/null 2>&1 || fail github_cli_unavailable
+  for i in "${!WORKFLOWS[@]}"; do
+    workflow="${WORKFLOWS[$i]}"; job="${JOBS[$i]}"
+    workflow_id="$(workflow_identity "$repo" "$workflow")" || fail "workflow_identity_unverified:$workflow"
+    [[ "$workflow_id" =~ ^[0-9]+$ ]] || fail "workflow_identity_invalid:$workflow"
+    run="$(latest_run_and_jobs "$repo" "$workflow" "$job" "$remote_sha" "$workflow_id")" \
+      || fail "required_workflow_unverified:$workflow:$job"
+    runs="${runs}$(printf '%s_run=%s\n%s_attempt=%s\n%s_id=%s' \
+      "${workflow%%.*}" "${run%%$'\t'*}" "${workflow%%.*}" "${run#*$'\t'}" "${workflow%%.*}" "$workflow_id")"$'\n'
+  done
+  save_candidate "$repo" "$previous" "$remote_sha" "$tree" "$version" "$runs" || fail candidate_save_failed
+  printf 'UPGRADE_AVAILABLE %s %s %s\n' "$local_version" "$version" "$remote_sha"
+}
+
+verify_candidate() {
+  local repo origin origin_repo candidate previous tree version workflow job workflow_id expected_run expected_attempt expected_id run i remote_host
+  [ -f "$CANDIDATE_FILE" ] || fail candidate_missing
+  [ "$(record_value schema)" = 1 ] || fail candidate_schema_invalid
+  repo="$(record_value repository)"; [ "$repo" = "$TRUSTED_REPOSITORY" ] || fail candidate_repository_invalid
+  previous="$(record_value previous)"; candidate="$(record_value commit)"; tree="$(record_value tree)"; version="$(record_value version)"
+  [ "$(record_value ref)" = refs/heads/main ] || fail candidate_ref_invalid
+  [[ "$candidate" =~ ^[0-9a-f]{40,64}$ && "$previous" =~ ^[0-9a-f]{40,64}$ ]] || fail candidate_sha_invalid
+  origin="$(git -C "$GSTACK_DIR" config --get remote.origin.url 2>/dev/null)" || fail missing_origin
+  origin_repo="$(repo_slug "$origin")" || fail unsupported_origin
+  [ "$origin_repo" = "$repo" ] || fail candidate_origin_changed
+  git -C "$GSTACK_DIR" cat-file -e "$candidate^{commit}" 2>/dev/null || {
+    remote_host="${origin#*://}"; remote_host="${remote_host#*@}"; remote_host="${remote_host%%[/:]*}"
+    GSTACK_HOME="$STATE_DIR" _receipted_git open update-check "$remote_host" version-fetch "update_check!=false" \
+      env GIT_TERMINAL_PROMPT=0 git -C "$GSTACK_DIR" fetch --no-tags --no-write-fetch-head "$origin" "$candidate" >/dev/null 2>&1 || fail candidate_fetch_failed
+  }
+  [ "$(git -C "$GSTACK_DIR" rev-parse "$candidate^{tree}" 2>/dev/null)" = "$tree" ] || fail candidate_tree_changed
+  [ "$(git -C "$GSTACK_DIR" show "$candidate:VERSION" 2>/dev/null | tr -d '[:space:]')" = "$version" ] || fail candidate_version_changed
+  runtime_inputs_unchanged "$previous" "$candidate" || fail runtime_build_required
+  for i in "${!WORKFLOWS[@]}"; do
+    workflow="${WORKFLOWS[$i]}"; job="${JOBS[$i]}"
+    expected_run="$(record_value "${workflow%%.*}_run")"; expected_attempt="$(record_value "${workflow%%.*}_attempt")"
+    expected_id="$(record_value "${workflow%%.*}_id")"
+    [[ "$expected_run" =~ ^[0-9]+$ && "$expected_attempt" =~ ^[0-9]+$ && "$expected_id" =~ ^[0-9]+$ ]] || fail "candidate_authority_missing:$workflow"
+    workflow_id="$(workflow_identity "$repo" "$workflow")" || fail "workflow_identity_unverified:$workflow"
+    [[ "$workflow_id" =~ ^[0-9]+$ ]] || fail "workflow_identity_invalid:$workflow"
+    [ "$workflow_id" = "$expected_id" ] || fail "workflow_identity_changed:$workflow"
+    run="$(latest_run_and_jobs "$repo" "$workflow" "$job" "$candidate" "$workflow_id")" || fail "required_workflow_unverified:$workflow:$job"
+    [ "$run" = "$(printf '%s\t%s' "$expected_run" "$expected_attempt")" ] || fail "required_workflow_attempt_changed:$workflow"
+  done
+  printf '%s\n' "$candidate"
+}
+
+case "${1:-}" in
+  resolve) resolve_candidate ;;
+  verify) verify_candidate ;;
+  *) printf 'usage: gstack-update-candidate resolve|verify\n' >&2; exit 2 ;;
+esac

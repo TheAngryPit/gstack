@@ -308,6 +308,38 @@ gstack_state_root_select; GSTACK_STATE_ROOT="$_gstack_sr_root"
 . "$SOURCE_GSTACK_DIR/bin/gstack-install-registry.sh" || { echo "$0: $SOURCE_GSTACK_DIR/bin/gstack-install-registry.sh is missing. fix: reinstall from a fresh clone (docs/ADDING_A_HOST.md)" >&2; exit 1; }
 . "$SOURCE_GSTACK_DIR/bin/gstack-render-claude.sh" || { echo "$0: $SOURCE_GSTACK_DIR/bin/gstack-render-claude.sh is missing. fix: reinstall from a fresh clone" >&2; exit 1; }
 SETUP_VERSION="$(cat "$SOURCE_GSTACK_DIR/VERSION" 2>/dev/null || echo unknown)"
+GSTACK_SETUP_AUTO_CODEX_REFRESH="${GSTACK_SETUP_AUTO_CODEX_REFRESH:-0}"
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ]; then
+  _refresh_txn="${GSTACK_SETUP_REFRESH_TRANSACTION:-}"
+  _refresh_token="${GSTACK_SETUP_REFRESH_TOKEN:-}"
+  [[ "$_refresh_token" =~ ^[0-9a-f]{32}$ ]] || { echo "Error: automatic Codex refresh requires a valid transaction token." >&2; exit 1; }
+  case "$_refresh_txn" in "$(dirname "$SOURCE_GSTACK_DIR")/$(basename "$SOURCE_GSTACK_DIR").update-"*) ;; *) echo "Error: automatic Codex refresh transaction path is invalid." >&2; exit 1 ;; esac
+  [ "$(cat "$_refresh_txn/owner" 2>/dev/null)" = "$SOURCE_GSTACK_DIR" ] \
+    && [ "$(cat "$_refresh_txn/refresh-token" 2>/dev/null)" = "$_refresh_token" ] \
+    && [ "$(sed -n 's/^phase=//p' "$GSTACK_STATE_ROOT/session-update-transaction" 2>/dev/null | head -1)" = active ] \
+    && [ "$(sed -n 's/^source=//p' "$GSTACK_STATE_ROOT/session-update-transaction" 2>/dev/null | head -1)" = "$SOURCE_GSTACK_DIR" ] \
+    && [ "$(sed -n 's/^transaction=//p' "$GSTACK_STATE_ROOT/session-update-transaction" 2>/dev/null | head -1)" = "$_refresh_txn" ] \
+    && kill -0 "$(cat "$GSTACK_STATE_ROOT/.setup-lock/pid" 2>/dev/null)" 2>/dev/null || {
+      echo "Error: automatic Codex refresh transaction is not active or no longer owned by its updater." >&2
+      exit 1
+    }
+  if [ "${GSTACK_SETUP_REFRESH_PARENT:-0}" = 1 ] && [ -z "${GSTACK_SETUP_REFRESH_CHILD:-}" ]; then
+    _refresh_from="$(sed -n 's/^from=//p' "$GSTACK_STATE_ROOT/session-update-transaction" | head -1)"
+    _refresh_target="$(sed -n 's/^target=//p' "$GSTACK_STATE_ROOT/session-update-transaction" | head -1)"
+    git -C "$SOURCE_GSTACK_DIR" diff --quiet "$_refresh_from" "$_refresh_target" -- \
+      browse design make-pdf lib package.json bun.lock bun.lockb scripts/build.sh \
+      scripts/build-app.sh scripts/build-cso.sh scripts/build-cso-windows.ps1 \
+      scripts/write-version-files.sh bin/gstack-global-discover.ts || {
+        echo "Error: automatic Codex refresh requires a runtime build that this bounded mode will not perform." >&2
+        exit 1
+      }
+  fi
+  export GSTACK_SKIP_PLAYWRIGHT=1
+fi
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ] && [ "${GSTACK_SETUP_REFRESH_CHILD:-0}" = 1 ]; then
+  case "${GSTACK_SETUP_CODEX_DESTINATION:-}" in /*) ;; *) echo "Error: automatic Codex refresh needs its registered destination." >&2; exit 1 ;; esac
+  case "${GSTACK_SETUP_CODEX_PREFIX:-}" in true|false) ;; *) echo "Error: automatic Codex refresh needs its registered prefix." >&2; exit 1 ;; esac
+fi
 
 # --claude-model is validated before anything is written, and persisted once
 # Claude is known to be selected (below, and in the --refresh-registered parent).
@@ -346,6 +378,49 @@ log() { [ "$QUIET" -eq 0 ] && echo "$@" || true; }
 # are never repointed. Pre-registry installs that resolve to this checkout are
 # discovered and registered; with nothing registered or discovered, the
 # selected host (default claude) is installed as before.
+if [ "$REFRESH_REGISTERED" -eq 1 ] && [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ] \
+  && [ "${GSTACK_SETUP_REFRESH_PARENT:-0}" = 1 ] && [ -z "${GSTACK_SETUP_REFRESH_CHILD:-}" ]; then
+  _RF_SUMMARY="$(mktemp "${TMPDIR:-/tmp}/gstack-refresh-codex.XXXXXX")"
+  _RF_TARGETS=0
+  _RF_FAILED=0
+  while IFS=$'\t' read -r _rf_host _rf_scope _rf_project _rf_dest _rf_root _rf_src _rf_ver _rf_prefix _rf_render _rf_updated _rf_model _rf_commit; do
+    [ "$_rf_host" = codex ] || continue
+    [ "$_rf_src" = "$SOURCE_GSTACK_DIR" ] || continue
+    case "$_rf_scope" in global|project) ;; *) continue ;; esac
+    case "$_rf_dest" in /*) ;; *) echo "Error: registered Codex destination is not absolute; refresh deferred." >&2; rm -f "$_RF_SUMMARY"; exit 1 ;; esac
+    [ "$_rf_root" = "$_rf_dest/gstack" ] || { echo "Error: registered Codex runtime root does not match its destination; refresh deferred." >&2; rm -f "$_RF_SUMMARY"; exit 1; }
+    case "$_rf_model" in ''|-) echo "Error: registered Codex model is missing at $_rf_dest; run ./setup --host codex --global once to persist it." >&2; rm -f "$_RF_SUMMARY"; exit 1 ;; esac
+    case "$_rf_model" in *[!A-Za-z0-9._-]*|-*) echo "Error: registered Codex model is invalid at $_rf_dest; refresh deferred." >&2; rm -f "$_RF_SUMMARY"; exit 1 ;; esac
+    case "$_rf_prefix" in true|false) ;; *) echo "Error: registered Codex skill prefix is missing at $_rf_dest; refresh deferred." >&2; rm -f "$_RF_SUMMARY"; exit 1 ;; esac
+    [ -d "$_rf_root" ] || [ -L "$_rf_root" ] || { echo "Error: registered Codex runtime root is missing at $_rf_root; refresh deferred." >&2; rm -f "$_RF_SUMMARY"; exit 1; }
+    _rf_scope_args=(--global)
+    _rf_cwd="$SOURCE_GSTACK_DIR"
+    if [ "$_rf_scope" = project ]; then
+      case "$_rf_project" in /*) ;; *) echo "Error: registered Codex project path is invalid; refresh deferred." >&2; rm -f "$_RF_SUMMARY"; exit 1 ;; esac
+      [ -d "$_rf_project" ] && [ "$(cd "$_rf_project" 2>/dev/null && pwd -P)" = "$_rf_project" ] || { echo "Error: registered Codex project is missing or changed at $_rf_project; refresh deferred." >&2; rm -f "$_RF_SUMMARY"; exit 1; }
+      _rf_scope_args=(--local)
+      _rf_cwd="$_rf_project"
+    fi
+    _RF_TARGETS=$((_RF_TARGETS + 1))
+    _rf_env=(GSTACK_SETUP_REFRESH_CHILD=1 GSTACK_SETUP_REFRESH_PARENT=0 GSTACK_SETUP_AUTO_CODEX_REFRESH=1 GSTACK_SETUP_REFRESH_TOKEN="${GSTACK_SETUP_REFRESH_TOKEN:-}" GSTACK_SETUP_REFRESH_TRANSACTION="${GSTACK_SETUP_REFRESH_TRANSACTION:-}" GSTACK_SETUP_CODEX_DESTINATION="$_rf_dest" GSTACK_SETUP_CODEX_SCOPE="$_rf_scope" GSTACK_SETUP_CODEX_PROJECT="$_rf_project" GSTACK_SETUP_CODEX_PREFIX="$_rf_prefix" GSTACK_SETUP_SUMMARY_FILE="$_RF_SUMMARY")
+    if ! (cd "$_rf_cwd" && env "${_rf_env[@]}" bash "$SOURCE_GSTACK_DIR/setup" --host codex "${_rf_scope_args[@]}" --model "$_rf_model" -q </dev/null); then
+      _RF_FAILED=1
+      break
+    fi
+  done <<EOF
+$(gstack_install_registry_rows)
+EOF
+  if [ "$_RF_TARGETS" -eq 0 ]; then
+    echo "Error: automatic Codex refresh found no registered Codex installs; no install was changed." >&2
+    rm -f "$_RF_SUMMARY"
+    exit 1
+  fi
+  if grep -q $'\tfailed\t' "$_RF_SUMMARY" 2>/dev/null; then _RF_FAILED=1; fi
+  gstack_install_registry_render < "$_RF_SUMMARY"
+  rm -f "$_RF_SUMMARY"
+  exit "$_RF_FAILED"
+fi
+
 if [ "$REFRESH_REGISTERED" -eq 1 ] && [ -z "${GSTACK_SETUP_REFRESH_CHILD:-}" ]; then
   gstack_install_registry_reconcile || true
   _RF_HERE="$(pwd -P)"
@@ -457,6 +532,9 @@ fi
 INSTALL_SKILLS_DIR="$(dirname "$INSTALL_GSTACK_DIR")"
 BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse"
 CODEX_SKILLS="${CODEX_HOME:-$HOME/.codex}/skills"
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ]; then
+  CODEX_SKILLS="$GSTACK_SETUP_CODEX_DESTINATION"
+fi
 CODEX_GSTACK="$CODEX_SKILLS/gstack"
 FACTORY_SKILLS="$HOME/.factory/skills"
 FACTORY_GSTACK="$FACTORY_SKILLS/gstack"
@@ -674,16 +752,18 @@ _preserve_skill_copy_edits() {
 _record_skill_copies() {
   local root="$1" f tmp old="" new
   _COPIES_REFRESHED="" _COPIES_REMOVED=""
+  _gstack_skill_copies_lock || return 1
   if [ -f "$_SKILL_COPIES_FILE" ]; then
     old="$(awk -F'\t' -v r="$root/" 'index($2, r) == 1 { print substr($2, length(r) + 1) }' "$_SKILL_COPIES_FILE" | sort)"
   fi
   new="$(cd "$root" 2>/dev/null && find . -name SKILL.md -type f | sed 's|^\./||' | sort)"
-  mkdir -p "$GSTACK_STATE_ROOT" || return 1
+  mkdir -p "$GSTACK_STATE_ROOT" || { _gstack_skill_copies_unlock; return 1; }
   tmp="$_SKILL_COPIES_FILE.tmp.$$"
   {
     [ -f "$_SKILL_COPIES_FILE" ] && awk -F'\t' -v r="$root/" 'index($2, r) != 1' "$_SKILL_COPIES_FILE"
     for f in $new; do printf '%s\t%s\n' "$(_skill_copy_hash "$root/$f")" "$root/$f"; done
-  } > "$tmp" && mv -f "$tmp" "$_SKILL_COPIES_FILE" || { rm -f "$tmp"; return 1; }
+  } > "$tmp" && mv -f "$tmp" "$_SKILL_COPIES_FILE" || { rm -f "$tmp"; _gstack_skill_copies_unlock; return 1; }
+  _gstack_skill_copies_unlock
   _COPIES_REFRESHED="$(printf '%s\n' "$new" | tr '\n' ' ' | sed 's/ *$//')"
   _COPIES_REMOVED="$(printf '%s\n' "$old" | grep -vxF -f <(printf '%s\n' "$new") | tr '\n' ' ' | sed 's/ *$//')"
 }
@@ -1077,10 +1157,12 @@ _setup_retry_command() {
 }
 _setup_arm_begin() { _SETUP_ARM="$1	$2	$3"; }
 _setup_arm_publish() {
-  local host="$1" scope="$2" project="$3" dest="$4" root="$5" prefix="$6" render="${7:-committed}" old
+  local host="$1" scope="$2" project="$3" dest="$4" root="$5" prefix="$6" render="${7:-committed}" old registry_model=- source_commit=-
   old="$(gstack_install_registry_rows | awk -F '\t' -v h="$host" -v d="$dest" '$1 == h && $4 == d { v = $7 } END { print v }')"
   _SETUP_ARM=""
-  if ! gstack_install_registry_upsert "$host" "$scope" "$project" "$dest" "$root" "$SOURCE_GSTACK_DIR" "$SETUP_VERSION" "$prefix" "$render"; then
+  if [ "$host" = codex ]; then registry_model="$CODEX_GENERATION_MODEL"; fi
+  source_commit="$(git -C "$SOURCE_GSTACK_DIR" rev-parse HEAD 2>/dev/null || echo -)"
+  if ! gstack_install_registry_upsert "$host" "$scope" "$project" "$dest" "$root" "$SOURCE_GSTACK_DIR" "$SETUP_VERSION" "$prefix" "$render" "$registry_model" "$source_commit"; then
     _setup_row "$host" "$scope" "$dest" "${old:--}" "$SETUP_VERSION" failed "installed, but the registry write failed, so upgrades will not refresh it; retry: $(_setup_retry_command "$host")"
     return 0
   fi
@@ -1162,6 +1244,10 @@ bun "$SOURCE_GSTACK_DIR/scripts/preflight-codex-overlap.ts" \
 # Priority: CLI flag > saved config > interactive prompt (or flat default for non-TTY)
 GSTACK_CONFIG="$SOURCE_GSTACK_DIR/bin/gstack-config"
 export GSTACK_SETUP_RUNNING=1  # Prevent gstack-config post-set hook from triggering relink mid-setup
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ]; then
+  [ "$GSTACK_SETUP_CODEX_PREFIX" = true ] && SKILL_PREFIX=1 || SKILL_PREFIX=0
+  SKILL_PREFIX_FLAG=1
+fi
 if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
   _saved_prefix="$("$GSTACK_CONFIG" get skill_prefix 2>/dev/null || true)"
   if [ "$_saved_prefix" = "true" ]; then
@@ -1192,11 +1278,11 @@ if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
       SKILL_PREFIX=0
     fi
     # Save the choice for future runs
-    "$GSTACK_CONFIG" set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)" 2>/dev/null || true
+    [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ] || "$GSTACK_CONFIG" set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)" 2>/dev/null || true
   fi
 else
   # Flag was passed explicitly — persist the choice
-  "$GSTACK_CONFIG" set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)" 2>/dev/null || true
+  [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ] || "$GSTACK_CONFIG" set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)" 2>/dev/null || true
 fi
 
 # ─── disabled_skills (gstack-config set disabled_skills a,b) ─────────────────
@@ -1655,14 +1741,26 @@ gstack_claude_overlay "$SOURCE_GSTACK_DIR" "$SOURCE_GSTACK_DIR/bin/gstack-config
 # This also repairs existing Codex/Kiro installs during a Claude-only setup.
 # A failed/foreign replacement retains its old render even when build runs
 # --host all later. On success, normal generation may prune orphan old renders.
-export GSTACK_DEFER_CLAUDE_RENAME_PRUNE=1
-export GSTACK_CODEX_GENERATION_MODEL="$CODEX_GENERATION_MODEL"
-if CODEX_HOME="$(dirname "$CODEX_SKILLS")" GSTACK_RENAME_COPY="$IS_WINDOWS" bun_cmd "$SOURCE_GSTACK_DIR/bin/gstack-migrate-claude-code" \
-  --install-dir "$SOURCE_GSTACK_DIR" --skills-dir "$INSTALL_SKILLS_DIR"; then
-  if [ "$CODEX_REPO_LOCAL" -eq 0 ]; then unset GSTACK_DEFER_CLAUDE_RENAME_PRUNE; fi
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" != 1 ]; then
+  export GSTACK_DEFER_CLAUDE_RENAME_PRUNE=1
+  export GSTACK_CODEX_GENERATION_MODEL="$CODEX_GENERATION_MODEL"
+  if CODEX_HOME="$(dirname "$CODEX_SKILLS")" GSTACK_RENAME_COPY="$IS_WINDOWS" bun_cmd "$SOURCE_GSTACK_DIR/bin/gstack-migrate-claude-code" \
+    --install-dir "$SOURCE_GSTACK_DIR" --skills-dir "$INSTALL_SKILLS_DIR"; then
+    if [ "$CODEX_REPO_LOCAL" -eq 0 ]; then unset GSTACK_DEFER_CLAUDE_RENAME_PRUNE; fi
+  fi
 fi
 
 # 1. Build browse binary if needed (smart rebuild: stale sources, package.json, lock).
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ]; then
+  CSO_BUILD_AVAILABLE=0
+  CSO_FAIL_REASON=automatic-refresh-build-disabled
+  _EXE=""
+  [ -x "$BROWSE_BIN" ] && [ -x "$SOURCE_GSTACK_DIR/design/dist/design" ] && [ -x "$SOURCE_GSTACK_DIR/make-pdf/dist/pdf" ] || {
+    echo "gstack setup failed: bounded automatic refresh will not build binaries or install dependencies; the required local runtime artifacts are missing." >&2
+    exit 1
+  }
+  NEEDS_BUILD=0
+else
 probe_cso_build_prerequisites
 _EXE=""
 if [ "$IS_WINDOWS" -eq 1 ]; then _EXE=".exe"; fi
@@ -1695,6 +1793,8 @@ fi
 # the binaries embed (browse/src re-exports them), so it is part of the set.
 if [ "$NEEDS_BUILD" -eq 0 ]; then
   if [ -n "$(find "$SOURCE_GSTACK_DIR/browse/src" "$SOURCE_GSTACK_DIR/make-pdf/src" "$SOURCE_GSTACK_DIR/design/src" "$SOURCE_GSTACK_DIR/lib" -type f -newer "$BUILD_STAMP" -print -quit 2>/dev/null)" ]; then
+    NEEDS_BUILD=1
+  elif [ -f "$SOURCE_GSTACK_DIR/bin/gstack-global-discover.ts" ] && [ "$SOURCE_GSTACK_DIR/bin/gstack-global-discover.ts" -nt "$BUILD_STAMP" ]; then
     NEEDS_BUILD=1
   elif [ "$SOURCE_GSTACK_DIR/package.json" -nt "$BUILD_STAMP" ]; then
     NEEDS_BUILD=1
@@ -1806,8 +1906,9 @@ if [ "$NEEDS_BUILD" -eq 1 ]; then
     fi
   fi
 fi
+fi
 
-if [ "$CSO_BUILD_AVAILABLE" -eq 1 ]; then
+if [ "$CSO_BUILD_AVAILABLE" -eq 1 ] && [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" != 1 ]; then
   if [ ! -x "$SOURCE_GSTACK_DIR/bin/gstack-cso-launcher$_EXE" ] || [ ! -x "$SOURCE_GSTACK_DIR/bin/gstack-cso-core$_EXE" ] || [ ! -f "$SOURCE_GSTACK_DIR/bin/.gstack-cso-generation" ] || { [ "$IS_WINDOWS" -eq 0 ] && [ ! -x "$SOURCE_GSTACK_DIR/bin/gstack-cso-watchdog" ]; } || { [ "$IS_WINDOWS" -eq 1 ] && [ ! -f "$SOURCE_GSTACK_DIR/bin/.gstack-cso-generation.lock" ]; }; then
     echo "gstack setup failed: CSO build completed without its required native artifact set" >&2
     exit 1
@@ -1851,7 +1952,9 @@ if [ "$NEEDS_AGENTS_GEN" -eq 1 ]; then
   log "Generating .agents/ skill docs..."
   (
     cd "$SOURCE_GSTACK_DIR"
-    bun_cmd install --frozen-lockfile 2>/dev/null || bun_cmd install
+    if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" != 1 ]; then
+      bun_cmd install --frozen-lockfile 2>/dev/null || bun_cmd install
+    fi
     bun_cmd run gen:skill-docs --host codex --model "$CODEX_GENERATION_MODEL" ${_DISABLED_CSV:+"--disabled-skills=$_DISABLED_CSV"}
   )
   _prune_stale_generated "$SOURCE_GSTACK_DIR" "$AGENTS_DIR" "$CODEX_SKILLS"
@@ -1949,7 +2052,11 @@ case "$_PW_INSTALL_TIMEOUT" in ''|*[!0-9]*) _PW_INSTALL_TIMEOUT=600 ;; esac
 _PW_INSTALL_TIMEOUT=$((10#$_PW_INSTALL_TIMEOUT))
 [ "$_PW_INSTALL_TIMEOUT" -gt 0 ] || _PW_INSTALL_TIMEOUT=600
 
-if [ "${GSTACK_SKIP_PLAYWRIGHT:-0}" = "1" ]; then
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ]; then
+  # This trusted path is intentionally bounded: do not probe a browser cache,
+  # clear quarantine, or invoke bunx even when Chromium is absent.
+  _pw_fail skipped "bounded automatic refresh never provisions or modifies Playwright browsers"
+elif [ "${GSTACK_SKIP_PLAYWRIGHT:-0}" = "1" ]; then
   _pw_fail skipped "GSTACK_SKIP_PLAYWRIGHT=1 — Chromium install skipped by request (#913)"
 elif [ -n "${_PLAYWRIGHT_UNSUPPORTED_ARCH:-}" ]; then
   _pw_fail unsupported-platform "Ubuntu 26.04 architecture $_PLAYWRIGHT_UNSUPPORTED_ARCH has no supported Playwright Chromium fallback; no browser install attempted"
@@ -3336,6 +3443,10 @@ fi
 # 5. Install for Codex
 if [ "$INSTALL_CODEX" -eq 1 ]; then
   if [ "$CODEX_REPO_LOCAL" -eq 1 ]; then _CX_SCOPE=project; _CX_PROJECT="$_codex_project"; else _CX_SCOPE=global; _CX_PROJECT=-; fi
+  if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ]; then
+    _CX_SCOPE="$GSTACK_SETUP_CODEX_SCOPE"
+    _CX_PROJECT="$GSTACK_SETUP_CODEX_PROJECT"
+  fi
   _setup_arm_begin codex "$_CX_SCOPE" "$CODEX_SKILLS"
   if [ "$INSTALL_CLAUDE" -eq 0 ]; then
     case "$INSTALL_SKILLS_DIR" in
@@ -3604,8 +3715,8 @@ fi
 # so the runtime assets must live there for both global and repo-local installs.
 if [ "$INSTALL_CODEX" -eq 1 ]; then
   _setup_arm_begin codex "$_CX_SCOPE" "$CODEX_SKILLS"
-  create_agents_sidecar "$SOURCE_GSTACK_DIR"
-  _setup_arm_publish codex "$_CX_SCOPE" "$_CX_PROJECT" "$CODEX_SKILLS" "$CODEX_GSTACK" - "${_CODEX_RENDER_ROOT:-committed}"
+  [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" = 1 ] || create_agents_sidecar "$SOURCE_GSTACK_DIR"
+  _setup_arm_publish codex "$_CX_SCOPE" "$_CX_PROJECT" "$CODEX_SKILLS" "$CODEX_GSTACK" "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)" "${_CODEX_RENDER_ROOT:-committed}"
 fi
 
 # 8. Run pending version migrations
@@ -3616,6 +3727,7 @@ fi
 # marker, and it only advances past a migration that succeeded. A failed
 # migration is reported as a failed row and is retried by the next ./setup.
 # Install/host migrations are tracked per install by the registry row version.
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" != 1 ]; then
 MIGRATIONS_DIR="$SOURCE_GSTACK_DIR/gstack-upgrade/migrations"
 CURRENT_VERSION="$SETUP_VERSION"
 MIGRATION_MARKER="$GSTACK_STATE_ROOT/.last-setup-version"
@@ -3661,9 +3773,10 @@ if [ -n "$_MIGRATION_FAILED" ]; then
 elif [ "$CURRENT_VERSION" != "unknown" ]; then
   echo "$CURRENT_VERSION" > "$MIGRATION_MARKER"
 fi
+fi
 
 # 9. First-time welcome + legacy cleanup
-if [ ! -f "$HOME/.gstack/.welcome-seen" ]; then
+if [ "$GSTACK_SETUP_AUTO_CODEX_REFRESH" != 1 ] && [ ! -f "$HOME/.gstack/.welcome-seen" ]; then
   log ""
   log "  gstack is ready. First move:"
   log "    New idea / empty repo?   /office-hours  or  /spec"
@@ -3702,7 +3815,7 @@ fi
 #
 # WARNING for future code AND migrations (the v1.58.0.0.sh defect class):
 # NEVER register ${SCRIPT_DIR}/$SOURCE_GSTACK_DIR-relative hook paths.
-CANONICAL_GSTACK_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/gstack"
+CANONICAL_GSTACK_ROOT="${GSTACK_ROOT:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/gstack}"
 # Split-brain guard: the installer currently hardcodes $HOME/.claude/skills
 # (setup:1601 TODO), so a CLAUDE_CONFIG_DIR override can name a root that was
 # never installed. Fall back to where the install actually lives — both are

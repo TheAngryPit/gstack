@@ -11,7 +11,7 @@
 #
 # Tab-separated columns (no header row; '#' lines are comments; an empty
 # field is stored as '-' because bash read collapses adjacent tabs):
-#   host scope project destination install_root source version prefix render updated_at
+#   host scope project destination install_root source version prefix render updated_at codex_model source_commit
 #
 #   scope        global | project
 #   project      project root for scope=project, '-' otherwise
@@ -57,6 +57,95 @@ _gstack_registry_unlock() {
   rm -rf "$(gstack_install_registry_file).lock"
 }
 
+# gstack_install_registry_restore_codex_snapshot SNAPSHOT SOURCE TARGET_VERSION TARGET_SHA
+# Restore only Codex rows owned by SOURCE, and only when the current row is the
+# exact prior row or the row this updater's setup child was expected to write.
+# Every other row remains byte-for-byte represented in the atomically replaced
+# registry, so concurrent installs from unrelated checkouts survive rollback.
+gstack_install_registry_restore_codex_snapshot() {
+  local snapshot="$1" source="$2" target_version="$3" target_sha="$4"
+  local file current tmp rc=0
+  file="$(gstack_install_registry_file)" || return 1
+  [ -f "$snapshot" ] || return 1
+  _gstack_registry_lock || return 1
+  current="$file.current.$$"; tmp="$file.tmp.$$"
+  gstack_install_registry_rows > "$current" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    awk -F '\t' -v source="$source" -v version="$target_version" -v sha="$target_sha" '
+      FILENAME == ARGV[1] {
+        if ($1 == "codex" && $6 == source) { old[$4]=$0; n=split($0, a, "\t"); for (i=1;i<=n;i++) oldf[$4,i]=a[i] }
+        next
+      }
+      {
+        if ($1 == "codex" && $6 == source && ($4 in old)) {
+          d=$4; same=1
+          for (i=1;i<=9;i++) if ($i != oldf[d,i]) same=0
+          if ($11 != oldf[d,11] || $12 != oldf[d,12]) same=0
+          if (same) { print; seen[d]=1; next }
+          expected=($1==oldf[d,1] && $2==oldf[d,2] && $3==oldf[d,3] && $4==oldf[d,4] && $5==oldf[d,5] && $6==source && $7==version && $8==oldf[d,8] && $9==oldf[d,9] && $11==oldf[d,11] && $12==sha)
+          if (expected) { print old[d]; seen[d]=1; next }
+          conflict=1; print; seen[d]=1; next
+        }
+        print
+      }
+      END { for (d in old) if (!(d in seen)) print old[d]; if (conflict) exit 3 }
+    ' "$snapshot" "$current" > "$tmp" || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || rc=1
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; then
+      _gstack_registry_publish "$tmp" || rc=1
+      [ "$rc" -ne 0 ] || [ "$rc" -eq 3 ] || rc=0
+    fi
+  fi
+  rm -f "$current" "$tmp"
+  _gstack_registry_unlock
+  [ "$rc" -eq 0 ] || { echo "gstack: registry rollback preserved a concurrent row or failed to publish" >&2; return 1; }
+}
+
+# skill-copies.tsv is owned by setup's generated-copy recorder. Use a dedicated
+# lock so rollback can merge only the restored runtime roots and preserve rows
+# recorded concurrently for unrelated skills/install roots.
+_gstack_skill_copies_lock() {
+  local file="${GSTACK_STATE_ROOT:?GSTACK_STATE_ROOT is not set}/skill-copies.tsv" lock="${GSTACK_STATE_ROOT:?GSTACK_STATE_ROOT is not set}/skill-copies.tsv.lock" owner tries reap
+  mkdir -p "$GSTACK_STATE_ROOT" || return 1
+  tries=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    owner="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      reap="$lock.reap.$$"
+      if mv "$lock" "$reap" 2>/dev/null; then rm -rf "$reap"; continue; fi
+    fi
+    tries=$((tries + 1)); [ "$tries" -lt 100 ] || return 1; sleep 0.1
+  done
+  printf '%s\n' "$$" > "$lock/pid"
+}
+_gstack_skill_copies_unlock() {
+  local lock="${GSTACK_STATE_ROOT:?GSTACK_STATE_ROOT is not set}/skill-copies.tsv.lock" owner
+  owner="$(cat "$lock/pid" 2>/dev/null || true)"
+  [ "$owner" = "$$" ] && rm -rf "$lock"
+}
+gstack_skill_copies_restore_snapshot() {
+  local snapshot="$1" roots="$2" file="$GSTACK_STATE_ROOT/skill-copies.tsv" current="$GSTACK_STATE_ROOT/skill-copies.tsv.current.$$" tmp="$GSTACK_STATE_ROOT/skill-copies.tsv.tmp.$$"
+  [ -f "$snapshot" ] && [ -f "$roots" ] || return 1
+  _gstack_skill_copies_lock || return 1
+  : > "$current"
+  [ ! -f "$file" ] || cp "$file" "$current" || { _gstack_skill_copies_unlock; return 1; }
+  awk -F '\t' -v roots="$roots" '
+    BEGIN { while ((getline r < roots) > 0) if (r != "") root[++n]=r; close(roots) }
+    { keep=1; for (i=1;i<=n;i++) if (index($2, root[i] "/") == 1) keep=0; if (keep) print }
+  ' "$current" > "$tmp" || { rm -f "$current" "$tmp"; _gstack_skill_copies_unlock; return 1; }
+  awk -F '\t' -v roots="$roots" '
+    BEGIN { while ((getline r < roots) > 0) if (r != "") root[++n]=r; close(roots) }
+    { for (i=1;i<=n;i++) if (index($2, root[i] "/") == 1) { print; break } }
+  ' "$snapshot" >> "$tmp" || { rm -f "$current" "$tmp"; _gstack_skill_copies_unlock; return 1; }
+  if [ -s "$tmp" ]; then chmod 600 "$tmp" && mv -f "$tmp" "$file"
+  else rm -f "$tmp" "$file"
+  fi
+  local rc=$?
+  rm -f "$current" "$tmp"
+  _gstack_skill_copies_unlock
+  return "$rc"
+}
+
 # _gstack_registry_publish TMP — atomically replace the registry with TMP.
 _gstack_registry_publish() {
   local file
@@ -72,18 +161,20 @@ gstack_install_registry_rows() {
   grep -v '^#' "$file" | grep -v '^[[:space:]]*$' || true
 }
 
-# gstack_install_registry_upsert HOST SCOPE PROJECT DESTINATION INSTALL_ROOT SOURCE VERSION PREFIX RENDER
+# gstack_install_registry_upsert HOST SCOPE PROJECT DESTINATION INSTALL_ROOT SOURCE VERSION PREFIX RENDER [CODEX_MODEL] [SOURCE_COMMIT]
 # Publish one row (replacing the row with the same host + destination). Call
 # only after the install is active.
 gstack_install_registry_upsert() {
-  local field file tmp now rc
+  local field file tmp now rc codex_model source_commit
   for field in "$@"; do
     case "$field" in
       *"	"*|*"
 "*) echo "gstack: not registering an install whose path contains a tab or newline: $field" >&2; return 1 ;;
     esac
   done
-  [ "$#" -eq 9 ] || { echo "gstack-install-registry: upsert needs 9 fields, got $#" >&2; return 1; }
+  [ "$#" -ge 9 ] && [ "$#" -le 11 ] || { echo "gstack-install-registry: upsert needs 9 to 11 fields, got $#" >&2; return 1; }
+  codex_model="${10:--}"
+  source_commit="${11:--}"
   file="$(gstack_install_registry_file)" || return 1
   _gstack_registry_lock || return 1
   tmp="$file.tmp.$$"
@@ -91,7 +182,7 @@ gstack_install_registry_upsert() {
   rc=0
   {
     gstack_install_registry_rows | awk -F '\t' -v h="$1" -v d="$4" '!($1 == h && $4 == d)'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${1:--}" "${2:--}" "${3:--}" "${4:--}" "${5:--}" "${6:--}" "${7:--}" "${8:--}" "${9:--}" "$now"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${1:--}" "${2:--}" "${3:--}" "${4:--}" "${5:--}" "${6:--}" "${7:--}" "${8:--}" "${9:--}" "$now" "$codex_model" "$source_commit"
   } > "$tmp" || rc=1
   [ "$rc" -eq 0 ] && { _gstack_registry_publish "$tmp" || rc=1; }
   rm -f "$tmp"

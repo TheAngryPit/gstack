@@ -3,9 +3,10 @@
 #
 # Output (one line, or nothing):
 #   JUST_UPGRADED <old> <new>       — marker found from recent upgrade
-#   UPGRADE_AVAILABLE <old> <new>   — remote VERSION differs from local
+#   UPGRADE_AVAILABLE <old> <new> <sha> — trusted fork commit passed required CI
+#   MANUAL_UPGRADE_AVAILABLE <old> <new> <target> <repo> — other origin has a newer VERSION; activation stays manual
 #   CHECK_FAILED <reason>           — the check crashed, or (--force only) the
-#                                     remote version could not be read
+#                                     the trusted target or its CI could not be verified
 #   (nothing)                       — up to date, snoozed, disabled, or check skipped
 #
 # A remote version that cannot be read is cached as CHECK_FAILED (short TTL),
@@ -14,8 +15,6 @@
 #
 # Env overrides (for testing):
 #   GSTACK_DIR          — override auto-detected gstack root
-#   GSTACK_REMOTE_URL   — override remote VERSION URL (branch-pinned fallback)
-#   GSTACK_REMOTE_REPO  — override remote git URL for ls-remote SHA resolution
 #   GSTACK_HOME     — relocate the state root (chain: bin/gstack-state-root.sh)
 set -euo pipefail
 
@@ -58,8 +57,6 @@ CACHE_FILE="$STATE_DIR/last-update-check"
 MARKER_FILE="$STATE_DIR/just-upgraded-from"
 SNOOZE_FILE="$STATE_DIR/update-snoozed"
 VERSION_FILE="$GSTACK_DIR/VERSION"
-REMOTE_URL="${GSTACK_REMOTE_URL:-https://raw.githubusercontent.com/garrytan/gstack/main/VERSION}"
-REMOTE_REPO="${GSTACK_REMOTE_REPO:-https://github.com/garrytan/gstack.git}"
 
 # ─── Force flag (busts cache + snooze for standalone /gstack-upgrade) ──
 FORCE=0
@@ -99,24 +96,24 @@ if [ ! -f "$STATE_DIR/.codex-desc-healed" ]; then
 fi
 
 # ─── Snooze helper ──────────────────────────────────────────
-# check_snooze <remote_version>
+# check_snooze <candidate_sha>
 #   Returns 0 if snoozed (should stay quiet), 1 if not snoozed (should output).
 #
-#   Snooze file format: <version> <level> <epoch>
+#   Snooze file format: <candidate_sha> <level> <epoch>
 #   Level durations: 1=24h, 2=48h, 3+=7d
-#   New version (version mismatch) resets snooze.
+#   A new candidate commit resets snooze, including same-version commits.
 check_snooze() {
-  local remote_ver="$1"
+  local candidate_sha="$1"
   if [ ! -f "$SNOOZE_FILE" ]; then
     return 1  # no snooze file → not snoozed
   fi
-  local snoozed_ver snoozed_level snoozed_epoch
-  snoozed_ver="$(awk '{print $1}' "$SNOOZE_FILE" 2>/dev/null || true)"
+  local snoozed_sha snoozed_level snoozed_epoch
+  snoozed_sha="$(awk '{print $1}' "$SNOOZE_FILE" 2>/dev/null || true)"
   snoozed_level="$(awk '{print $2}' "$SNOOZE_FILE" 2>/dev/null || true)"
   snoozed_epoch="$(awk '{print $3}' "$SNOOZE_FILE" 2>/dev/null || true)"
 
   # Validate: all three fields must be non-empty
-  if [ -z "$snoozed_ver" ] || [ -z "$snoozed_level" ] || [ -z "$snoozed_epoch" ]; then
+  if [ -z "$snoozed_sha" ] || [ -z "$snoozed_level" ] || [ -z "$snoozed_epoch" ]; then
     return 1  # corrupt file → not snoozed
   fi
 
@@ -124,8 +121,8 @@ check_snooze() {
   case "$snoozed_level" in *[!0-9]*) return 1 ;; esac
   case "$snoozed_epoch" in *[!0-9]*) return 1 ;; esac
 
-  # New version dropped? Ignore snooze.
-  if [ "$snoozed_ver" != "$remote_ver" ]; then
+  # New target commit? Ignore snooze.
+  if [ "$snoozed_sha" != "$candidate_sha" ]; then
     return 1
   fi
 
@@ -147,6 +144,19 @@ check_snooze() {
   return 1  # snooze expired
 }
 
+github_repo_slug() {
+  local remote="$1" repo
+  case "$remote" in
+    https://github.com/*) repo="${remote#https://github.com/}" ;;
+    ssh://git@github.com/*) repo="${remote#ssh://git@github.com/}" ;;
+    git@github.com:*) repo="${remote#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  repo="${repo%/}"; repo="${repo%.git}"
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s\n' "$repo"
+}
+
 # ─── Step 1: Read local version ──────────────────────────────
 LOCAL=""
 if [ -f "$VERSION_FILE" ]; then
@@ -155,6 +165,27 @@ fi
 if [ -z "$LOCAL" ]; then
   exit 0  # No VERSION file → skip check
 fi
+LOCAL_SHA="$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null || true)"
+if ! printf '%s' "$LOCAL_SHA" | grep -qE '^[0-9a-f]{40,64}$'; then
+  LOCAL_SHA=unknown
+fi
+ORIGIN="$(git -C "$GSTACK_DIR" config --get remote.origin.url 2>/dev/null || true)"
+ORIGIN="${ORIGIN%/}"
+case "$ORIGIN" in
+  https://github.com/TheAngryPit/gstack|https://github.com/TheAngryPit/gstack.git|\
+  ssh://git@github.com/TheAngryPit/gstack|ssh://git@github.com/TheAngryPit/gstack.git|\
+  git@github.com:TheAngryPit/gstack|git@github.com:TheAngryPit/gstack.git)
+    TRUSTED_ORIGIN=1
+    CACHE_ROUTE=trusted
+    ;;
+  *)
+    TRUSTED_ORIGIN=0
+    MANUAL_REPO="${GSTACK_REMOTE_REPO:-$ORIGIN}"
+    MANUAL_SLUG="$(github_repo_slug "$MANUAL_REPO" 2>/dev/null || true)"
+    [ -n "$MANUAL_SLUG" ] || MANUAL_SLUG=unknown
+    CACHE_ROUTE="manual:$MANUAL_SLUG"
+    ;;
+esac
 
 # ─── Step 2: Check "just upgraded" marker ─────────────────────
 if [ -f "$MARKER_FILE" ]; then
@@ -169,14 +200,16 @@ if [ -f "$MARKER_FILE" ]; then
 fi
 
 # ─── Step 3: Check cache freshness ──────────────────────────
-# UP_TO_DATE: 60 min TTL (detect new releases quickly)
+# UP_TO_DATE: 60 min TTL (detect new commits quickly)
 # UPGRADE_AVAILABLE: 720 min TTL (keep nagging)
+# MANUAL_UPGRADE_AVAILABLE: 720 min TTL (keep origin-routed guidance visible)
 # CHECK_FAILED: 10 min TTL (retry soon, without re-fetching on every skill start)
 if [ -f "$CACHE_FILE" ]; then
   CACHED="$(cat "$CACHE_FILE" 2>/dev/null || true)"
   case "$CACHED" in
     UP_TO_DATE*)        CACHE_TTL=60 ;;
     UPGRADE_AVAILABLE*) CACHE_TTL=720 ;;
+    MANUAL_UPGRADE_AVAILABLE*) CACHE_TTL=720 ;;
     CHECK_FAILED*)      CACHE_TTL=10 ;;
     *)                  CACHE_TTL=0 ;;  # corrupt → force re-fetch
   esac
@@ -188,18 +221,38 @@ if [ -f "$CACHE_FILE" ]; then
         # A cached CHECK_FAILED replays silently: status is unknown, and a
         # preamble line every skill start for a transient outage is noise.
         CACHED_VER="$(echo "$CACHED" | awk '{print $2}')"
-        if [ "$CACHED_VER" = "$LOCAL" ]; then
+        CACHED_SHA="$(echo "$CACHED" | awk '{print $3}')"
+        CACHED_ROUTE="$(echo "$CACHED" | awk '{print $4}')"
+        if [ "$CACHED_VER" = "$LOCAL" ] && [ "$CACHED_SHA" = "$LOCAL_SHA" ] && [ "$CACHED_ROUTE" = "$CACHE_ROUTE" ]; then
           exit 0
         fi
         ;;
       UPGRADE_AVAILABLE*)
         CACHED_OLD="$(echo "$CACHED" | awk '{print $2}')"
-        if [ "$CACHED_OLD" = "$LOCAL" ]; then
-          CACHED_NEW="$(echo "$CACHED" | awk '{print $3}')"
-          if check_snooze "$CACHED_NEW"; then
+        CACHED_BASE_SHA="$(echo "$CACHED" | awk '{print $5}')"
+        CACHED_ROUTE="$(echo "$CACHED" | awk '{print $6}')"
+        if [ "$CACHED_OLD" = "$LOCAL" ] && [ "$CACHED_BASE_SHA" = "$LOCAL_SHA" ] && [ "$CACHED_ROUTE" = "$CACHE_ROUTE" ]; then
+          CACHED_TARGET_SHA="$(echo "$CACHED" | awk '{print $4}')"
+          if check_snooze "$CACHED_TARGET_SHA"; then
             exit 0  # snoozed — stay quiet
           fi
-          echo "$CACHED"
+          CACHED_NEW="$(echo "$CACHED" | awk '{print $3}')"
+          echo "UPGRADE_AVAILABLE $CACHED_OLD $CACHED_NEW $CACHED_TARGET_SHA"
+          exit 0
+        fi
+        ;;
+      MANUAL_UPGRADE_AVAILABLE*)
+        CACHED_OLD="$(echo "$CACHED" | awk '{print $2}')"
+        CACHED_BASE_SHA="$(echo "$CACHED" | awk '{print $5}')"
+        CACHED_SLUG="$(echo "$CACHED" | awk '{print $6}')"
+        CACHED_ROUTE="manual:$CACHED_SLUG"
+        if [ "$CACHED_OLD" = "$LOCAL" ] && [ "$CACHED_BASE_SHA" = "$LOCAL_SHA" ] && [ "$CACHED_ROUTE" = "$CACHE_ROUTE" ]; then
+          CACHED_TARGET="$(echo "$CACHED" | awk '{print $4}')"
+          if check_snooze "$CACHED_TARGET"; then
+            exit 0
+          fi
+          CACHED_NEW="$(echo "$CACHED" | awk '{print $3}')"
+          echo "MANUAL_UPGRADE_AVAILABLE $CACHED_OLD $CACHED_NEW $CACHED_TARGET $CACHED_SLUG"
           exit 0
         fi
         ;;
@@ -207,7 +260,7 @@ if [ -f "$CACHE_FILE" ]; then
   fi
 fi
 
-# ─── Step 4: Slow path — fetch remote version ────────────────
+# ─── Step 4: Slow path — resolve exact fork commit and required CI ───────
 mkdir -p "$STATE_DIR"
 
 # Fire Supabase install ping in background (parallel, non-blocking)
@@ -237,71 +290,78 @@ if [ -n "$_SUPA_URL" ] && [ -n "$_SUPA_KEY" ] && [ "${_TEL_TIER:-off}" != "off" 
   fi
 fi
 
-# Resolve VERSION via a SHA-pinned raw URL. GitHub's branch-raw CDN
-# (raw.githubusercontent.com/<owner>/<repo>/<branch>/...) can serve stale
-# content for several minutes after a push, which previously caused
-# /gstack-upgrade to silently report "up to date" right after a release
-# landed. git ls-remote always returns the live HEAD; SHA-pinned raw URLs
-# are immediately consistent.
-#
-# An explicit GSTACK_REMOTE_URL override (tests, mirrors) skips this path
-# so the override is honored verbatim.
-REMOTE=""
-if [ -z "${GSTACK_REMOTE_URL:-}" ]; then
-  # Disable credential prompts and apply a 5-second low-speed timeout so a
-  # flaky network or captive portal can't hang every skill preamble.
-  _REPO_HOST="${REMOTE_REPO#*://}"; _REPO_HOST="${_REPO_HOST#*@}"; _REPO_HOST="${_REPO_HOST%%[/:]*}"
-  _LSR_LINE="$(GSTACK_HOME="$STATE_DIR" _receipted_git open update-check "${_REPO_HOST:-unknown}" version-ls-remote "update_check!=false" \
-    bash -c 'GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 \
-      git ls-remote "$1" refs/heads/main 2>/dev/null' _ "$REMOTE_REPO" || true)"
-  _REMOTE_SHA="$(echo "$_LSR_LINE" | awk '{print $1}')"
-  if echo "$_REMOTE_SHA" | grep -qE '^[0-9a-f]{40}$'; then
-    _SHA_URL="https://raw.githubusercontent.com/garrytan/gstack/${_REMOTE_SHA}/VERSION"
-    REMOTE="$(_receipted_version_fetch "$_SHA_URL")"
+if [ "$TRUSTED_ORIGIN" != 1 ]; then
+  if [ "$MANUAL_SLUG" = unknown ]; then
+    printf 'CHECK_FAILED %s %s %s\n' "$LOCAL" "$LOCAL_SHA" "$CACHE_ROUTE" > "$CACHE_FILE"
+    [ "$FORCE" != "1" ] || echo "CHECK_FAILED update discovery requires a supported GitHub origin; no source was changed"
+    exit 0
   fi
-fi
-
-# Fallback: branch-pinned URL when ls-remote is unavailable (no git, no
-# network, mirror without refs/heads/main) or when GSTACK_REMOTE_URL was
-# explicitly overridden.
-if [ -z "$REMOTE" ]; then
-  REMOTE="$(_receipted_version_fetch "$REMOTE_URL")"
-fi
-REMOTE="$(echo "$REMOTE" | tr -d '[:space:]')"
-
-# Validate: must look like a version number (reject HTML error pages)
-if ! echo "$REMOTE" | grep -qE '^[0-9]+\.[0-9.]+$'; then
-  # Invalid or empty response: the remote version is UNKNOWN, not equal (#2786).
-  # Both fetches were tried when ls-remote resolved a SHA: name both.
-  _FAILED_URL="$(_display_url "$REMOTE_URL")"
-  if [ -n "${_SHA_URL:-}" ]; then
-    _FAILED_URL="$(_display_url "$_SHA_URL") (then $_FAILED_URL)"
+  MANUAL_REPO="${GSTACK_REMOTE_REPO:-https://github.com/$MANUAL_SLUG.git}"
+  REMOTE_URL="${GSTACK_REMOTE_URL:-https://raw.githubusercontent.com/$MANUAL_SLUG/main/VERSION}"
+  REMOTE=""
+  REMOTE_SHA=""
+  if [ -z "${GSTACK_REMOTE_URL:-}" ]; then
+    _REPO_HOST="${MANUAL_REPO#*://}"; _REPO_HOST="${_REPO_HOST#*@}"; _REPO_HOST="${_REPO_HOST%%[/:]*}"
+    _LSR_LINE="$(GSTACK_HOME="$STATE_DIR" _receipted_git open update-check "${_REPO_HOST:-github.com}" version-ls-remote "update_check!=false" \
+      env GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 git ls-remote "$MANUAL_REPO" refs/heads/main 2>/dev/null || true)"
+    REMOTE_SHA="$(printf '%s\n' "$_LSR_LINE" | awk 'NR == 1 { print $1 }')"
+    if printf '%s' "$REMOTE_SHA" | grep -qE '^[0-9a-f]{40}$'; then
+      REMOTE="$(_receipted_version_fetch "https://raw.githubusercontent.com/$MANUAL_SLUG/$REMOTE_SHA/VERSION")"
+    fi
   fi
-  echo "CHECK_FAILED $LOCAL $_FAILED_URL" > "$CACHE_FILE"
-  if [ "$FORCE" = "1" ]; then
-    echo "CHECK_FAILED could not read the remote gstack version from $_FAILED_URL — update status UNKNOWN, not up-to-date"
+  if [ -z "$REMOTE" ]; then REMOTE="$(_receipted_version_fetch "$REMOTE_URL")"; fi
+  REMOTE="$(printf '%s' "$REMOTE" | tr -d '[:space:]')"
+  if ! printf '%s' "$REMOTE" | grep -qE '^[0-9]+([.][0-9]+)+$'; then
+    printf 'CHECK_FAILED %s %s %s\n' "$LOCAL" "$LOCAL_SHA" "$CACHE_ROUTE" > "$CACHE_FILE"
+    [ "$FORCE" != "1" ] || echo "CHECK_FAILED could not read the VERSION for $MANUAL_SLUG; update status UNKNOWN, not up-to-date"
+    exit 0
   fi
+  TARGET_ID="${REMOTE_SHA:-$REMOTE}"
+  if [ "$LOCAL" = "$REMOTE" ] || [ "$(printf '%s\n%s\n' "$LOCAL" "$REMOTE" | sort -V | tail -1)" != "$REMOTE" ]; then
+    printf 'UP_TO_DATE %s %s %s\n' "$LOCAL" "$LOCAL_SHA" "$CACHE_ROUTE" > "$CACHE_FILE"
+    [ "$FORCE" != "1" ] || echo "UP_TO_DATE $LOCAL $LOCAL_SHA"
+    exit 0
+  fi
+  printf 'MANUAL_UPGRADE_AVAILABLE %s %s %s %s %s\n' "$LOCAL" "$REMOTE" "$TARGET_ID" "$LOCAL_SHA" "$MANUAL_SLUG" > "$CACHE_FILE"
+  if check_snooze "$TARGET_ID"; then exit 0; fi
+  TEL_CMD="$GSTACK_DIR/bin/gstack-telemetry-log"
+  if [ -x "$TEL_CMD" ]; then
+    "$TEL_CMD" --event-type upgrade_prompted --skill "" --duration 0 \
+      --outcome success --session-id "update-$$-$(date +%s)" 2>/dev/null &
+  fi
+  echo "MANUAL_UPGRADE_AVAILABLE $LOCAL $REMOTE $TARGET_ID $MANUAL_SLUG"
   exit 0
 fi
 
-if [ "$LOCAL" = "$REMOTE" ]; then
-  echo "UP_TO_DATE $LOCAL" > "$CACHE_FILE"
+_RESOLVE_FAILED=0
+_RESOLVE_OUT="$("$GSTACK_DIR/bin/gstack-update-candidate" resolve 2>/dev/null)" || _RESOLVE_FAILED=1
+case "$_RESOLVE_OUT" in
+  "UP_TO_DATE $LOCAL $LOCAL_SHA")
+    echo "UP_TO_DATE $LOCAL $LOCAL_SHA $CACHE_ROUTE" > "$CACHE_FILE"
+    exit 0
+    ;;
+  UPGRADE_AVAILABLE\ * ) ;;
+  *)
+    printf 'CHECK_FAILED %s %s %s\n' "$LOCAL" "$LOCAL_SHA" "$CACHE_ROUTE" > "$CACHE_FILE"
+    if [ "$FORCE" = "1" ]; then
+      _REASON="$(printf '%s' "$_RESOLVE_OUT" | sed -n 's/^UPDATE_FAILED //p')"
+      echo "CHECK_FAILED trusted gstack update is deferred${_REASON:+: $_REASON} — update status UNKNOWN, not up-to-date"
+    fi
+    exit 0
+    ;;
+esac
+
+_CANDIDATE_OLD="$(printf '%s\n' "$_RESOLVE_OUT" | awk '{print $2}')"
+_CANDIDATE_NEW="$(printf '%s\n' "$_RESOLVE_OUT" | awk '{print $3}')"
+_CANDIDATE_SHA="$(printf '%s\n' "$_RESOLVE_OUT" | awk '{print $4}')"
+if [ "$_CANDIDATE_OLD" != "$LOCAL" ] || ! printf '%s' "$_CANDIDATE_SHA" | grep -qE '^[0-9a-f]{40,64}$'; then
+    printf 'CHECK_FAILED %s %s %s\n' "$LOCAL" "$LOCAL_SHA" "$CACHE_ROUTE" > "$CACHE_FILE"
+  [ "$FORCE" != "1" ] || echo "CHECK_FAILED trusted candidate record was invalid — update status UNKNOWN, not up-to-date"
   exit 0
 fi
 
-# Semver-order guard: only flag an upgrade when REMOTE sorts higher than
-# LOCAL. Protects against transient stale-CDN regressions (REMOTE < LOCAL)
-# and dev installs running ahead of main, both of which would otherwise
-# emit a backwards UPGRADE_AVAILABLE line.
-_HIGHER="$(printf '%s\n%s\n' "$LOCAL" "$REMOTE" | sort -V | tail -1)"
-if [ "$_HIGHER" != "$REMOTE" ]; then
-  echo "UP_TO_DATE $LOCAL" > "$CACHE_FILE"
-  exit 0
-fi
-
-# REMOTE is strictly newer — upgrade available
-echo "UPGRADE_AVAILABLE $LOCAL $REMOTE" > "$CACHE_FILE"
-if check_snooze "$REMOTE"; then
+echo "UPGRADE_AVAILABLE $LOCAL $_CANDIDATE_NEW $_CANDIDATE_SHA $LOCAL_SHA $CACHE_ROUTE" > "$CACHE_FILE"
+if check_snooze "$_CANDIDATE_SHA"; then
   exit 0  # snoozed — stay quiet
 fi
 
@@ -312,4 +372,4 @@ if [ -x "$TEL_CMD" ]; then
     --outcome success --session-id "update-$$-$(date +%s)" 2>/dev/null &
 fi
 
-echo "UPGRADE_AVAILABLE $LOCAL $REMOTE"
+echo "UPGRADE_AVAILABLE $LOCAL $_CANDIDATE_NEW $_CANDIDATE_SHA"

@@ -48,6 +48,12 @@ function makeFixture() {
   fs.writeFileSync(path.join(seed, 'bin', 'gstack-config'),
     '#!/usr/bin/env bash\nif [ "$1" = "get" ]; then case "$2" in auto_upgrade) echo true;; skill_prefix) echo false;; *) echo "";; esac; fi\nexit 0\n', { mode: 0o755 });
   fs.writeFileSync(path.join(seed, 'bin', 'gstack-patch-names'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-state-root.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
+    const target = path.join(seed, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, relative), target);
+    if (relative.startsWith('bin/') && !relative.endsWith('.sh')) fs.chmodSync(target, 0o755);
+  }
   // Stub setup: records each run; $SETUP_CONTROL selects the outcome.
   fs.writeFileSync(path.join(seed, 'setup'), [
     '#!/usr/bin/env bash',

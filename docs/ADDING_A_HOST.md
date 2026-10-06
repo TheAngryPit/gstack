@@ -14,8 +14,13 @@ before it is labelled `full`.
 
 These rules hold for every host, every scope, and every upgrade path
 (`./setup`, `./setup --refresh-registered`, `/gstack-upgrade`, the team-mode
-auto-update). Each refusal names what was left alone, the rule that applied,
-and the exact command to proceed.
+auto-update). Manual `./setup --refresh-registered` continues to refresh the
+registered hosts. The trusted-fork session auto-update is narrower: it only
+activates a source with registered Codex installs, and it defers before source
+or runtime changes if any non-Codex host shares that source. Claude and other
+hosts use their normal manual setup workflow until they have a protected
+transaction path. Each refusal names what was left alone, the rule that
+applied, and the exact command to proceed.
 
 1. **Project-local setup never silently replaces a global install.** Setup
    run from a project-vendored copy, or from any checkout other than the one a
@@ -30,9 +35,12 @@ and the exact command to proceed.
    repair (`bin/gstack-migrate-claude-code`) renames gstack-owned entries in
    every install that shares the checkout.
 3. **Upgrades refresh exactly the registered installs.** Every install setup
-   activates is recorded in the install registry. Upgrades run
+   activates is recorded in the install registry. Manual upgrades run
    `./setup --refresh-registered`, which runs setup once per registered host
-   of that checkout (printing the source first) and nothing else. Installs
+   of that checkout (printing the source first) and nothing else. The trusted-
+   fork automatic transaction currently refreshes only registered Codex
+   installs, using each row's saved destination, prefix and generation model.
+   If a non-Codex row shares its source, automatic activation defers. Installs
    owned by another checkout, and project installs of another project, are
    listed with the command that refreshes them there; they are never repointed
    (#1925).
@@ -46,8 +54,10 @@ and the exact command to proceed.
 Only `bin/gstack-install-registry.sh` writes it, under a lock directory with an
 atomic rename. Columns: host, scope (`global`/`project`), project, destination
 (the skills directory the host discovers), install root, source realpath,
-version, prefix setting, render, updated-at. A row publishes only after the
-host arm finished activating. Rows whose install root is gone are dropped
+version, prefix setting, render, updated-at, Codex generation model, and
+source commit. Older rows may omit the final two fields; the automatic Codex
+refresh refuses to guess a missing model or source commit. A row publishes
+only after the host arm finished activating. Rows whose install root is gone are dropped
 (`gstack_install_registry_reconcile`) by every refresh and by
 `gstack-uninstall`, so an upgrade never resurrects an uninstalled host.
 
@@ -96,6 +106,29 @@ linking, every copy is staged as `<dst>.gstack-new.<pid>` and swapped in only
 when complete; an interrupted swap is repaired on the next run (a missing
 destination is restored from `<dst>.gstack-old.<pid>`). Versioned payload
 directories for the symlink platforms are not built yet.
+
+### Fork-aware automatic upgrades
+
+For the trusted `TheAngryPit/gstack` origin, the session-start checker resolves
+its `main` commit. It pins the full SHA and accepts a candidate only when the
+`free-tests.yml`, `windows-free-tests.yml`, and `codex-native-parity.yml` workflows each have a
+successful `push` run for that exact SHA, on `main`, in the canonical repository,
+with the latest run attempt and required aggregate job successful. The
+Windows-free-tests and Codex-parity workflows include a `main` push trigger so
+those checks can certify a fork commit. Same-version commits are eligible;
+the checker keys discovery and snoozes by SHA. Missing or unavailable evidence,
+pending runs, failed jobs, origin mismatch, dirty source, or non-fast-forward
+history defers the update.
+
+Activation is owned by `bin/gstack-session-update`, which revalidates the
+persisted candidate against current workflow identities, run attempts and jobs
+immediately before updating. It refreshes only registered Codex installs,
+using each row's saved destination, prefix, and generation model. It does not
+register hooks, migrate configuration, or provision dependencies. Before
+activation it retains a full source copy plus the affected runtime, generated
+render, links, and registry state. If setup fails after partial activation,
+the transaction restores those snapshots and verifies the old runtime remains
+executable; an incomplete recovery leaves its journal and snapshot for retry.
 
 ### Install-context render contract
 

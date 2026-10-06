@@ -13,6 +13,7 @@ import * as path from 'path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const SCRIPT = path.join(ROOT, 'bin', 'gstack-session-update');
+const LEGACY_SCRIPT = path.join(ROOT, 'bin', 'gstack-session-update-legacy');
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 }).trim();
@@ -25,7 +26,7 @@ function makeFixture() {
   const install = path.join(base, 'install');
   const state = path.join(base, 'state');
   fs.mkdirSync(state, { recursive: true });
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin], { timeout: 30_000 });
 
   fs.mkdirSync(path.join(seed, 'bin'), { recursive: true });
   fs.writeFileSync(path.join(seed, 'VERSION'), '1.0.0\n');
@@ -39,13 +40,19 @@ function makeFixture() {
   fs.writeFileSync(path.join(seed, 'bin', 'gstack-patch-names'), '#!/usr/bin/env bash\nexit 0\n', {
     mode: 0o755,
   });
+  for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-state-root.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
+    const target = path.join(seed, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, relative), target);
+    if (relative.startsWith('bin/') && !relative.endsWith('.sh')) fs.chmodSync(target, 0o755);
+  }
   git(seed, 'init', '-q');
   git(seed, 'add', '-A');
   git(seed, 'commit', '-q', '-m', 'seed');
   git(seed, 'branch', '-M', 'main');
   git(seed, 'remote', 'add', 'origin', origin);
   git(seed, 'push', '-q', 'origin', 'main');
-  execFileSync('git', ['clone', '-q', origin, install]);
+  execFileSync('git', ['clone', '-q', origin, install], { timeout: 30_000 });
   return { base, origin, seed, install, state };
 }
 
@@ -135,7 +142,7 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
   function makeSlowGitShim(base: string, sleepSecs: number): string {
     const shimDir = path.join(base, 'shim');
     fs.mkdirSync(shimDir, { recursive: true });
-    const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8', timeout: 30_000 }).trim();
     fs.writeFileSync(
       path.join(shimDir, 'git'),
       `#!/usr/bin/env bash\ncase "$*" in *pull*) sleep ${sleepSecs};; esac\nexec "${realGit}" "$@"\n`,
@@ -242,7 +249,7 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
     // that BOTH reclaim branches (TTL-expired and dead-PID) use it, and that
     // no bare in-place `rm -rf "$LOCK_DIR"` survives outside the holder's
     // own EXIT trap.
-    const src = fs.readFileSync(SCRIPT, 'utf8');
+    const src = fs.readFileSync(LEGACY_SCRIPT, 'utf8');
     const mvAside = src.match(/mv "\$LOCK_DIR" "\$LOCK_DIR\.reap\.\$\$" 2>\/dev\/null \|\| \{ log_entry "SKIP lock_contested"; exit 0; \}/g) || [];
     expect(mvAside.length).toBe(2); // TTL branch + dead-PID branch
     // The only rm -rf of the live lock dir is the holder's EXIT trap — and
@@ -255,7 +262,7 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
   });
 
   test('EXIT trap is ownership-checked and a heartbeat runs during pull/setup (static pins)', () => {
-    const src = fs.readFileSync(SCRIPT, 'utf8');
+    const src = fs.readFileSync(LEGACY_SCRIPT, 'utf8');
     // (a) After a TTL reclaim by another updater, $LOCK_DIR belongs to the
     // NEW holder — the old holder's trap must remove the lock ONLY while the
     // pidfile still contains ITS pid (MYPID captured at write time).
