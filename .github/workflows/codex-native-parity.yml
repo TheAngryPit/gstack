@@ -1,7 +1,7 @@
 name: Codex native parity
 on:
   push:
-    branches: [codex/native-parity-latest]
+    branches: [main, codex/native-parity-latest]
   pull_request:
   workflow_dispatch:
 permissions:

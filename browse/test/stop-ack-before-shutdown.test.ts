@@ -3,7 +3,7 @@ import { handleMetaCommand } from '../src/meta-commands';
 
 describe('server control acknowledgement ordering', () => {
   for (const [command, acknowledgement] of [
-    ['stop', 'Server stopped'],
+    ['stop', 'Stopping server...'],
     ['restart', 'Restarting...'],
   ] as const) {
     test(`${command} acknowledges before closing the listener`, async () => {

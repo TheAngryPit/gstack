@@ -67,7 +67,7 @@ const POLARITY: Record<string, 'fail-closed' | 'fail-open'> = {
   'update-check': 'fail-open',
   'security-dashboard': 'fail-open',
   'community-dashboard': 'fail-open',
-  'git-class user ops (artifacts-init, brain-restore, session-update)': 'fail-open',
+  'git-class user ops (artifacts-init, brain-restore)': 'fail-open',
   'context-bill --exact': 'fail-open',
 };
 
@@ -103,13 +103,13 @@ const MODULE_SINKS = [
 const SHELL_SINKS = [
   'bin/gstack-telemetry-sync',
   'bin/gstack-update-check',
+  'bin/gstack-update-candidate',
   'bin/gstack-brain-sync',
   'bin/gstack-gbrain-mcp-verify',
   'bin/gstack-security-dashboard',
   'bin/gstack-community-dashboard',
   'bin/gstack-artifacts-init',
   'bin/gstack-brain-restore',
-  'bin/gstack-session-update',
 ];
 
 /** design files that talk to api.openai.com — all must use receiptedFetch. */
@@ -180,7 +180,7 @@ function isExempt(rel: string): string | undefined {
 
 // Receipt markers that make a nearby network op "wired".
 const RECEIPT_MARKER =
-  /_receipted_(curl|git|version_fetch)\b|gstack-egress-receipt["']?\s+write\b|writeReceipt\(|receiptedFetch\(/;
+  /_receipted_(curl|git|version_fetch)\b|_gstack_egress_run\b|gstack-egress-receipt["']?\s+write\b|writeReceipt\(|receiptedFetch\(/;
 
 /** Was a receipt marker present on this line or the 30 preceding lines? */
 function guarded(lines: string[], i: number): boolean {
@@ -198,6 +198,7 @@ const GIT_REMOTE_OP = /(^|[;|&`($!]|\s)git(\s+-C\s+\S+)?\s+(push|pull|fetch|clon
 const GIT_SPAWN_OP = /["'`]git["'`]\s*,\s*\[\s*["'`](push|pull|fetch|clone|ls-remote)/;
 // curl as a command token.
 const CURL_OP = /(^|[|&;(`]|\s|\$\()curl\s/;
+const GH_API_OP = /(^|[|&;(`]|\s|\$\()gh\s+api\b/;
 // fetch() with an absolute http(s) URL (loopback filtered separately).
 const FETCH_ABS = /(^|[^A-Za-z])fetch(Fn|Impl)?\(\s*[`'"]https?:\/\//;
 
@@ -253,7 +254,7 @@ function scanFile(rel: string): string[] {
       (GIT_REMOTE_OP.test(line) && /\b(spawn|spawnSync|exec|execSync|execFileSync|runCommand)\b/.test(line));
     const isNetOp = isTs
       ? FETCH_ABS.test(line) || tsExecGit
-      : CURL_OP.test(line) || GIT_REMOTE_OP.test(line);
+      : CURL_OP.test(line) || GIT_REMOTE_OP.test(line) || GH_API_OP.test(line);
     if (!isNetOp) continue;
     if (guarded(lines, i)) continue;
     offenders.push(`${rel}:${i + 1}: ${line.trim().slice(0, 100)}`);
@@ -356,7 +357,7 @@ describe('egress receipt wiring tripwire', () => {
       'community-dashboard',
       'context-bill --exact',
       'design-openai',
-      'git-class user ops (artifacts-init, brain-restore, session-update)',
+      'git-class user ops (artifacts-init, brain-restore)',
       'security-dashboard',
       'update-check',
     ]);

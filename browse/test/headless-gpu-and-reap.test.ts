@@ -15,7 +15,7 @@
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { BrowserManager, headlessGpuArgs, launchedChromiumPid } from '../src/browser-manager';
-import { reapRecordedChromium } from '../src/cli';
+import { GRACEFUL_STOP_TIMEOUT_MS, reapAfterDaemonShutdown, reapRecordedChromium } from '../src/cli';
 import { readPidStartTime } from '../src/xvfb';
 import { isProcessAlive } from '../src/error-handling';
 import { chromium, type Browser } from 'playwright';
@@ -38,6 +38,44 @@ describe('headlessGpuArgs (#2709)', () => {
   test('non-darwin platforms are untouched', () => {
     expect(headlessGpuArgs('linux', {})).toEqual([]);
     expect(headlessGpuArgs('win32', {})).toEqual([]);
+  });
+});
+
+describe('graceful stop reaping order (#2709)', () => {
+  test('does not reap Chromium when the daemon remains alive through the full shutdown deadline', async () => {
+    let now = 0;
+    let reapCalls = 0;
+    const stopped = await reapAfterDaemonShutdown(
+      { pid: 4242, chromiumPid: 4343, chromiumStartTime: 'recorded-start' },
+      {
+        isAlive: () => true,
+        now: () => now,
+        sleep: async (ms) => { now += ms; },
+        reap: async () => { reapCalls += 1; },
+      },
+    );
+
+    expect(now).toBe(GRACEFUL_STOP_TIMEOUT_MS);
+    expect(stopped).toBe(false);
+    expect(reapCalls).toBe(0);
+  });
+
+  test('reaps only after the daemon exits before the deadline', async () => {
+    let now = 0;
+    let polls = 0;
+    let reapCalls = 0;
+    const stopped = await reapAfterDaemonShutdown(
+      { pid: 4242, chromiumPid: 4343, chromiumStartTime: 'recorded-start' },
+      {
+        isAlive: () => polls++ < 2,
+        now: () => now,
+        sleep: async (ms) => { now += ms; },
+        reap: async () => { reapCalls += 1; },
+      },
+    );
+
+    expect(stopped).toBe(true);
+    expect(reapCalls).toBe(1);
   });
 });
 
@@ -253,14 +291,14 @@ describe('stop-reap wiring pins (#2709)', () => {
       /await killOrphanChromium\(\);[\s\S]*if \(staleState\) await reapRecordedChromium\(staleState\);[\s\S]*safeUnlinkQuiet\(config\.stateFile\);/,
     );
 
-    // 5. Post-graceful-stop: the daemon closed Chromium via Playwright, but a
-    //    surviving GPU process must still be reaped after sendCommand('stop') —
-    //    only once the daemon has exited (an earlier kill reads as a crash and
-    //    the daemon exits without removing its state file).
+    // 5. Post-graceful-stop: reaping is delegated to the helper whose behavior
+    //    tests prove a surviving daemon never has its Chromium interrupted.
     const postStop = between('await sendCommand(state, command, commandArgs);', "if (command === 'focus')");
     expect(postStop).toMatch(
-      /if \(command === 'stop'\) \{[\s\S]*while \(.*isProcessAlive\(state\.pid\)\)[^\n]*\n\s*await reapRecordedChromium\(state\);/,
+      /if \(command === 'stop'\) \{[\s\S]*const daemonStopped = await reapAfterDaemonShutdown\(state\);[\s\S]*if \(daemonStopped\)[\s\S]*console\.log\('Daemon stopped\.'\);[\s\S]*Graceful stop timed out[\s\S]*process\.exitCode = 1;/,
     );
+    const reapAfterShutdown = between('export async function reapAfterDaemonShutdown(', 'export const HEALTH_PROBE_TOTAL_BUDGET_MS');
+    expect(reapAfterShutdown).toMatch(/if \(isAlive\(state\.pid\)\) return false;[\s\S]*await \(options\.reap \?\? reapRecordedChromium\)\(state\);/);
   });
 
   test('browser-manager.ts pushes headlessGpuArgs only under the headless launch guard', () => {

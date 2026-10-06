@@ -9,13 +9,23 @@ import { runBashScript } from './helpers/bash-script';
 // named backup before the tree is replaced, and a failed backup stops the
 // replacement.
 const setup = fs.readFileSync(path.resolve(import.meta.dir, '../setup'), 'utf8');
+const registry = fs.readFileSync(path.resolve(import.meta.dir, '../bin/gstack-install-registry.sh'), 'utf8');
 const fn = (name: string) => {
   const start = setup.indexOf(`\n${name}() {`);
   const end = setup.indexOf('\n}\n', start);
   if (start < 0 || end < 0) throw new Error(`missing setup helper: ${name}`);
   return setup.slice(start + 1, end + 2);
 };
-const helpers = ['_copy_skill_md', '_skill_copy_hash', '_skill_copy_unmodified', '_preserve_skill_copy_edits', '_record_skill_copies', '_activate_runtime_root'].map(fn).join('\n');
+const registryFn = (name: string) => {
+  const start = registry.indexOf(`\n${name}() {`);
+  const end = registry.indexOf('\n}\n', start);
+  if (start < 0 || end < 0) throw new Error(`missing registry helper: ${name}`);
+  return registry.slice(start + 1, end + 2);
+};
+const helpers = [
+  ...['_copy_skill_md', '_skill_copy_hash', '_skill_copy_unmodified', '_preserve_skill_copy_edits', '_record_skill_copies', '_activate_runtime_root'].map(fn),
+  ...['_gstack_skill_copies_lock', '_gstack_skill_copies_unlock'].map(registryFn),
+].join('\n');
 
 const tmps: string[] = [];
 afterEach(() => { for (const t of tmps.splice(0)) { fs.chmodSync(t, 0o755); fs.rmSync(t, { recursive: true, force: true }); } });

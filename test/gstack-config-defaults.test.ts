@@ -118,7 +118,12 @@ function keysReadInTree(root = ROOT): string[] {
  * DEFAULTS-table keys no code reads. Each entry needs a reason; an empty list
  * means every documented setting has a reader.
  */
-const PROSE_ONLY_KEYS: Record<string, string> = {};
+const PROSE_ONLY_KEYS: Record<string, string> = {
+  // setup still writes this legacy marker for existing team installs. The
+  // transactional updater now relies on the registered install registry and
+  // exact CI evidence, so no current source path reads team_mode.
+  team_mode: 'Legacy setup marker retained for existing team installs; current updater authorization comes from the registry and CI evidence.',
+};
 
 const READER_DIRS = ['bin', 'lib', 'scripts', 'browse/src'];
 const READER_FILES = ['setup'];

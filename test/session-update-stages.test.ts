@@ -48,6 +48,12 @@ function makeFixture() {
   fs.writeFileSync(path.join(seed, 'bin', 'gstack-config'),
     '#!/usr/bin/env bash\nif [ "$1" = "get" ]; then case "$2" in auto_upgrade) echo true;; skill_prefix) echo false;; *) echo "";; esac; fi\nexit 0\n', { mode: 0o755 });
   fs.writeFileSync(path.join(seed, 'bin', 'gstack-patch-names'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-state-root.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
+    const target = path.join(seed, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, relative), target);
+    if (relative.startsWith('bin/') && !relative.endsWith('.sh')) fs.chmodSync(target, 0o755);
+  }
   // Stub setup: records each run; $SETUP_CONTROL selects the outcome.
   fs.writeFileSync(path.join(seed, 'setup'), [
     '#!/usr/bin/env bash',
@@ -126,6 +132,31 @@ const setupRuns = (fx: Fx) => (fs.existsSync(fx.calls) ? fs.readFileSync(fx.call
 /** Let the next hook run start a check: the hourly throttle has elapsed. */
 const expireThrottle = (fx: Fx) => fs.rmSync(path.join(fx.state, '.last-session-update'), { force: true });
 const expireBackoff = (fx: Fx) => fs.writeFileSync(pending(fx), fs.readFileSync(pending(fx), 'utf8').replace(/^next=\d+$/m, 'next=0'));
+
+describe('gstack-session-update recovery root boundary', () => {
+  test('does not guess GSTACK_HOME when the recovery caller omitted the resolved state root', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-supd-recovery-root-'));
+    bases.push(base);
+    const install = path.join(base, 'incomplete-install');
+    const home = path.join(base, 'home');
+    const configuredState = path.join(base, 'configured-state');
+    const marker = path.join(base, 'fallback-helper-was-sourced');
+    const helperDir = path.join(configuredState, 'session-update-recovery', 'lib');
+    fs.mkdirSync(path.join(install, 'bin'), { recursive: true });
+    fs.mkdirSync(helperDir, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(helperDir, 'gstack-state-root.sh'), `: > "${marker}"\ngstack_state_root_select() { _gstack_sr_root="${configuredState}"; }\n`);
+
+    const result = spawnSync('bash', [SCRIPT, '--recover-interrupted'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, GSTACK_HOME: configuredState, GSTACK_DIR: install },
+      timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+});
 
 describe.skipIf(process.platform === 'win32')('gstack-session-update stages (B11)', () => {
   test('setup failure: no upgrade announcement, one failure line, retried with HEAD unchanged after backoff', async () => {

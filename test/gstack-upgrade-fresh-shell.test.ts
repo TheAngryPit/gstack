@@ -1,14 +1,8 @@
 /**
- * C9: destructive gstack-upgrade and /spec fences in a fresh shell.
- *
- * Hosts run each fenced block in a new shell, so variables from Step 2 are
- * gone. `cd ""` succeeds and stays put, which used to point
- * `git checkout -- '*\/SKILL.md'`, `git stash` and `git reset --hard` at the
- * user's own project. Every host's render is executed with the guarded
- * variable unset, empty, missing, unreadable and pointing at the wrong
- * repository: each must exit before any mutating git command and leave the
- * scratch project byte-for-byte unchanged. Positive controls prove the guard
- * still lets a real gstack checkout through.
+ * Upgrade and /spec command contracts in fresh host renders.
+ * The upgrade flow carries the selected exact SHA to the reviewed updater;
+ * project-mutating git workflows remain outside that skill. /spec keeps its
+ * independent path-safety checks across native host renders.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { execFile, spawnSync } from 'child_process';
@@ -52,7 +46,7 @@ function makeGstackLike(dir: string, git: boolean) {
 }
 
 function bashFences(text: string): string[] {
-  return [...text.matchAll(/^```bash\n([\s\S]*?)\n```$/gm)].map(m => m[1]);
+  return [...text.matchAll(/^(```|~~~)bash\n([\s\S]*?)\n\1$/gm)].map(m => m[2]);
 }
 
 function fence(fences: string[], marker: string): string {
@@ -90,7 +84,7 @@ async function snapshot(dir: string): Promise<string> {
   return h.digest('hex');
 }
 
-interface HostRender { host: string; upgrade: string[]; spec: string[]; localDir: string }
+interface HostRender { host: string; upgrade: string[]; upgradeText: string; spec: string[]; localDir: string }
 const hostRenders: HostRender[] = [];
 
 beforeAll(async () => {
@@ -105,12 +99,11 @@ beforeAll(async () => {
     const base = config.name === 'claude' ? renders : join(renders, config.hostSubdir, 'skills');
     const upgradePath = config.name === 'claude' ? join(base, 'gstack-upgrade', 'SKILL.md') : join(base, 'gstack-upgrade', 'SKILL.md');
     const specPath = config.name === 'claude' ? join(base, 'spec', 'sections', 'gate-and-file.md') : join(base, 'gstack-spec', 'SKILL.md');
-    const upgrade = bashFences(readFileSync(upgradePath, 'utf8'));
+    const upgradeText = readFileSync(upgradePath, 'utf8');
+    const upgrade = bashFences(upgradeText);
     const specBody = config.name === 'codex' ? readFileSync(join(base, 'gstack-spec', 'sections', 'gate-and-file.md'), 'utf8') : readFileSync(specPath, 'utf8');
     const spec = bashFences(specBody);
-    const team = fence(upgrade, 'git rm -r --cached');
-    const localDir = team.match(/git rm -r --cached (\S+)\/ /)![1];
-    hostRenders.push({ host: config.name, upgrade, spec, localDir });
+    hostRenders.push({ host: config.name, upgrade, upgradeText, spec, localDir: config.localSkillRoot });
   }
 });
 
@@ -176,95 +169,126 @@ function badValue(wd: ReturnType<typeof world>, kind: typeof BAD_VALUES[number])
   }
 }
 
-describe.skipIf(IS_WINDOWS)('C9: destructive upgrade/spec fences refuse bad paths on every host', () => {
+describe.skipIf(IS_WINDOWS)('gstack-upgrade rendered command contract', () => {
+  test('every host routes the exact selected SHA through the transactional updater', () => {
+    expect(hostRenders.length).toBe(ALL_HOST_CONFIGS.length);
+    for (const host of hostRenders) {
+      expect(host.upgradeText).toContain('UPGRADE_AVAILABLE <old> <new> <sha>');
+      expect(host.upgradeText).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
+      expect(host.upgradeText).toContain('required latest Actions attempts');
+      for (const command of host.upgrade) {
+        expect(command).not.toMatch(/\bgit\s+(pull|reset|stash|fetch|clone|checkout|merge)\b/);
+      }
+    }
+  });
+});
+
+describe.skipIf(IS_WINDOWS)('/spec fences refuse bad paths on every host', () => {
   type Kind = typeof BAD_VALUES[number];
   const UNUSABLE: Kind[] = ['unset', 'empty', 'nonexistent', 'unreadable'];
-  const cases: Array<{ name: string; doc: 'upgrade' | 'spec'; marker: string; target: string; kinds?: Kind[]; others: (wd: ReturnType<typeof world>, h: HostRender) => Record<string, string> }> = [
-    { name: 'ff-only upgrade', doc: 'upgrade', marker: 'git pull --ff-only', target: 'INSTALL_DIR', others: () => ({}) },
-    { name: 'reset fallback', doc: 'upgrade', marker: 'git reset --hard origin/main', target: 'INSTALL_DIR', others: () => ({}) },
-    { name: 'vendored swap', doc: 'upgrade', marker: 'git clone --depth 1', target: 'INSTALL_DIR', others: () => ({}) },
-    { name: 'local copy detection', doc: 'upgrade', marker: '_RESOLVED_PRIMARY=', target: 'INSTALL_DIR', kinds: UNUSABLE, others: () => ({}) },
-    { name: 'team-mode removal', doc: 'upgrade', marker: 'git rm -r --cached', target: 'LOCAL_GSTACK', others: () => ({}) },
-    { name: 'vendored sync (local)', doc: 'upgrade', marker: 'LOCAL_SYNC_OK', target: 'LOCAL_GSTACK', others: (wd, h) => ({ INSTALL_DIR: wd.gstack }) },
-    { name: 'vendored sync (primary)', doc: 'upgrade', marker: 'LOCAL_SYNC_OK', target: 'INSTALL_DIR', others: (wd, h) => ({ LOCAL_GSTACK: join(wd.project, h.localDir) }) },
-    { name: 'spec worktree add', doc: 'spec', marker: 'git worktree add', target: 'SPAWN_PATH', kinds: ['unset', 'empty'], others: () => ({ SPAWN_BRANCH: 'spec/x-1', PIN_SHA: 'HEAD' }) },
-    { name: 'spec spawn', doc: 'spec', marker: 'claude -p', target: 'SPAWN_PATH', kinds: [...UNUSABLE, 'subdirectory'], others: (wd) => ({ SPAWN_BRANCH: 'spec/x-1', ARCHIVE_PATH: join(wd.gstack, 'VERSION') }) },
+  const cases: Array<{ name: string; marker: string; target: string; kinds?: Kind[]; others: (wd: ReturnType<typeof world>) => Record<string, string> }> = [
+    { name: 'spec worktree add', marker: 'git worktree add', target: 'SPAWN_PATH', kinds: ['unset', 'empty'], others: () => ({ SPAWN_BRANCH: 'spec/x-1', PIN_SHA: 'HEAD' }) },
+    { name: 'spec spawn', marker: 'claude -p', target: 'SPAWN_PATH', kinds: [...UNUSABLE, 'subdirectory'], others: (wd) => ({ SPAWN_BRANCH: 'spec/x-1', ARCHIVE_PATH: join(wd.gstack, 'VERSION') }) },
   ];
 
-  async function refusals(h: HostRender): Promise<string[]> {
-    const wd = world(h);
+  async function refusals(host: HostRender): Promise<string[]> {
+    const wd = world(host);
     const failures: string[] = [];
     const baseline = await snapshot(wd.project);
     for (const c of cases) {
-      const script = fence(c.doc === 'upgrade' ? h.upgrade : h.spec, h.host === 'codex' && c.name === 'spec spawn' ? 'Native dispatch preflight ready' : c.marker);
+      const marker = host.host === 'codex' && c.name === 'spec spawn' ? 'Native dispatch preflight ready' : c.marker;
+      const script = fence(host.spec, marker);
       for (const kind of c.kinds ?? BAD_VALUES) {
-        const r = await run(wd, script, { ...c.others(wd, h), [c.target]: badValue(wd, kind) });
+        const r = await run(wd, script, { ...c.others(wd), [c.target]: badValue(wd, kind) });
         const mutating = r.gitCalls.filter(call => !/^rev-parse\b/.test(call));
         const changed = (await snapshot(wd.project)) !== baseline;
         const spawned = existsSync(join(wd.w, 'claude.log'));
         if (r.status === 0 || mutating.length > 0 || changed || spawned) {
-          failures.push(`${h.host}: ${c.name} with ${c.target} ${kind}: exit=${r.status} git=[${mutating.join(' | ')}] changed=${changed} spawned=${spawned}\n${r.stderr.slice(0, 400)}`);
+          failures.push(`${host.host}: ${c.name} with ${c.target} ${kind}: exit=${r.status} git=[${mutating.join(' | ')}] changed=${changed} spawned=${spawned}\n${r.stderr.slice(0, 400)}`);
         }
       }
     }
     return failures;
   }
 
-  test('every host: each guarded fence exits before mutating git and leaves the project unchanged', async () => {
-    expect(hostRenders.length).toBe(ALL_HOST_CONFIGS.length);
-    const failures = (await Promise.all(hostRenders.map(refusals))).flat();
-    expect(failures).toEqual([]);
+  test('every host: guarded spec fences leave the user project unchanged', async () => {
+    expect((await Promise.all(hostRenders.map(refusals))).flat()).toEqual([]);
   }, 120_000);
 
-  async function controls(h: HostRender): Promise<string[]> {
-    const wd = world(h);
+  test('every host: positive spec controls still run', async () => {
     const problems: string[] = [];
-    const ff = await run(wd, fence(h.upgrade, 'git pull --ff-only'), { INSTALL_DIR: wd.gstack });
-    if (!ff.stdout.includes('FF_OK') || !ff.gitCalls.some(c => c.startsWith('fetch'))) problems.push(`${h.host}: ff-only upgrade did not run: ${ff.stderr}`);
-    const local = join(wd.project, h.localDir);
-    const team = await run(wd, fence(h.upgrade, 'git rm -r --cached'), { LOCAL_GSTACK: local });
-    if (team.status !== 0 || existsSync(local)) problems.push(`${h.host}: team-mode removal did not run: ${team.stderr}`);
-    mustSh(wd.project, `git worktree add -q "${join(wd.w, 'wt')}" -b spec/x-1 HEAD`);
-    const spawn = await run(wd, fence(h.spec, h.host === 'codex' ? 'Native dispatch preflight ready' : 'claude -p'), { SPAWN_PATH: join(wd.w, 'wt'), SPAWN_BRANCH: 'spec/x-1', ARCHIVE_PATH: join(wd.gstack, 'VERSION') });
-    if (h.host === 'codex') {
-      if (spawn.status !== 0 || !spawn.stdout.includes('Native dispatch preflight ready') || existsSync(join(wd.w, 'claude.log'))) problems.push(`${h.host}: native preflight did not validate without spawning an external CLI: ${spawn.stderr}`);
-      return problems;
+    for (const host of hostRenders) {
+      const wd = world(host);
+      mustSh(wd.project, `git worktree add -q "${join(wd.w, 'wt')}" -b spec/x-1 HEAD`);
+      const marker = host.host === 'codex' ? 'Native dispatch preflight ready' : 'claude -p';
+      const spawn = await run(wd, fence(host.spec, marker), { SPAWN_PATH: join(wd.w, 'wt'), SPAWN_BRANCH: 'spec/x-1', ARCHIVE_PATH: join(wd.gstack, 'VERSION') });
+      if (host.host === 'codex') {
+        if (spawn.status !== 0 || !spawn.stdout.includes('Native dispatch preflight ready') || existsSync(join(wd.w, 'claude.log'))) problems.push(`${host.host}: native preflight failed: ${spawn.stderr}`);
+      } else {
+        const deadline = Date.now() + 5_000;
+        while (!existsSync(join(wd.w, 'claude.log')) && Date.now() < deadline) await Bun.sleep(50);
+        if (spawn.status !== 0 || !existsSync(join(wd.w, 'claude.log'))) problems.push(`${host.host}: spec spawn did not start claude: ${spawn.stderr}`);
+      }
     }
-    const deadline = Date.now() + 5_000;
-    while (!existsSync(join(wd.w, 'claude.log')) && Date.now() < deadline) await Bun.sleep(50);
-    if (spawn.status !== 0 || !existsSync(join(wd.w, 'claude.log'))) problems.push(`${h.host}: spec spawn did not start claude: ${spawn.stderr}`);
-    return problems;
-  }
-
-  test('every host: positive controls still run on a real checkout', async () => {
-    const problems = (await Promise.all(hostRenders.map(controls))).flat();
     expect(problems).toEqual([]);
   }, 60_000);
 });
 
-describe.skipIf(IS_WINDOWS)('DX-7: Step 2 finds the registered source checkout for this host', () => {
-  test('codex: the README ~/gstack clone recorded in the install registry is the install dir', () => {
-    const step2 = fence(hostRenders.find(r => r.host === 'codex')!.upgrade, 'Install type: $INSTALL_TYPE at $INSTALL_DIR');
-    const w = mkdtempSync(join(root, 'dx7-'));
-    const home = join(w, 'home');
-    const state = join(w, 'state');
-    const clone = join(home, 'gstack');
-    makeGstackLike(clone, true);
-    mkdirSync(state, { recursive: true });
-    // Setup's Codex runtime root carries bin/ and lib/ linked from the clone; it has no .git.
-    const runtime = join(home, '.codex', 'skills', 'gstack');
-    mkdirSync(join(runtime, 'bin'), { recursive: true });
-    mkdirSync(join(runtime, 'lib'), { recursive: true });
-    writeFileSync(join(runtime, 'bin', 'gstack-paths'), `#!/bin/sh\necho "${state}"\n`, { mode: 0o755 });
-    writeFileSync(join(state, 'installs.tsv'), [
-      ['claude', 'global', '-', '/x', '/x', '/elsewhere', '1.0', '-', 'committed', '0'].join('\t'),
-      ['codex', 'global', '-', join(home, '.codex', 'skills'), runtime, clone, '1.0.0.0', 'false', 'committed', '0'].join('\t'),
-    ].join('\n') + '\n');
-    const cwd = mkdtempSync(join(w, 'cwd-'));
-    const run = () => spawnSync('env', ['-i', `HOME=${home}`, `PATH=${process.env.PATH}`, 'bash', '-c', step2], { cwd, encoding: 'utf8', timeout: 20_000 });
-    const r = run();
-    expect(r.stdout.trim(), r.stderr).toBe(`Install type: global-git at ${clone}`);
-    rmSync(join(state, 'installs.tsv'));
-    expect(run().stdout).toContain('ERROR: gstack not found');
-  });
+describe.skipIf(IS_WINDOWS)('gstack-upgrade resolves its registered source', () => {
+  test('uses the source row for the current host and refuses a missing registration', async () => {
+    for (const host of hostRenders) {
+      const w = mkdtempSync(join(root, `source-${host.host}-`));
+      const state = join(w, 'state');
+      const source = join(w, 'source');
+      const runtime = join(w, 'runtime');
+      const home = join(w, 'home');
+      mkdirSync(state, { recursive: true });
+      mkdirSync(join(runtime, 'bin'), { recursive: true });
+      mkdirSync(join(runtime, 'lib'), { recursive: true });
+      mkdirSync(home, { recursive: true });
+      makeGstackLike(source, true);
+      mustSh(source, 'git remote add origin https://github.com/TheAngryPit/gstack.git');
+      writeFileSync(join(source, 'bin', 'gstack-session-update'), '#!/bin/sh\n', { mode: 0o755 });
+      writeFileSync(join(runtime, 'bin', 'gstack-paths'), `#!/bin/sh\necho "${state}"\n`, { mode: 0o755 });
+      const destination = join(home, 'skills');
+      const row = [host.host, 'global', '-', destination, join(destination, 'gstack'), source, '1.0.0', 'false', 'committed', 'now', 'gpt-5.6-sol', 'a'.repeat(40)].join('\t');
+      const other = [host.host === 'codex' ? 'claude' : 'codex', 'global', '-', '/other', '/other/gstack', '/wrong/source', '1.0.0', 'false', 'committed', 'now', '-', '-'].join('\t');
+      const registry = join(state, 'installs.tsv');
+      writeFileSync(registry, `${other}\n${row}\n`);
+      const sourceLookup = fence(host.upgrade, 'GSTACK_STATE_ROOT=$(');
+      const runLookup = () => bashAsync(w, sourceLookup, { HOME: home, GSTACK_ROOT: runtime, GSTACK_BIN: join(runtime, 'bin') });
+      const found = await runLookup();
+      if (host.host === 'codex') {
+        expect(found.status, found.stderr).toBe(0);
+        expect(found.stdout).toContain(`SOURCE_DIR=${source}`);
+      } else {
+        expect(found.status).not.toBe(0);
+        expect(found.stderr + found.stdout).toContain('DEFERRED: trusted-fork auto-activation is limited to registered Codex runtimes');
+        expect(found.stderr + found.stdout).toContain('Use the host\'s normal manual setup workflow.');
+      }
+      rmSync(registry);
+      const missing = await runLookup();
+      expect(missing.status).not.toBe(0);
+      expect(missing.stderr).toContain('trusted registered GStack source was not found');
+
+      writeFileSync(registry, `${row}\n`);
+      mustSh(source, 'git remote set-url origin https://github.com/TheAngryPit/gstack.git/');
+      const trailingSlash = await runLookup();
+      if (host.host === 'codex') {
+        expect(trailingSlash.status, trailingSlash.stderr).toBe(0);
+        expect(trailingSlash.stdout).toContain('UPDATE_LANE=trusted-fork');
+        expect(trailingSlash.stderr + trailingSlash.stdout).not.toContain('DEFERRED: trusted-fork auto-activation');
+      } else {
+        expect(trailingSlash.status).not.toBe(0);
+        expect(trailingSlash.stderr + trailingSlash.stdout).toContain('DEFERRED: trusted-fork auto-activation is limited to registered Codex runtimes');
+      }
+      mustSh(source, 'git remote set-url origin https://github.com/garrytan/gstack.git');
+      const manual = await runLookup();
+      expect(manual.status, manual.stderr).toBe(0);
+      expect(manual.stdout).toContain('UPDATE_LANE=manual-origin');
+      expect(manual.stderr + manual.stdout).not.toContain('DEFERRED: trusted-fork auto-activation');
+      expect(host.upgradeText).toContain('MANUAL_UPGRADE_AVAILABLE <old> <new> <target> <repo>');
+      expect(host.upgradeText).toContain('Other origins stay manual');
+    }
+  }, 60_000);
 });
