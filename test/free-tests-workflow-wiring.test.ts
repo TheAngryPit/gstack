@@ -57,7 +57,7 @@ describe('free-tests workflow wiring', () => {
     const windowsCheckout = windows.jobs['windows-free-shard'].steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
     expect(windowsCheckout.with['fetch-depth']).toBe("${{ github.repository == 'garrytan/gstack' && 1 || 0 }}");
     const windowsBun = windows.jobs['windows-free-shard'].steps.find((step: any) => step.uses?.startsWith('oven-sh/setup-bun@'));
-    expect(windowsBun.with['bun-version']).toBe("${{ github.repository == 'garrytan/gstack' && '1.4.0' || '1.4.2' }}");
+    expect(windowsBun.with['bun-version']).toBe('1.4.2');
     expect(suite.strategy.matrix).toBe('${{ fromJSON(needs.free-plan.outputs.matrix) }}');
     expect(suite.strategy['fail-fast']).toBe(false);
     expect(suite.strategy['max-parallel']).toBe(20);
