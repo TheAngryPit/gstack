@@ -153,6 +153,15 @@ describe('identifier grammars (CEO-12, ENG-8)', () => {
       expect(IDENTIFIER_PLACEHOLDERS[key].grammar.test('0x1f')).toBe(false);
     }
   });
+
+  test('the trusted update candidate is a full lowercase hexadecimal commit id', () => {
+    const sha = IDENTIFIER_PLACEHOLDERS['<sha from UPGRADE_AVAILABLE>'].grammar;
+    expect(sha.test('a'.repeat(40))).toBe(true);
+    expect(sha.test('b'.repeat(64))).toBe(true);
+    for (const value of ['a'.repeat(39), 'g'.repeat(40), 'A'.repeat(40), 'a'.repeat(65), `${'a'.repeat(40)};touch-pwned`]) {
+      expect(sha.test(value), value).toBe(false);
+    }
+  });
 });
 
 describe('Greptile replies through the real review/greptile-triage.md blocks', () => {

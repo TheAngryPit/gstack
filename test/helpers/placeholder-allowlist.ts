@@ -88,6 +88,7 @@ export const IDENTIFIER_PLACEHOLDERS: Record<string, IdentifierGrammar> = {
   '<detected-base-branch>': { grammar: REF, what: 'base branch detected by the skill' },
   '<branch-name>': { grammar: REF, what: 'current branch (git branch --show-current)' },
   '<prior-review-commit>': { grammar: /^[0-9a-f]{7,40}$/, what: 'commit sha' },
+  '<sha from UPGRADE_AVAILABLE>': { grammar: /^[0-9a-f]{40,64}$/, what: 'candidate commit sha validated by the update checker' },
 
   // Paths printed by earlier gstack blocks or chosen by the skill.
   '<body-file-name>': { grammar: ID, what: 'basename of the mktemp body file printed by the previous block' },
@@ -109,7 +110,11 @@ export const IDENTIFIER_PLACEHOLDERS: Record<string, IdentifierGrammar> = {
   '<ASIDE_DIR or $_TMP>': { grammar: QUOTED, what: 'Aside output directory printed by an earlier block', quoted: true },
   '<REPORT_DIR from Setup>': { grammar: QUOTED, what: 'report directory printed by Setup', quoted: true },
   '<the FILE path printed above>': { grammar: QUOTED, what: 'file path printed by the previous block', quoted: true },
-  '<install dir from Step 2>': { grammar: QUOTED, what: 'install directory printed by Step 2', quoted: true },
+  '<allocated scanned title path>': { grammar: QUOTED, what: 'exact private input path emitted by the title allocator', quoted: true },
+  '<allocated scanned body path>': { grammar: QUOTED, what: 'exact private input path emitted by the body allocator', quoted: true },
+  '<scanned complete archive input path>': { grammar: QUOTED, what: 'exact private input path emitted by the archive allocator', quoted: true },
+  '<owned archive staging path>': { grammar: QUOTED, what: 'exact staging path allocated inside the authorised archive directory', quoted: true },
+  '<new archive path>': { grammar: QUOTED, what: 'new non-existing archive destination resolved for this operation', quoted: true },
   '<APPROVED path>': { grammar: QUOTED, what: 'approved design path', quoted: true },
   '<first path from the printed saved list>': { grammar: QUOTED, what: 'image path printed by the design tool', quoted: true },
   '<design-path>': { grammar: QUOTED, what: 'design doc path', quoted: true },

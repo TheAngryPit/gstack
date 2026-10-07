@@ -25,7 +25,7 @@ const ROOT = path.resolve(import.meta.dir, '..');
 const ENV_HOSTS = ALL_HOST_CONFIGS.filter(h => h.usesEnvVars);
 const FORBIDDEN = /^(?:\/bin\/|\/browse|\/design|\/gstack-)/;
 const PRELUDE_LINE = /^\[ -d "\$\{GSTACK_ROOT:-\/-\}\/bin" \]|^(?:GSTACK_(?:BIN|BROWSE|DESIGN|MAKE_PDF)=\$GSTACK_ROOT\/\S+ ?)+$|^[BDP]=\$GSTACK_ROOT\//;
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-env-fences-'));
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-env-fences-')));
 const renderDir = path.join(tmp, 'render');
 
 interface Fence { file: string; line: number; body: string }
