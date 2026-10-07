@@ -23,7 +23,8 @@ const native = load('native-qualification.yml');
 const WINDOWS_CURATED_FLOOR = 638;
 
 test('the Windows lane plans, runs one strict shard per job and verifies every result', () => {
-  expect(Object.keys(windows.on).sort()).toEqual(['pull_request', 'workflow_dispatch']);
+  expect(Object.keys(windows.on).sort()).toEqual(['pull_request', 'push', 'workflow_dispatch']);
+  expect(windows.on.push.branches).toEqual(['main']);
   expect(Object.keys(windows.on.workflow_dispatch.inputs)).toEqual(['record_durations']);
   const plan = windows.jobs['windows-plan'];
   expect(plan['runs-on']).toBe('ubuntu-24.04');

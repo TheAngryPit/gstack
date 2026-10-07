@@ -29,7 +29,7 @@ const CSO_BUILD_SRC = fs.readFileSync(path.join(ROOT, 'scripts/build-cso.sh'), '
 // From the $_EXE suffix derivation through the `fi` that closes the staleness
 // chain. The statement that follows (the build itself) is the end anchor and is
 // NOT included, so the harness never tries to run `bun run build`.
-const BLOCK_START = '_EXE=""';
+const BLOCK_START = '_EXE=""\nif [ "$IS_WINDOWS" -eq 1 ]; then _EXE=".exe"; fi';
 const BLOCK_END = '\nif [ "$NEEDS_BUILD" -eq 1 ]; then';
 const CSO_SWITCH_START = 'if [ "${GSTACK_SETUP_RUNNING:-0}" = "1" ] && [ "${GSTACK_SETUP_SKIP_CSO_BUILD:-0}" = "1" ]; then';
 const CSO_SWITCH_END = '\nbash browse/scripts/build-node-server.sh';
@@ -61,6 +61,7 @@ const SOURCE_FILES = [
   'make-pdf/src/x.ts',
   'design/src/index.ts',
   'lib/claude-bin.ts',
+  'bin/gstack-global-discover.ts',
   'package.json',
   'bun.lock',
   'scripts/build.sh',
@@ -296,6 +297,12 @@ describe('setup: NEEDS_BUILD decision executes', () => {
   test('a file under lib/ newer than the browse binary → 1 (was: lib/ not in the staleness set)', () => {
     const dir = makeTree();
     touchNewer(dir, 'lib/claude-bin.ts');
+    expect(decide(dir)).toBe(1);
+  });
+
+  test('the retained global-discover executable source newer than the build stamp → 1', () => {
+    const dir = makeTree();
+    touchNewer(dir, 'bin/gstack-global-discover.ts');
     expect(decide(dir)).toBe(1);
   });
 

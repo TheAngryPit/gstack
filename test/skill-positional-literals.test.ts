@@ -18,8 +18,6 @@ const windowsShasumShim = `shasum() {
 }`;
 const literals = {
   checksum: `actual_sha=$(sha256sum < "$tmpfile" | awk '{print $(1)}')`,
-  snoozeVersion: `_SNOOZED_VER=$(awk '{print $(1)}' "$_SNOOZE_FILE")`,
-  snoozeLevel: `_CUR_LEVEL=$(awk '{print $(2)}' "$_SNOOZE_FILE")`,
   capture: `printf 'ERROR:typecheck CAPTURE:%s\\n' "\${1}" >&2`,
   preview: `_PORT=$(lsof -i -P -n | grep "$_SERVER_PID" | grep LISTEN | awk '{print $(9)}' | cut -d: -f2 | head -1)`,
   title: '# Bash-side title sanitize. Pass the raw title via TITLE_RAW when running this block.',
@@ -55,8 +53,6 @@ for (const host of ['claude', 'codex'] as const) for (const args of [[], tenArgu
     const setup = skill(host, 'open-gstack-browser');
     const actual = {
       checksum: setup.match(/actual_sha=\$\(sha256sum[^\n]+/)![0],
-      snoozeVersion: skill(host, 'gstack-upgrade').match(/_SNOOZED_VER=\$[^\n]+/)![0],
-      snoozeLevel: skill(host, 'gstack-upgrade').match(/_CUR_LEVEL=\$\(awk[^\n]+/)![0],
       capture: skill(host, 'health').match(/printf 'ERROR:typecheck[^\n]+/)![0],
       preview: skill(host, 'design-html').match(/_PORT=\$[^\n]+/)![0],
       title: skill(host, 'context-save').match(/# Bash-side title sanitize\.[^\n]+/)![0],
@@ -92,15 +88,15 @@ for (const host of ['claude', 'codex'] as const) for (const args of [[], tenArgu
   });
   test(`${label}: upgrade snooze advances the same-version level`, () => {
     mkdirSync(join(root, '.gstack'), { recursive: true });
-    writeFileSync(join(root, '.gstack/update-snoozed'), '{new} 1 0\n');
-    const block = skill(host, 'gstack-upgrade').match(/```bash\n((?:\[ -d "\$\{GSTACK_ROOT[^\n]*\n(?:GSTACK_BIN=[^\n]*\n)?)?(?:GSTACK_STATE_ROOT=\$\([^\n]*gstack-paths --get GSTACK_STATE_ROOT[^\n]*\n)?_SNOOZE_FILE=[\s\S]*?)```/)![1];
-    // The block resolves the state root through the installed helper first.
-    const bin = join(root, '.claude/skills/gstack/bin');
-    mkdirSync(bin, { recursive: true });
-    mkdirSync(join(dirname(bin), 'lib'), { recursive: true }); // C1: an exported GSTACK_ROOT needs bin/ and lib/
-    for (const name of ['gstack-paths', 'gstack-state-root.sh']) writeFileSync(join(bin, name), readFileSync(join(import.meta.dir, '../bin', name)), { mode: 0o755 });
-    expect(run(apply(block), { GSTACK_STATE_ROOT: join(root, '.gstack'), GSTACK_BIN: bin, GSTACK_ROOT: dirname(bin) }).status).toBe(0);
-    expect(readFileSync(join(root, '.gstack/update-snoozed'), 'utf8')).toMatch(/^\{new\} 2 \d+\n$/);
+    const candidate = 'a'.repeat(40);
+    writeFileSync(join(root, '.gstack/update-snoozed'), `${candidate} 1 0\n`);
+    const text = skill(host, 'gstack-upgrade');
+    const start = text.indexOf('SNOOZE_FILE="$GSTACK_STATE_ROOT/update-snoozed"');
+    const remaining = text.slice(start);
+    const fenceEnd = remaining.search(/\n(?:```|~~~)/);
+    const block = (fenceEnd < 0 ? remaining : remaining.slice(0, fenceEnd)).replace('CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"', `CANDIDATE_SHA="${candidate}"`);
+    expect(run(apply(block), { GSTACK_STATE_ROOT: join(root, '.gstack') }).status).toBe(0);
+    expect(readFileSync(join(root, '.gstack/update-snoozed'), 'utf8')).toMatch(new RegExp(`^${candidate} 2 \\d+\\n$`));
   });
   test(`${label}: health error preserves its diagnostic argument`, () => {
     const helper = skill(host, 'health').match(/health_capture_error\(\) \{[\s\S]*?\n  \}/)![0];

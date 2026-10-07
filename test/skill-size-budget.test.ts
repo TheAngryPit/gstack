@@ -192,11 +192,16 @@ describe('SKILL.md size budget regression (gate, free)', () => {
     //   $B command reference + snapshot-flag tables inline. /browse drives the
     //   Aside browser first and carries the Aside contract in the skeleton; the
     //   command tables live in the carved browse/sections/command-list.md.
+    // - gstack-upgrade: trusted-fork activation, rollback, and runtime readback
+    //   moved into the exact-SHA transactional updater. The skill keeps origin
+    //   routing, candidate handling, and operator-facing recovery guidance;
+    //   the updater CLI integration tests guard the moved behavior.
     const INTENTIONAL_SHRINKS = new Set<string>([
       'spec',
       'scrape', 'diagram', 'open-gstack-browser',
       'landing-report', 'pair-agent', 'skillify',
       'browse',
+      'gstack-upgrade',
     ]);
 
     const undershoots: Array<{

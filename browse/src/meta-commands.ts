@@ -424,7 +424,7 @@ export async function handleMetaCommand(
       // inline resets the CLI's fetch, which it reasonably interprets as a
       // crash and then restarts the daemon it was asked to stop.
       setTimeout(() => { void shutdown(); }, 25).unref?.();
-      return 'Server stopped';
+      return 'Stopping server...';
     }
 
     case 'restart': {

@@ -14,10 +14,11 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
-import { headlessGpuArgs } from '../src/browser-manager';
-import { reapRecordedChromium } from '../src/cli';
+import { BrowserManager, headlessGpuArgs, launchedChromiumPid } from '../src/browser-manager';
+import { GRACEFUL_STOP_TIMEOUT_MS, reapAfterDaemonShutdown, reapRecordedChromium } from '../src/cli';
 import { readPidStartTime } from '../src/xvfb';
 import { isProcessAlive } from '../src/error-handling';
+import { chromium, type Browser } from 'playwright';
 
 describe('headlessGpuArgs (#2709)', () => {
   test('darwin gets the validated four-flag set', () => {
@@ -37,6 +38,44 @@ describe('headlessGpuArgs (#2709)', () => {
   test('non-darwin platforms are untouched', () => {
     expect(headlessGpuArgs('linux', {})).toEqual([]);
     expect(headlessGpuArgs('win32', {})).toEqual([]);
+  });
+});
+
+describe('graceful stop reaping order (#2709)', () => {
+  test('does not reap Chromium when the daemon remains alive through the full shutdown deadline', async () => {
+    let now = 0;
+    let reapCalls = 0;
+    const stopped = await reapAfterDaemonShutdown(
+      { pid: 4242, chromiumPid: 4343, chromiumStartTime: 'recorded-start' },
+      {
+        isAlive: () => true,
+        now: () => now,
+        sleep: async (ms) => { now += ms; },
+        reap: async () => { reapCalls += 1; },
+      },
+    );
+
+    expect(now).toBe(GRACEFUL_STOP_TIMEOUT_MS);
+    expect(stopped).toBe(false);
+    expect(reapCalls).toBe(0);
+  });
+
+  test('reaps only after the daemon exits before the deadline', async () => {
+    let now = 0;
+    let polls = 0;
+    let reapCalls = 0;
+    const stopped = await reapAfterDaemonShutdown(
+      { pid: 4242, chromiumPid: 4343, chromiumStartTime: 'recorded-start' },
+      {
+        isAlive: () => polls++ < 2,
+        now: () => now,
+        sleep: async (ms) => { now += ms; },
+        reap: async () => { reapCalls += 1; },
+      },
+    );
+
+    expect(stopped).toBe(true);
+    expect(reapCalls).toBe(1);
   });
 });
 
@@ -102,6 +141,83 @@ describe.skipIf(process.platform !== 'linux')('reapRecordedChromium identity gat
   test('absent or dead pid is a quiet no-op', async () => {
     await reapRecordedChromium({});
     await reapRecordedChromium({ chromiumPid: 999999999, chromiumStartTime: 'x' });
+  });
+});
+
+// E3: Playwright 1.62's Browser has no process(), so the recorded identity was
+// always null and the reap above never ran. The PID now comes from CDP
+// SystemInfo.getProcessInfo, only for a launch gstack owns.
+describe.skipIf(process.platform !== 'linux')('Chromium PID via CDP on the pinned Playwright (#2709, E3)', () => {
+  const closeQuietly = (b: { close(): Promise<void> } | null | undefined) =>
+    Promise.race([b?.close().catch(() => {}), new Promise((r) => setTimeout(r, 3_000))]);
+
+  test('an owned headless launch records the browser PID and start time, and the reap kills it', async () => {
+    const bm = new BrowserManager();
+    await bm.launch();
+    try {
+      const info = bm.getChromiumProcInfo();
+      expect(info, 'headless launch recorded no Chromium identity').not.toBeNull();
+      expect(isProcessAlive(info!.pid)).toBe(true);
+      expect(info!.startTime).toBe(readPidStartTime(info!.pid));
+      expect(info!.startTime).not.toBe('');
+      await reapRecordedChromium({ chromiumPid: info!.pid, chromiumStartTime: info!.startTime });
+      expect(isProcessAlive(info!.pid)).toBe(false);
+    } finally {
+      await closeQuietly(bm);
+    }
+  }, 60_000);
+
+  test('an externally owned Chromium is never reaped: its PID is not recorded and a stale identity never matches', async () => {
+    const external = await chromium.launch({ headless: true, chromiumSandbox: false });
+    const bm = new BrowserManager();
+    await bm.launch();
+    try {
+      const externalPid = await launchedChromiumPid(external);
+      expect(externalPid).not.toBeNull();
+      const ours = bm.getChromiumProcInfo();
+      expect(ours?.pid).not.toBe(externalPid);
+      await reapRecordedChromium({ chromiumPid: ours!.pid, chromiumStartTime: ours!.startTime });
+      expect(isProcessAlive(externalPid!)).toBe(true);
+      // A recycled PID: a live Chromium at the recorded PID with another start time.
+      await reapRecordedChromium({ chromiumPid: externalPid!, chromiumStartTime: 'Mon Jan  1 00:00:00 1990' });
+      expect(isProcessAlive(externalPid!)).toBe(true);
+    } finally {
+      await closeQuietly(bm);
+      await closeQuietly(external);
+    }
+  }, 60_000);
+});
+
+describe('launchedChromiumPid bounded CDP failure (E3)', () => {
+  const stub = (newBrowserCDPSession: () => Promise<unknown>) => ({ newBrowserCDPSession }) as unknown as Browser;
+
+  test('a hung CDP session returns null within the bound and logs once', async () => {
+    const warn = console.warn;
+    const lines: string[] = [];
+    console.warn = (...args: unknown[]) => { lines.push(args.join(' ')); };
+    try {
+      const t0 = Date.now();
+      expect(await launchedChromiumPid(stub(() => new Promise(() => {})), 100)).toBeNull();
+      expect(Date.now() - t0).toBeLessThan(2_000);
+    } finally {
+      console.warn = warn;
+    }
+    expect(lines).toEqual([
+      '[browse] Could not record the Chromium PID (CDP SystemInfo.getProcessInfo: timed out after 100ms); browse stop cannot reap a surviving Chromium.',
+    ]);
+  });
+
+  test('a failing or browser-less answer returns null', async () => {
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      expect(await launchedChromiumPid(stub(async () => { throw new Error('Target closed'); }))).toBeNull();
+      const session = (processInfo: unknown[]) => async () => ({ send: async () => ({ processInfo }), detach: async () => {} });
+      expect(await launchedChromiumPid(stub(session([{ type: 'GPU', id: 4242 }])))).toBeNull();
+      expect(await launchedChromiumPid(stub(session([{ type: 'browser', id: 4242 }])))).toBe(4242);
+    } finally {
+      console.warn = warn;
+    }
   });
 });
 
@@ -175,12 +291,14 @@ describe('stop-reap wiring pins (#2709)', () => {
       /await killOrphanChromium\(\);[\s\S]*if \(staleState\) await reapRecordedChromium\(staleState\);[\s\S]*safeUnlinkQuiet\(config\.stateFile\);/,
     );
 
-    // 5. Post-graceful-stop: the daemon closed Chromium via Playwright, but a
-    //    surviving GPU process must still be reaped after sendCommand('stop').
+    // 5. Post-graceful-stop: reaping is delegated to the helper whose behavior
+    //    tests prove a surviving daemon never has its Chromium interrupted.
     const postStop = between('await sendCommand(state, command, commandArgs);', "if (command === 'focus')");
     expect(postStop).toMatch(
-      /if \(command === 'stop'\) \{\s*\n\s*await reapRecordedChromium\(state\);/,
+      /if \(command === 'stop'\) \{[\s\S]*const daemonStopped = await reapAfterDaemonShutdown\(state\);[\s\S]*if \(daemonStopped\)[\s\S]*console\.log\('Daemon stopped\.'\);[\s\S]*Graceful stop timed out[\s\S]*process\.exitCode = 1;/,
     );
+    const reapAfterShutdown = between('export async function reapAfterDaemonShutdown(', 'export const HEALTH_PROBE_TOTAL_BUDGET_MS');
+    expect(reapAfterShutdown).toMatch(/if \(isAlive\(state\.pid\)\) return false;[\s\S]*await \(options\.reap \?\? reapRecordedChromium\)\(state\);/);
   });
 
   test('browser-manager.ts pushes headlessGpuArgs only under the headless launch guard', () => {
@@ -194,5 +312,13 @@ describe('stop-reap wiring pins (#2709)', () => {
     // (--headless=new, no window), so it takes the headless GPU flags.
     const headless = src.slice(src.indexOf('  async launch() {'), src.indexOf('  async launchHeaded('));
     expect(headless).toContain('launchArgs.push(...headlessGpuArgs(process.platform, process.env));');
+  });
+
+  test('launchedChromiumPid is called only by the owned headless launch()', () => {
+    const src = read('browser-manager.ts');
+    const calls = src.match(/await launchedChromiumPid\(/g) ?? [];
+    expect(calls.length).toBe(1);
+    const headless = src.slice(src.indexOf('  async launch() {'), src.indexOf('  async launchHeaded('));
+    expect(headless).toContain('const pid = await launchedChromiumPid(this.browser);');
   });
 });

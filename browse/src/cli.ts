@@ -334,6 +334,35 @@ export async function reapRecordedChromium(state: {
   }
 }
 
+export const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
+
+/** Wait for the daemon's own shutdown before reaping its recorded Chromium.
+ * A still-live daemon may be closing Chromium; signaling that child early can
+ * make graceful shutdown look like a crash. False means the deadline expired
+ * with the daemon alive, so leave the child untouched for a later stop pass. */
+export async function reapAfterDaemonShutdown(
+  state: { pid: number; chromiumPid?: number; chromiumStartTime?: string },
+  options: {
+    timeoutMs?: number;
+    isAlive?: (pid: number) => boolean;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+    reap?: (state: { chromiumPid?: number; chromiumStartTime?: string }) => Promise<void>;
+  } = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? GRACEFUL_STOP_TIMEOUT_MS;
+  const isAlive = options.isAlive ?? isProcessAlive;
+  const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
+  const now = options.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  while (now() < deadline && isAlive(state.pid)) {
+    await sleep(Math.min(100, deadline - now()));
+  }
+  if (isAlive(state.pid)) return false;
+  await (options.reap ?? reapRecordedChromium)(state);
+  return true;
+}
+
 /** Total wall-clock budget for the busy-vs-dead health probe (#2219,
  * decision F10). The old ~1s window (3 × 250ms) was shorter than how long a
  * daemon stays unresponsive while Chromium chews a heavy dev-mode page with a
@@ -2081,7 +2110,13 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
   // spin at ~800% CPU forever. The state snapshot read above still carries
   // the launched child's identity; reap a verified survivor.
   if (command === 'stop') {
-    await reapRecordedChromium(state);
+    const daemonStopped = await reapAfterDaemonShutdown(state);
+    if (daemonStopped) {
+      console.log('Daemon stopped.');
+    } else {
+      console.error(`[browse] Graceful stop timed out after ${GRACEFUL_STOP_TIMEOUT_MS / 1000}s; daemon PID ${state.pid} is still alive. Chromium was left untouched to avoid interrupting shutdown. Retry \`browse stop\` after it exits.`);
+      process.exitCode = 1;
+    }
   }
 
   // #1781: `focus` means "show me the window". The server-side focus activates

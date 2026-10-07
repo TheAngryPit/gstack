@@ -56,13 +56,10 @@ describe("PR #1169 bug #4: gstack-telemetry-sync mktemp fallback", () => {
   });
 });
 
-// #2679: three skill-content mktemp sites ran unguarded. An empty result
-// ("" on mktemp failure) silently disabled the redaction pass (redact-doc
-// resolver + ship pr-body) and — the destructive one — made /gstack-upgrade's
-// vendored path clone to "/gstack", fail the swap, then `rm -rf` BOTH the
-// live install's backup and "". Guards must abort loudly; the upgrade block
-// must also restore the backup when the swap fails (same failure class:
-// backup deletion after a failed mv).
+// #2679: an empty mktemp result could disable redaction or redirect a PR-body
+// write. The upgrade skill now delegates source mutation and recovery to its
+// transactional updater, so it must not grow a model-executable clone/swap
+// fallback beside that owner.
 describe("#2679: skill-content mktemp guards", () => {
   test("redact-doc resolver guards REDACT_FILE=$(mktemp) with a loud exit", () => {
     // The guard line contains a ${sink.noun} interpolation in the resolver
@@ -87,22 +84,18 @@ describe("#2679: skill-content mktemp guards", () => {
     expect(body).not.toMatch(/glab mr create[^\n]*-d "\$\(cat <<'EOF'/);
   });
 
-  test("gstack-upgrade vendored block guards mktemp -d and clone with loud aborts", () => {
+  test("gstack-upgrade delegates exact-SHA source activation without an inline clone path", () => {
     const body = readScript("gstack-upgrade/SKILL.md.tmpl");
-    expect(body).toMatch(/TMP_DIR=\$\(mktemp -d "\$\{TMPDIR:-\/tmp\}\/[^"]+"\)\s*\|\|\s*\{[^}]*exit 1/);
-    expect(body).toMatch(/git clone[^\n]*\|\|\s*\{[^}]*exit 1/);
+    expect(body).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
+    expect(body).not.toMatch(/\b(git\s+clone|mktemp|rm\s+-rf)\b/);
   });
 
-  test("gstack-upgrade vendored block restores the backup on a failed swap (no unconditional backup rm)", () => {
-    const body = readScript("gstack-upgrade/SKILL.md.tmpl");
-    expect(body).toMatch(/if mv "\$TMP_DIR\/gstack" "\$INSTALL_DIR"; then/);
-    expect(body).toMatch(/mv "\$INSTALL_DIR\.bak" "\$INSTALL_DIR"/);
-    // The backup rm must live inside the success branch, not after the block.
-    const block = body.slice(body.indexOf('if mv "$TMP_DIR/gstack"'));
-    const successRm = block.indexOf('rm -rf "$INSTALL_DIR.bak"');
-    const elseBranch = block.indexOf("else");
-    expect(successRm).toBeGreaterThan(-1);
-    expect(successRm).toBeLessThan(elseBranch);
+  test("transactional updater owns source and runtime rollback", () => {
+    const body = readScript("bin/gstack-session-update");
+    expect(body).toContain('cp -a "$GSTACK_DIR" "$txn/source-old"');
+    expect(body).toContain('rollback_transaction "$txn" "$from" "$target"');
+    expect(body).toContain('recover_interrupted_transaction');
+    expect(body).toContain('ROLLBACK_FAILED runtime_restore_failed snapshot=$txn');
   });
 
   test("runtime: the guarded assignment aborts when mktemp fails", () => {

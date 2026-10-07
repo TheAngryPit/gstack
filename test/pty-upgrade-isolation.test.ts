@@ -9,7 +9,9 @@ import { hermeticChildEnv, hermeticSkillsConfigDir } from './helpers/hermetic-en
 const ROOT = path.resolve(import.meta.dir, '..');
 const OLD_VERSION = '1.72.0.0';
 const NEW_VERSION = '1.81.0.0';
-const UPGRADE = `UPGRADE_AVAILABLE ${OLD_VERSION} ${NEW_VERSION}\n`;
+const CANDIDATE_SHA = 'a'.repeat(40);
+const UPGRADE = `UPGRADE_AVAILABLE ${OLD_VERSION} ${NEW_VERSION} ${CANDIDATE_SHA} unknown trusted\n`;
+const UPGRADE_NOTICE = `UPGRADE_AVAILABLE ${OLD_VERSION} ${NEW_VERSION} ${CANDIDATE_SHA}`;
 function extractPreamble(source: string): string {
   const heading = /^## Preamble(?: \([^\r\n]*\))?[ \t]*\r?\n/m.exec(source);
   if (!heading) throw new Error('Generated skill has no Preamble section');
@@ -54,6 +56,8 @@ function withOldInstall(check: (fixture: {
     fs.mkdirSync(install, { recursive: true });
     fs.mkdirSync(state);
     fs.mkdirSync(commandBin);
+    execFileSync('git', ['init', '--quiet', install]);
+    execFileSync('git', ['-C', install, 'remote', 'add', 'origin', 'https://github.com/TheAngryPit/gstack.git']);
     // Real runtime, older installed VERSION: the preamble resolves through HOME.
     fs.symlinkSync(path.join(ROOT, 'bin'), path.join(install, 'bin'), 'dir');
     const version = path.join(install, 'VERSION');
@@ -104,7 +108,7 @@ describe('seeded PTY update-check isolation', () => {
       const stateCache = path.join(state, 'last-update-check');
       fs.writeFileSync(stateCache, UPGRADE);
       const output = runPreamble(home, { ...env, GSTACK_HOME: state });
-      expect(output).toContain(UPGRADE.trim());
+      expect(output).toContain(UPGRADE_NOTICE);
       expect(output).toContain('GSTACK_INSTRUCTION_BEGIN: upgrade-flow');
       expect(output).toContain('UPDATE_CHECK: true');
       expect(fs.readFileSync(cache, 'utf8')).toBe(UPGRADE);

@@ -37,10 +37,12 @@ keys or paid evaluation calls in the parity CI job. The upstream paid E2E
 entry jobs are restricted to the official repository, so a downstream PR does
 not build/publish evaluation images or dispatch paid model probes.
 
-The native hourly task owns source updates and semantic reconciliation. CI
-independently checks the branch on every push. A scheduled check is not a
-promise of zero delay after an upstream release; report the observed source
-version and timestamp, and surface concrete failures.
+The twice-daily source monitor checks for upstream updates and performs
+semantic reconciliation. It prepares source changes; installation and
+activation remain separate operator actions. CI independently checks the
+branch on every push. A scheduled check is not a promise of zero delay after
+an upstream release; report the observed source version and timestamp, and
+surface concrete failures.
 
 ## Local acceptance
 

@@ -1,70 +1,50 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { readFileSync } from 'fs';
 import { join } from 'path';
-import { spawnSync } from 'child_process';
 
-const template = readFileSync(join(import.meta.dir, '../gstack-upgrade/SKILL.md.tmpl'), 'utf8');
-const blockAfter = (marker: string) => {
-  const section = template.slice(template.indexOf(marker));
-  return section.match(/```bash\n([\s\S]*?)\n```/)![1].replaceAll('{{SETUP_COMMAND}}', './setup');
-};
+const root = join(import.meta.dir, '..');
+const template = readFileSync(join(root, 'gstack-upgrade/SKILL.md.tmpl'), 'utf8');
+const updater = readFileSync(join(root, 'bin/gstack-session-update'), 'utf8');
 
-describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shell)', () => {
-  for (const mode of ['vendored', 'local'] as const) {
-    for (const setupExit of [0, 1]) {
-      test(`${mode}: setup exit ${setupExit} ${setupExit ? 'restores old install' : 'removes backup only after success'}`, () => {
-        const root = mkdtempSync(join(tmpdir(), 'upgrade-recovery-'));
-        const target = join(root, 'target');
-        const source = join(root, 'source');
-        const bin = join(root, 'bin');
-        try {
-          for (const dir of [target, source, bin, join(target, 'bin'), join(source, 'bin')]) mkdirSync(dir);
-          writeFileSync(join(target, 'VERSION'), 'old');
-          writeFileSync(join(source, 'VERSION'), 'new');
-          // C9: fences only touch a directory that looks like a gstack install.
-          for (const dir of [target, source]) writeFileSync(join(dir, 'bin', 'gstack-config'), '#!/bin/sh\n', { mode: 0o755 });
-          writeFileSync(join(target, 'setup'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-          writeFileSync(join(source, 'setup'), '#!/bin/sh\nexit "$SETUP_EXIT"\n', { mode: 0o755 });
-          writeFileSync(join(bin, 'git'), '#!/bin/sh\nfor last; do :; done\ncp -R "$UPGRADE_FIXTURE" "$last"\n', { mode: 0o755 });
-          const script = blockAfter(mode === 'vendored'
-            ? '**For vendored installs**'
-            : '**If `LOCAL_GSTACK` is non-empty AND `TEAM_MODE` is NOT `true`:**');
-          const result = spawnSync('bash', ['-c', script], {
-            cwd: root, encoding: 'utf8', timeout: 10_000,
-            env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: mode === 'vendored' ? target : source,
-              LOCAL_GSTACK: target, UPGRADE_FIXTURE: source, SETUP_EXIT: String(setupExit) },
-          });
-          expect(result.status, result.stderr).toBe(setupExit);
-          expect(readFileSync(join(target, 'VERSION'), 'utf8')).toBe(setupExit ? 'old' : 'new');
-          expect(existsSync(`${target}.bak`)).toBe(false);
-        } finally {
-          rmSync(root, { recursive: true, force: true });
-        }
-      });
-    }
-  }
+describe('upgrade setup recovery ownership', () => {
+  test('the skill passes the exact accepted SHA to the transactional updater', () => {
+    expect(template).toContain('UPGRADE_AVAILABLE <old> <new> <sha>');
+    expect(template).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
+    expect(template).toMatch(/rollback\/recovery\s+failure/);
+    expect(template).toContain('preserve the transaction snapshot path');
 
-  test('git setup failure is not routed into the divergence reset fallback', () => {
-    const root = mkdtempSync(join(tmpdir(), 'upgrade-git-setup-'));
-    try {
-      const bin = join(root, 'bin');
-      mkdirSync(bin);
-      writeFileSync(join(bin, 'git'), '#!/bin/sh\nif [ "$1 $2" = "rev-parse --show-toplevel" ]; then pwd -P; elif [ "$1" = rev-parse ]; then echo old-commit; fi\nexit 0\n', { mode: 0o755 });
-      writeFileSync(join(root, 'setup'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-      // C9: the git fence verifies it is inside gstack's own checkout first.
-      writeFileSync(join(root, 'VERSION'), '1.0.0.0\n');
-      writeFileSync(join(root, 'bin', 'gstack-config'), '#!/bin/sh\n', { mode: 0o755 });
-      const result = spawnSync('bash', ['-c', blockAfter('**For git installs**')], {
-        cwd: root, encoding: 'utf8', timeout: 10_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: root },
-      });
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('SETUP_FAILED');
-      expect(result.stdout).not.toContain('FF_REFUSED');
-      expect(result.stdout).not.toContain('FF_OK');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
+    const commands = [...template.matchAll(/^(`{3,}|~{3,})bash\n([\s\S]*?)\n\1$/gm)].map(match => match[2]);
+    expect(commands.length).toBeGreaterThan(0);
+    for (const command of commands) {
+      expect(command).not.toMatch(/\bgit\s+(pull|reset|stash|fetch|clone|checkout|merge)\b/);
+      expect(command).not.toMatch(/\b(mktemp|mv|rm\s+-rf)\b/);
     }
   });
+
+  test('the updater snapshots source and registered runtimes before fast-forward activation', () => {
+    const snapshot = updater.indexOf('cp -a "$GSTACK_DIR" "$txn/source-old"');
+    const runtimeSnapshot = updater.indexOf('if ! snapshot_registered_runtime;');
+    const prepared = updater.indexOf('write_journal prepared "$from" "$target" "$txn"');
+    const activate = updater.indexOf('git -C "$GSTACK_DIR" merge --ff-only "$target"');
+    expect(snapshot).toBeGreaterThan(-1);
+    expect(runtimeSnapshot).toBeGreaterThan(snapshot);
+    expect(prepared).toBeGreaterThan(runtimeSnapshot);
+    expect(activate).toBeGreaterThan(prepared);
+  });
+
+  test('an interrupted or failed activation retains a recovery path and source snapshot', () => {
+    expect(updater).toContain('install_recovery_runner ||');
+    expect(updater).toContain('recover_interrupted_transaction ||');
+    expect(updater).toContain('rollback_transaction "$txn" "$from" "$target"');
+    expect(updater).toContain('--recover-interrupted');
+    expect(updater).toContain('ROLLBACK_FAILED runtime_restore_failed snapshot=$txn');
+  });
+});
+
+test('manual origins cannot enter trusted-fork activation', () => {
+  expect(template).toContain('Other origins stay manual');
+  expect(template).toContain('UPDATE_LANE=manual-origin');
+  expect(template).toContain('does not have the trusted fork\'s exact-SHA CI proof');
+  expect(template).not.toMatch(/\bgit\s+(pull|reset|stash|fetch|clone|checkout|merge)\b/);
+  expect(updater).toContain('UPDATE_DEFERRED untrusted_origin');
 });

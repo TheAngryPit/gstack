@@ -359,6 +359,7 @@ describe('setup --team / --no-team / -q', () => {
     const cwd = path.join(tmp, 'gstack');
     const home = path.join(tmp, 'home');
     const commands = path.join(tmp, 'commands');
+    const realCwd = path.join(fs.realpathSync(tmp), 'gstack');
     const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
     const write = (rel: string, content: string) => {
       const file = path.join(cwd, rel);
@@ -366,7 +367,7 @@ describe('setup --team / --no-team / -q', () => {
       fs.writeFileSync(file, content, { mode: 0o755 });
     };
     try {
-      for (const rel of ['setup', 'VERSION', 'SKILL.md', 'qa/SKILL.md', 'bin/gstack-config', 'bin/gstack-patch-names', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-render-claude.sh', 'scripts/resolve-codex-generation-model.ts', 'scripts/models.ts', 'scripts/preflight-codex-overlap.ts', 'scripts/discover-skills.ts', 'scripts/external-skill-names.ts', 'scripts/host-config.ts']) {
+      for (const rel of ['setup', 'VERSION', 'SKILL.md', 'qa/SKILL.md', 'bin/gstack-config', 'bin/gstack-patch-names', 'bin/gstack-state-root.sh', 'bin/gstack-bun-version.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-render-claude.sh', 'scripts/resolve-codex-generation-model.ts', 'scripts/models.ts', 'scripts/preflight-codex-overlap.ts', 'scripts/discover-skills.ts', 'scripts/external-skill-names.ts', 'scripts/host-config.ts']) {
         const dest = path.join(cwd, rel);
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         fs.copyFileSync(path.join(ROOT, rel), dest);
@@ -398,8 +399,8 @@ case "$*" in
   'run gen:skill-docs --host codex --model gpt-6-astra') mkdir -p .agents/skills; exit 0 ;;
   'run scripts/resolve-codex-generation-model.ts') exec ${quote(process.execPath)} "$@" ;;
   *'/scripts/preflight-codex-overlap.ts --source '*)
-    [[ "$#" -eq 13 && "$1" = ${quote(path.join(cwd, 'scripts/preflight-codex-overlap.ts'))}
-      && "$2" = --source && "$3" = ${quote(cwd)}
+    [[ "$#" -eq 13 && "$1" = ${quote(path.join(realCwd, 'scripts/preflight-codex-overlap.ts'))}
+      && "$2" = --source && "$3" = ${quote(realCwd)}
       && "$4" = --namespace && "$5" = ${quote(path.join(home, '.codex/skills'))}
       && "$6" = --selected && "$7" = 0 && "$8" = --local && "$9" = 0
       && "\${10}" = --windows && "\${11}" = ${process.platform === 'win32' ? '1' : '0'}
@@ -437,7 +438,7 @@ exec ${quote(realRm)} "$@"
     'setup -q produces no stdout',
     () => withSetup(fixture => {
       const result = runBashScript(`bash ${fixture.setup} -q`, { cwd: fixture.cwd, env: fixture.env, timeout: 10000 });
-      expect(result.status, result.stderr).toBe(0);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       // -q should suppress informational output (may still have some output from build)
       // The key test is that the "Skill naming:" prompt and "gstack ready" messages are suppressed
       expect(result.stdout).not.toContain('Skill naming:');
@@ -452,7 +453,7 @@ exec ${quote(realRm)} "$@"
     () => withSetup(fixture => {
       // stderr capture: run via bash redirect so we can capture stderr
       const result = runBashScript(`bash ${fixture.setup} --local -q 2>&1`, { cwd: fixture.cwd, env: fixture.env, timeout: 10000 });
-      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       expect(result.stdout).toContain('deprecated');
       expect(fs.realpathSync(path.join(fixture.cwd, '.claude/skills/qa/SKILL.md'))).toBe(path.join(fs.realpathSync(fixture.cwd), 'qa/SKILL.md'));
     }),

@@ -1,7 +1,7 @@
 name: Codex native parity
 on:
   push:
-    branches: [codex/native-parity-latest]
+    branches: [main, codex/native-parity-latest]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
       - run: bun install --frozen-lockfile --ignore-scripts
       - name: Check product and test types without widening baselines
         run: |
