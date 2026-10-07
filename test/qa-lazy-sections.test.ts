@@ -169,8 +169,8 @@ describe('QA-only cross-host lazy rendering', () => {
         expect(fs.readFileSync(path.join(rendered, dir, 'SKILL.md'), 'utf8')).not.toContain(body.split('\n').slice(2).join('\n').trim());
       }
       const outside = generated.artifacts.filter(artifact => artifact.host === host.name && artifact.kind === 'section'
-        && !/^(?:qa|qa-only|ship|plan-ceo-review)\//.test(artifact.relativePath)
-        && !/\/gstack-(?:qa(?:-only)?|ship|plan-ceo-review)\//.test(artifact.relativePath));
+        && !/^(?:qa|qa-only|ship|plan-ceo-review|office-hours)\//.test(artifact.relativePath)
+        && !/\/gstack-(?:qa(?:-only)?|ship|plan-ceo-review|office-hours)\//.test(artifact.relativePath));
       if (host.name === 'codex') {
         expect(outside.some(artifact => artifact.relativePath === `${host.hostSubdir}/skills/gstack-review/sections/adversarial.md`)).toBe(true);
       } else {
@@ -299,9 +299,9 @@ describe('QA-only cross-host lazy rendering', () => {
         expect(body).toContain(`From the installed /${caller} SKILL.md's directory`);
         expect(body).toContain(`Read \`../${prefix}qa/sections/exploratory.md\` in full`);
         const scopeTarget = path.resolve(dir, `../${prefix}qa/sections/scope.md`);
-        expect(fs.realpathSync(scopeTarget)).toBe(path.join(base, `${prefix}qa/sections/scope.md`));
+        expect(fs.realpathSync(scopeTarget)).toBe(path.join(fs.realpathSync(base), `${prefix}qa/sections/scope.md`));
         const target = path.resolve(dir, `../${prefix}qa/sections/exploratory.md`);
-        expect(fs.realpathSync(target)).toBe(path.join(base, `${prefix}qa/sections/exploratory.md`));
+        expect(fs.realpathSync(target)).toBe(path.join(fs.realpathSync(base), `${prefix}qa/sections/exploratory.md`));
         expect(fs.readFileSync(target, 'utf8')).toContain('# Shared exploratory QA');
         expect(fs.readFileSync(target, 'utf8')).toContain(sectionPath(context(host.name, 'qa'), 'qa', 'scope'));
         expect(fs.readFileSync(scopeTarget, 'utf8')).toContain('Select **browser**, **functional**');

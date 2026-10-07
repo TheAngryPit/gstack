@@ -31,16 +31,17 @@ import { generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse }
 import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand } from './utility';
 import { generateLearningsSearch, generateLearningsLog } from './learnings';
 import { generateConfidenceCalibration } from './confidence';
-import { generateInvokeSkill, generateAutoplanReviewFile, generateAutoplanSnapshotTool, generateAutoplanPublicationHook } from './composition';
+import { generateInvokeSkill, generateAutoplanReviewFile, generateAutoplanSnapshotTool, generateAutoplanPublicationHook, generateCeoModeHandoffHook } from './composition';
 import { generateReviewArmy } from './review-army';
 import { generateDxFramework } from './dx';
 import { generateGBrainContextLoad, generateGBrainSaveResults, generateBrainPreflight, generateBrainCacheRefresh, generateBrainWriteBack } from './gbrain';
 import { generateTasksSectionEmit, generateTasksSectionAggregate } from './tasks-section';
 import { SECTION, SECTION_INDEX } from './sections';
 import { generateRedactInvocationBlock } from './redact-doc';
+import { generateFreeTextFile } from './free-text-file';
 import { FOREGROUND_DISPATCH_NOTE } from './constants';
 import { generateThirdPartyActions } from './third-party-actions';
-import { generateAsideSetup, generateAsideCookbook, generateAsideResearch, generateUntrustedContentWarning, asideExecPrelude } from './aside';
+import { generateAsideSetup, generateAsideCookbook, generateAsideResearch, generateUntrustedContentWarning, asideExecPrelude, asideResearchSend } from './aside';
 import { generateCommandReference, generateSnapshotFlags, generateBrowseSetup, generateBrowseFallback } from './browse';
 import { generateDesignDocDiscovery } from './design-doc-discovery';
 import { generateNativeOpinionModes } from './native-opinion-modes';
@@ -64,6 +65,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   SPEC_WORKTREE_FAILURE: (ctx) => ctx.host === 'codex' ? '**If worktree creation fails:** stop dispatch, keep the issue and archived spec, record `spec_executed: false`, and report the exact failure. Do not execute against the current dirty checkout as a fallback.' : "**Error: worktree create fails** (disk full, path exists, etc.): print:\n\"Worktree create failed — `$ERROR`. Spawning agent in current dir instead. Your\nin-progress changes will be visible to the agent. Cancel with Ctrl+C if not\ndesired.\" Then fall back to current dir (still spawn).",
   SPEC_HOST_EXECUTION: (ctx) => ctx.host === 'codex' ? 'Dispatch a native Codex worker in a fresh worktree after filing the issue.' : 'Spawn `claude -p` in a fresh worktree after filing the issue.',
   AUTOPLAN_PUBLICATION_HOOK: generateAutoplanPublicationHook,
+  CEO_MODE_HANDOFF_HOOK: generateCeoModeHandoffHook,
   OUTSIDE_SELF_GUARD: (ctx, args) => outsideVoiceGuard({ ...ctx, host: args?.[0] === 'claude-code' ? 'codex' : 'claude' }),
   OUTSIDE_VOICE_ROUTING: generateOutsideVoiceRouting,
   OUTSIDE_LABEL: (ctx) => outsideVoiceFor(ctx).label,
@@ -80,6 +82,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   CODEX_REVIEW_MODEL_CONFIG_FLAG: generateCodexReviewModelConfigFlag,
   CLAUDE_MODEL_FLAG: generateClaudeModelFlag,
   REDACT_INVOCATION_BLOCK: generateRedactInvocationBlock,
+  FREE_TEXT_FILE: generateFreeTextFile,
   THIRD_PARTY_ACTIONS: generateThirdPartyActions,
   DESIGN_DOC_DISCOVERY: generateDesignDocDiscovery,
   SHARED_LIBS_RUBRIC: generateSharedLibsRubric,
@@ -95,6 +98,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   ASIDE_COOKBOOK: generateAsideCookbook,
   ASIDE_RESEARCH: generateAsideResearch,
   ASIDE_EXEC_PRELUDE: asideExecPrelude,
+  ASIDE_RESEARCH_SEND: asideResearchSend,
   BASE_BRANCH_DETECT: generateBaseBranchDetect,
   QA_METHODOLOGY: generateQAMethodology,
   QA_SCOPE: generateQAScope,

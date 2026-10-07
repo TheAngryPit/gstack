@@ -287,7 +287,7 @@ redaction always runs, no flag disables it.
         '`test/codex-spec-quality-gate.test.ts` checks native workflow ordering and actual scanner HIGH rejection; model compliance at downstream sinks remains unproven.')
       .replaceAll('The\n`spec-quality-gate-secret-sink.test.ts` enforces this.',
         '`test/codex-spec-quality-gate.test.ts` checks the contract and scanner, not model compliance.');
-    text = replaceBlock(text, 'If `gh` is available and authenticated, file from the scanned temp file:', '**Capture `$ISSUE_NUMBER`**', `If gh is available and authenticated AND filing is authorised, use the exact
+    text = replaceBlock(text, 'If `gh` is available and authenticated, file from the scanned file.', '**Capture `$ISSUE_NUMBER`**', `If gh is available and authenticated AND filing is authorised, use the exact
 allocated scanned body path from the preceding scan; do not rely on an unset or
 stale shell variable. Prepare the title as literal bytes in a separate private
 input and apply the same redaction/permission branches to it. Use a single-line

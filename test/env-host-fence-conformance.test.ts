@@ -19,12 +19,13 @@ import { runGeneration } from '../scripts/gen-skill-docs';
 import { generateMakePdfSetup } from '../scripts/resolvers/make-pdf';
 import { binaryAssignment, fencePrelude, insertRuntimePreludes, MAKE_PDF_OVERRIDE, PRELUDE_BYTE_BUDGET, runtimeRootPrelude } from '../scripts/resolvers/runtime-root';
 import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
-import { lintFence, normalizePlaceholders } from './helpers/generated-bash-lint';
+import { IDENTIFIER_PLACEHOLDERS, lintFence, normalizePlaceholders } from './helpers/generated-bash-lint';
 
+const ROOT = path.resolve(import.meta.dir, '..');
 const ENV_HOSTS = ALL_HOST_CONFIGS.filter(h => h.usesEnvVars);
 const FORBIDDEN = /^(?:\/bin\/|\/browse|\/design|\/gstack-)/;
 const PRELUDE_LINE = /^\[ -d "\$\{GSTACK_ROOT:-\/-\}\/bin" \]|^(?:GSTACK_(?:BIN|BROWSE|DESIGN|MAKE_PDF)=\$GSTACK_ROOT\/\S+ ?)+$|^[BDP]=\$GSTACK_ROOT\//;
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-env-fences-'));
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-env-fences-')));
 const renderDir = path.join(tmp, 'render');
 
 interface Fence { file: string; line: number; body: string }
@@ -272,6 +273,31 @@ describe('INV-3: every rendered fence parses, runs its prelude and passes the li
   });
 });
 
+describe('#3046: runtime reference docs that skills execute pass the lint', () => {
+  test('every non-generated markdown file in a skill directory (review/greptile-triage.md and friends)', () => {
+    const skillDirs = fs.readdirSync(ROOT, { withFileTypes: true })
+      .filter(e => e.isDirectory() && fs.existsSync(path.join(ROOT, e.name, 'SKILL.md.tmpl')))
+      .map(e => path.join(ROOT, e.name));
+    const docs = skillDirs.flatMap(dir => fs.readdirSync(dir)
+      .filter(f => f.endsWith('.md') && f !== 'SKILL.md')
+      .map(f => path.join(dir, f)));
+    expect(docs.map(d => path.relative(ROOT, d))).toContain('review/greptile-triage.md');
+    const findings = docs.flatMap(file => bashFences(fs.readFileSync(file, 'utf8'), path.relative(ROOT, file))
+      .flatMap(f => lintFence(f.body).map(x => `${f.file}:${f.line + x.line} ${x.rule}: ${x.detail}`)));
+    expect(findings).toEqual([]);
+  });
+});
+
+describe('CEO-12: the identifier allowlist matches what the skills use', () => {
+  test('every allowlisted placeholder appears in some rendered fence or runtime doc fence', () => {
+    const docs = fs.readdirSync(ROOT, { withFileTypes: true })
+      .filter(e => e.isDirectory() && fs.existsSync(path.join(ROOT, e.name, 'SKILL.md.tmpl')))
+      .flatMap(e => fs.readdirSync(path.join(ROOT, e.name)).filter(f => f.endsWith('.md') && f !== 'SKILL.md').map(f => path.join(ROOT, e.name, f)));
+    const text = allFences().map(f => f.body).concat(docs.flatMap(d => bashFences(fs.readFileSync(d, 'utf8')).map(f => f.body))).join('\n');
+    expect(Object.keys(IDENTIFIER_PLACEHOLDERS).filter(p => !text.includes(p))).toEqual([]);
+  });
+});
+
 describe('INV-3: negative controls (planted bad fences fail each check)', () => {
   test('lint rules', () => {
     const rules = (body: string) => lintFence(body).map(f => f.rule);
@@ -290,6 +316,26 @@ describe('INV-3: negative controls (planted bad fences fail each check)', () => 
     expect(rules('ls | while IFS= read -r d; do rm -rf "$d"; done')).toEqual([]);
     expect(rules('cat <<EOF\ncd "$NOT_CODE"\nEOF\necho ok')).toEqual([]);
     expect(rules("echo 'cd \"$QUOTED\"'")).toEqual([]);
+    // CEO-12: free text may not appear in any command, in any quoting shape.
+    expect(rules('gh api repos/o/r/issues/1/comments -f body="<reply text>"')).toEqual(['free-text-placeholder']);
+    expect(rules('gh issue create --title "Failure: <test-name>" --body-file "$F"')).toEqual(['free-text-placeholder']);
+    expect(rules('glab issue create -t "$T" -d "Error: <first 10 lines>"')).toEqual(['free-text-placeholder']);
+    expect(rules("tool --write '{\"free_text\":\"<user words>\"}'")).toEqual(['free-text-placeholder']);
+    expect(rules('echo <user words> | tee out')).toEqual(['free-text-placeholder']);
+    expect(rules('$D generate --brief "$(printf %s "<brief text>")"')).toEqual(['free-text-placeholder']);
+    expect(rules('cat > "$F" <<EOF\nFixed in <reply text>\nEOF')).toEqual(['free-text-placeholder']);
+    expect(rules("B=$(cat <<'GSTACK_REPLY'\n**Fixed** in `<sha>`.\nGSTACK_REPLY\n)\ngh api x -f body=\"$B\"")).toEqual(['free-text-placeholder']);
+    // A continuation line is part of the same command.
+    expect(rules('gh issue create \\\n  --title "$T" \\\n  --body "<body text>"')).toEqual(['free-text-placeholder']);
+    // Commit trailers with a mail address are literal text, not placeholders.
+    expect(rules("git commit -m \"$(cat <<'EOF'\nfix: tidy\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\"")).toEqual([]);
+    // Allowlisted identifiers pass; quoted-only identifiers must sit inside quotes.
+    expect(rules('git diff origin/<base>...HEAD --name-only; kill <PID>')).toEqual([]);
+    expect(rules('aside repl \'openTab("<url>")\'; $B goto "<url>"')).toEqual([]);
+    expect(rules('$B goto <url>')).toEqual(['free-text-placeholder']);
+    expect(lintFence('$B goto <url>')[0].detail).toContain('<url> (unquoted)');
+    // Files the agent wrote are passed, never expanded.
+    expect(rules('F="$(git rev-parse --show-toplevel)/.gstack/tmp/<reply-file-name>"\ngh api x -F "body=@$F"')).toEqual([]);
   });
 
   test('placeholder normalization keeps real syntax errors', () => {

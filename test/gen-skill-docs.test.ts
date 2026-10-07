@@ -1567,7 +1567,7 @@ describe('SPEC_REVIEW_LOOP resolver', () => {
     const output = render('office-hours');
     const step2 = output.slice(output.indexOf('**Step 2:'), output.indexOf('**Step 3:'));
     expectMentions(step2, [['before','dispatching','findings']], 'step2');
-    ordered(step2, ['gstack-office-hours-review check --receipt "<reviewer response>"', 'mismatched receipt fails the check', '- PASS:', '- CONVERGENCE:', '- MAX_ITERATIONS: round 3', '- CONTINUE:', 'gstack-office-hours-review finalize --design']);
+    ordered(step2, ['gstack-office-hours-review check --receipt "<receipt line>"', 'mismatched receipt fails the check', '- PASS:', '- CONVERGENCE:', '- MAX_ITERATIONS: round 3', '- CONTINUE:', 'gstack-office-hours-review finalize --design']);
     expectMentions(step2, [['fix only the blocking findings'], ['do not edit for minor findings']], 'step2');
     expectMentions(step2, [['do not','re-dispatch','again']], 'step2');
     expectMentions(step2, [['do not','generated','section']], 'step2');
@@ -2126,9 +2126,18 @@ describe('preamble routing injection (bin/gstack-skill-start emission layer)', (
     expect(routingBlock).not.toContain('invoke checkpoint');
   });
 
-  test('routing section uses soft "when in doubt" policy, not hard "ALWAYS invoke"', () => {
-    expect(routingBlock).toContain('When in doubt, invoke the skill');
+  test('routing section routes only to available skills, without "when in doubt" over-triggering (#3018)', () => {
+    expect(routingBlock).toContain("Route only to skills in the session's available-skills list");
+    expect(routingBlock).not.toContain('When in doubt');
     expect(routingBlock).not.toContain('Do NOT answer directly');
+  });
+
+  test('root router skips routes to skills that are not loaded and says when not to invoke (#3018)', () => {
+    const router = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
+    expect(router).toContain('Route only to skills in your available-skills list');
+    expect(router).toContain('skip it, never try to invoke it');
+    expect(router).toContain('Answer directly when\nno skill matches');
+    expect(router).not.toContain('When in doubt, invoke the skill');
   });
 });
 

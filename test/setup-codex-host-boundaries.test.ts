@@ -56,7 +56,7 @@ test('minimal Codex runtime includes native lifecycle assets without Claude asse
   const linkDists = setup.slice(linkDistsStart, linkDistsEnd);
   try {
     const result = spawnSync(bash, ['-eu', '-c', `_link_or_copy() { ln -s "$1" "$2"; }\n${linkDists}\n${setup.slice(start, end)}\ncreate_codex_runtime_root "$1" "$2"`, 'fixture', source, target], {
-      encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, timeout: 5000,
+      encoding: 'utf8', env: { PATH: '/usr/bin:/bin', IS_WINDOWS: '0' }, timeout: 5000,
     });
     expect(result.status).toBe(0);
     expect(readFileSync(join(target, 'hosts/codex/hooks/native-hook'), 'utf8')).toBe('codex lifecycle asset');

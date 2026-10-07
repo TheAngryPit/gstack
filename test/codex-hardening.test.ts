@@ -357,7 +357,10 @@ describe('gstack-codex-probe: timeout wrapper + namespace hygiene', () => {
     // tool gate killed the whole call and the partial output was lost.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-watchdog-stubborn-'));
     try {
-      for (const tool of native ? ['bash', 'sleep', 'cat'] : []) {
+      // pkill is part of the watchdog's contract (it reaps the provider's
+      // children; stock macOS ships /usr/bin/pkill). Without it the orphaned
+      // `sleep 30` keeps stdout open and the capture waits out the sleep.
+      for (const tool of native ? ['bash', 'sleep', 'cat', 'pkill'] : []) {
         const resolved = spawnSync('bash', ['-c', `command -v ${tool}`], { timeout: 5000 });
         fs.symlinkSync(resolved.stdout.toString().trim(), path.join(dir, tool));
       }
@@ -370,6 +373,27 @@ describe('gstack-codex-probe: timeout wrapper + namespace hygiene', () => {
       expect(r.stdout).toContain('partial');
       expect(r.stdout).not.toContain('late');
       expect(r.stdout).toContain('rc=124');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('bash-native watchdog freezes the command before reaping its children, so nothing prints after the deadline', () => {
+    // A slow pkill widens the window between reaping the children and killing
+    // the command: a watchdog that does not stop the command first lets it run
+    // on past its killed child and print after the deadline.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-watchdog-freeze-'));
+    try {
+      const which = (tool: string) => spawnSync('bash', ['-c', `command -v ${tool}`], { timeout: 5000 }).stdout.toString().trim();
+      for (const tool of ['bash', 'sleep', 'cat']) fs.symlinkSync(which(tool), path.join(dir, tool));
+      fs.writeFileSync(path.join(dir, 'pkill'), `#!${which('bash')}\n"${which('pkill')}" "$@"\nrc=$?\n"${which('sleep')}" 0.5\nexit "$rc"\n`, { mode: 0o755 });
+      const stubborn = path.join(dir, 'stubborn');
+      fs.writeFileSync(stubborn, `#!${which('bash')}\ntrap '' TERM\necho partial\nsleep 30\necho late\n`, { mode: 0o755 });
+      const r = runProbe({
+        snippet: `_GSTACK_CODEX_KILL_AFTER=1 _gstack_codex_timeout_wrapper 1 "${stubborn}"; echo "rc=$?"`,
+        env: { PATH: dir },
+      });
+      expect(r.stdout).toBe('partial\nrc=124\n');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -931,4 +955,40 @@ describe('codex broken-install detection (#2742)', () => {
     // collapses 1 and 2 into one branch and loses the distinction.
     expect(src).toContain('_CODEX_MP=$?');
   });
+});
+
+// --- Live codex smokes keep away from the real Codex home -------------------
+
+describe('live codex smokes run codex in a private HOME and CODEX_HOME', () => {
+  // Every codex run writes $CODEX_HOME/tmp/arg0. The two smokes below probe the
+  // CLI at module load or in free-tier tests, so with a real codex on PATH they
+  // used to write into the developer's ~/.codex.
+  for (const file of ['test/codex-resume-flag-semantics.test.ts', 'test/codex-e2e-sol-scope.test.ts']) {
+    test(`${file} never runs codex with the caller's HOME or Codex home`, () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-codex-smoke-home-'));
+      try {
+        const stubDir = path.join(home, 'stub-bin');
+        const log = path.join(home, 'codex-calls.log');
+        fs.mkdirSync(stubDir);
+        fs.writeFileSync(path.join(stubDir, 'codex'), `#!/usr/bin/env bash
+printf '%s|%s\\n' "$HOME" "\${CODEX_HOME:-unset}" >> "${log}"
+mkdir -p "\${CODEX_HOME:-$HOME/.codex}/tmp" && : > "\${CODEX_HOME:-$HOME/.codex}/tmp/arg0"
+printf 'Usage: codex exec [OPTIONS]\\n  -c, --config <key=value>  sandbox_mode\\n      --ignore-user-config\\n'
+`, { mode: 0o755 });
+        const r = spawnSync(process.execPath, ['test', file], {
+          cwd: ROOT, encoding: 'utf8', timeout: 120_000,
+          env: { PATH: `${stubDir}:${process.env.PATH ?? ''}`, HOME: home, TMPDIR: os.tmpdir() },
+        });
+        expect(r.status).toBe(0);
+        const calls = fs.readFileSync(log, 'utf8').trim().split('\n');
+        expect(calls.length).toBeGreaterThan(0);
+        for (const call of calls) {
+          const [callHome, codexHome] = call.split('|');
+          expect({ call, privateHome: callHome !== home, privateCodexHome: codexHome !== 'unset' && !codexHome!.startsWith(home) })
+            .toEqual({ call, privateHome: true, privateCodexHome: true });
+        }
+        expect(fs.existsSync(path.join(home, '.codex'))).toBe(false);
+      } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    });
+  }
 });

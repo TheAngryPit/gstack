@@ -8,7 +8,8 @@
 #   _gstack_codex_sandbox_mode    — read-only, or full access only for GSTACK_CODEX_NO_SANDBOX=1
 #   _gstack_codex_sandbox_preflight — free `codex sandbox` check before paid calls (Linux)
 #   _gstack_codex_first_use_notice — once per machine: provider, account, how to turn off
-#   _gstack_codex_model_probe     — round-trip probe of the selected model (#2477)
+#   _gstack_codex_model_probe     — round-trip probe of the selected model (#2477);
+#                                   exit 4 = the account's Codex usage limit
 #   _gstack_codex_version_check   — warn on known-bad Codex CLI versions
 #   _gstack_codex_timeout_wrapper — gtimeout -> timeout -> bash-native watchdog
 #   _gstack_codex_log_event       — telemetry emission to ~/.gstack/analytics/
@@ -17,7 +18,53 @@
 #   - Never change -e / -u / traps / IFS / PATH in the caller shell.
 #   - All internal vars prefix with _GSTACK_CODEX_.
 #   - All functions prefix with _gstack_codex_.
-#   - No command execution at source time (only function defs).
+#   - No command execution at source time (only function defs and the shared
+#     self-location block below, which is parameter expansion only; its
+#     _gstack_helper* variables are the one exception to the prefix rule and
+#     are unset once _GSTACK_CODEX_BIN is set).
+
+# --- Self-location (bash and zsh) -------------------------------------------
+# Under zsh BASH_SOURCE is empty, so every "$dir/../scripts/..." path became
+# "/..." and Codex model selection failed. The shared block below sets
+# _gstack_helper_dir; inside a function zsh's %x names the function, not the
+# file, so it is copied once here.
+_gstack_helper=gstack-codex-probe
+# === gstack self-locate (shared, byte-identical in every sourced helper) ===
+# Skill blocks source helpers into the host's shell: bash, or zsh on macOS
+# (Claude Code's Bash tool included). Resolved once at source time, using
+# parameter expansion only: BASH_SOURCE under bash, %x under zsh (inside eval
+# so bash never parses it), made absolute with $PWD; else $GSTACK_ROOT/bin
+# when it holds this helper. Any other case, and any other shell, fails loudly
+# instead of guessing; the message and the return come before any bash- or
+# zsh-only syntax, so dash and sh print it instead of a syntax error.
+_gstack_helper_dir=""
+_gstack_helper_shell=""
+if [ -n "${BASH_VERSION:-}" ]; then
+  _gstack_helper_shell=bash
+  _gstack_helper_dir="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  _gstack_helper_shell=zsh
+  eval '_gstack_helper_dir="${(%):-%x}"'
+fi
+case "$_gstack_helper_dir" in
+  /*) _gstack_helper_dir="${_gstack_helper_dir%/*}" ;;
+  */*) _gstack_helper_dir="$PWD/${_gstack_helper_dir%/*}" ;;
+  ?*) _gstack_helper_dir="$PWD" ;;
+esac
+if [ -n "$_gstack_helper_shell" ] && [ ! -f "$_gstack_helper_dir/$_gstack_helper" ]; then
+  _gstack_helper_dir=""
+  if [ -n "${GSTACK_ROOT:-}" ] && [ -f "$GSTACK_ROOT/bin/$_gstack_helper" ]; then
+    _gstack_helper_dir="$GSTACK_ROOT/bin"
+  fi
+fi
+if [ -z "$_gstack_helper_shell" ] || [ -z "$_gstack_helper_dir" ]; then
+  _gstack_helper_error="gstack: cannot locate $_gstack_helper (shell: ${_gstack_helper_shell:-${0##*/}}). Source it from bash or zsh, or export GSTACK_ROOT=<install dir>. https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#sourced-helper-location"
+  printf '%s\n' "$_gstack_helper_error" >&2
+  return 1 2>/dev/null || exit 1
+fi
+# === end gstack self-locate ===
+_GSTACK_CODEX_BIN="$_gstack_helper_dir"
+unset _gstack_helper _gstack_helper_dir _gstack_helper_shell
 
 # --- Auth probe -------------------------------------------------------------
 
@@ -43,7 +90,10 @@ _gstack_codex_auth_probe() {
   if [ -f "$_codex_home/config.toml" ]; then
     while IFS= read -r _env_key; do
       case "$_env_key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
-      _resolved=$(printf '%s' "${!_env_key:-}" | tr -d '[:space:]')
+      # Indirect read through eval, not ${!name}: zsh rejects bash's
+      # indirection, and _env_key is a validated identifier by this point.
+      eval "_resolved=\${$_env_key:-}"
+      _resolved=$(printf '%s' "$_resolved" | tr -d '[:space:]')
       if [ -n "$_resolved" ]; then
         echo "AUTH_OK"
         return 0
@@ -72,9 +122,9 @@ _gstack_codex_select_model() {
     return 1
   fi
   if [ -n "$_explicit" ]; then
-    _line=$(bun run "${BASH_SOURCE[0]%/*}/../scripts/resolve-codex-generation-model.ts" --runtime "$_kind" --explicit "$_explicit")
+    _line=$(bun run "$_GSTACK_CODEX_BIN/../scripts/resolve-codex-generation-model.ts" --runtime "$_kind" --explicit "$_explicit")
   else
-    _line=$(bun run "${BASH_SOURCE[0]%/*}/../scripts/resolve-codex-generation-model.ts" --runtime "$_kind")
+    _line=$(bun run "$_GSTACK_CODEX_BIN/../scripts/resolve-codex-generation-model.ts" --runtime "$_kind")
   fi
   _rc=$?
   _GSTACK_CODEX_SEL="${_line%%$'\t'*}"
@@ -135,7 +185,7 @@ _gstack_codex_first_use_notice() {
   # and how to turn reviews off. Shown once per state root; never blocks and
   # never prints a credential, only where it comes from.
   local _root _marker _codex_home="${CODEX_HOME:-$HOME/.codex}" _account _provider
-  _root="$(. "${BASH_SOURCE[0]%/*}/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || return 0
+  _root="$(. "$_GSTACK_CODEX_BIN/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || return 0
   [ -n "$_root" ] || return 0
   _marker="$_root/.codex-review-notice-shown"
   [ -e "$_marker" ] && return 0
@@ -174,10 +224,23 @@ _gstack_codex_model_probe() {
   #     ENOENT, non-executable binary, missing vendor payload). Deterministic,
   #     so fail-open is wrong: retrying never helps. Never cached — a reinstall
   #     fixes it and must be picked up on the very next probe (#2742).
+  #   MODEL_QUOTA_EXHAUSTED (exit 4) — Codex's usage-limit or insufficient_quota
+  #     error on a failed, non-timeout call: the account, not the model. Codex's
+  #     own line (with its reset time) is relayed verbatim; cached 15 min under
+  #     the same signature as MODEL_UNUSABLE, so later fresh-shell blocks in the
+  #     run make no Codex call. GSTACK_CODEX_PROBE_RETRY=1 skips both negative
+  #     cache entries for that probe.
+  #   MODEL_PROBE_RATE_LIMITED (exit 0) — a plain 429 / rate-limit error: often
+  #     gone in seconds, so the review still runs, like the inconclusive case
+  #     (_GSTACK_CODEX_PROBE_STATE=rate_limited, CODEX_MODE: unverified
+  #     (rate_limited)). Codex's line is relayed verbatim; never cached.
   #   MODEL_PROBE_INCONCLUSIVE (exit 0) — timeout/transient; the review still
   #     runs so a slow network never wedges codex mode, but readiness is
   #     unverified (_GSTACK_CODEX_PROBE_STATE=inconclusive, CODEX_MODE:
   #     unverified) and the review's own classification decides. Never cached.
+  #
+  # Quota and rate-limit signatures read only Codex's own trailing error lines
+  # (ERROR: / stream error), never the whole output: it echoes the prompt.
   #
   # Only call this AFTER _gstack_codex_auth_probe passes — probing without
   # auth just measures the auth failure again.
@@ -194,7 +257,7 @@ _gstack_codex_model_probe() {
   # State root from the shared twin (sourced in a subshell, so the caller's
   # shell is untouched). A missing twin only disables the cache.
   local _gstack_home _cache=""
-  _gstack_home="$(. "${BASH_SOURCE[0]%/*}/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || _gstack_home=""
+  _gstack_home="$(. "$_GSTACK_CODEX_BIN/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || _gstack_home=""
   [ -n "$_gstack_home" ] && _cache="$_gstack_home/.codex-model-probe"
   # Cache signature (#2787): everything that can change the round trip's
   # outcome without the hour passing — the model, the Codex home and its
@@ -222,6 +285,7 @@ _gstack_codex_model_probe() {
   _sig=$(printf '%s\n' "$_model" "$_codex_home" "$_cfg_m" "$_auth_mode" "$_auth_m" "$_bin" "$_bin_m" | cksum | tr -d ' ')
   local _now
   _now=$(date +%s 2>/dev/null || echo 0)
+  local _docs="https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md"
   if [ -n "$_cache" ] && [ -f "$_cache" ]; then
     local _c_line _c_status _c_ts _c_sig
     _c_line=$(head -1 "$_cache" 2>/dev/null)
@@ -232,6 +296,13 @@ _gstack_codex_model_probe() {
     if [ "$_c_status" = "MODEL_OK" ] && [ "$_c_sig" = "$_sig" ] && [ $((_now - _c_ts)) -lt 3600 ]; then
       echo "MODEL_OK (cached)"
       return 0
+    fi
+    [ "${GSTACK_CODEX_PROBE_RETRY:-}" = "1" ] && _c_sig="retry"
+    if [ "$_c_status" = "MODEL_QUOTA_EXHAUSTED" ] && [ "$_c_sig" = "$_sig" ] && [ $((_now - _c_ts)) -lt 900 ]; then
+      echo "MODEL_QUOTA_EXHAUSTED (cached)"
+      sed -n '2,4p' "$_cache" 2>/dev/null
+      echo "HINT: Codex refused this account's calls for its usage limit (Codex's line above names the reset time); the model choice is fine. No Codex call was made: gstack skips Codex for $(( (_c_ts + 900 - _now + 59) / 60 )) more minute(s). Retry now: GSTACK_CODEX_PROBE_RETRY=1, or delete $_cache. $_docs#codex-quota-exhausted"
+      return 4
     fi
     if [ "$_c_status" = "MODEL_UNUSABLE" ] && [ "$_c_sig" = "$_sig" ] && [ $((_now - _c_ts)) -lt 900 ]; then
       echo "MODEL_UNUSABLE (cached)"
@@ -246,6 +317,38 @@ _gstack_codex_model_probe() {
   if [ "$_code" -eq 0 ]; then
     [ -n "$_cache" ] && { mkdir -p "$_gstack_home" 2>/dev/null; printf 'MODEL_OK %s %s\n' "$_now" "$_sig" > "$_cache" 2>/dev/null; }
     echo "MODEL_OK"
+    return 0
+  fi
+  # A usage limit is the account, not the model or the network: Codex says so
+  # plainly ("You've hit your usage limit ... try again at <time>"), and the
+  # inconclusive branch used to drop that line and re-probe in every skill.
+  # Only a failed, non-timeout call counts, and only Codex's own trailing error
+  # lines are read. Quota wins over rate limit: a 429 body that names
+  # insufficient_quota is the quota.
+  local _err _q_lines
+  if [ "$_code" -ne 124 ]; then
+    _err=$(printf '%s\n' "$_out" | awk '
+      /^[[:space:]]*(\[[^]]*\][[:space:]]*)?(ERROR:|stream error)/ { buf = buf $0 "\n"; next }
+      /^[[:space:]]*$/ { next }
+      { buf = "" }
+      END { printf "%s", buf }')
+  fi
+  _q_lines=$(printf '%s' "$_err" | grep -iE "usage limit|insufficient_quota|exceeded your current quota|quota exceeded" | head -3)
+  if [ -n "$_q_lines" ]; then
+    [ -n "$_cache" ] && { mkdir -p "$_gstack_home" 2>/dev/null; printf 'MODEL_QUOTA_EXHAUSTED %s %s\n%s\n' "$_now" "$_sig" "$_q_lines" > "$_cache" 2>/dev/null; }
+    echo "MODEL_QUOTA_EXHAUSTED"
+    printf '%s\n' "$_q_lines"
+    echo "HINT: Codex refused the call for this account's usage limit (Codex's line above names the reset time); the model choice is fine. Outside coverage is unavailable: gstack skips Codex for 15 minutes. Retry now: GSTACK_CODEX_PROBE_RETRY=1${_cache:+, or delete $_cache}. $_docs#codex-quota-exhausted"
+    _gstack_codex_log_event "codex_quota_exhausted" 2>/dev/null || true
+    return 4
+  fi
+  _q_lines=$(printf '%s' "$_err" | grep -iE "rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)" | head -3)
+  if [ -n "$_q_lines" ]; then
+    _GSTACK_CODEX_PROBE_STATE="rate_limited"
+    echo "MODEL_PROBE_RATE_LIMITED — CODEX_MODE: unverified (rate_limited); proceeding, and the review's own result still decides."
+    printf '%s\n' "$_q_lines"
+    echo "HINT: Codex rate-limited the check (Codex's line above). Not cached; if the review itself is rate-limited, it reports missing coverage. $_docs#codex-rate-limited"
+    _gstack_codex_log_event "codex_rate_limited" 2>/dev/null || true
     return 0
   fi
   # A model rejection is deterministic: a 400 ("is not supported", "requires a
@@ -371,6 +474,9 @@ _gstack_codex_timeout_wrapper() {
         sleep 1
         _GSTACK_CODEX_WAITED=$((_GSTACK_CODEX_WAITED + 1))
       done
+      # Freeze the command first: killing its children while it runs lets it
+      # continue past the killed child and print output after its deadline.
+      kill -STOP "$_cmd_pid" 2>/dev/null
       pkill -KILL -P "$_cmd_pid" 2>/dev/null
       kill -KILL "$_cmd_pid" 2>/dev/null
       exit 124
@@ -394,14 +500,15 @@ _gstack_codex_log_event() {
   # Gated on $_TEL != "off" (caller sets this from gstack-config).
   # Event types: codex_timeout, codex_auth_failed, codex_cli_missing,
   #              codex_version_warning, codex_model_unusable, codex_sandbox_unavailable,
-#              codex_model_retired, codex_cli_outdated.
+  #              codex_model_retired, codex_cli_outdated, codex_quota_exhausted,
+  #              codex_rate_limited.
   # Payload schema: {skill, event, duration_s, ts}. NEVER includes prompt
   # content, env var values, or auth tokens.
   local _event="$1"
   local _duration="${2:-0}"
   [ "${_TEL:-off}" = "off" ] && return 0
   local _root
-  _root="$(. "${BASH_SOURCE[0]%/*}/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || return 0
+  _root="$(. "$_GSTACK_CODEX_BIN/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || return 0
   [ -n "$_root" ] || return 0
   mkdir -p "$_root/analytics" 2>/dev/null || return 0
   local _ts

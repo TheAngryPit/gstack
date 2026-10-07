@@ -33,6 +33,7 @@ STATE_DIR="$(gstack_state_root; printf x)"; STATE_DIR="${STATE_DIR%x}"
 # Bun floor comparison (E1): the incoming release's floor is applied before
 # the live checkout moves. Missing helper fails open, like every error here.
 . "$(cd "$(dirname "$0")" && pwd)/gstack-bun-version.sh" 2>/dev/null
+HOOK_CHECK="$(cd "$(dirname "$0")" && pwd)/gstack-hook-check"
 THROTTLE_FILE="$STATE_DIR/.last-session-update"
 LOCK_DIR="$STATE_DIR/.setup-lock"
 LOG_FILE="$STATE_DIR/analytics/session-update.log"
@@ -50,6 +51,23 @@ pending_save() {
   printf 'stages=%s\nfrom=%s\nfailures=%s\nnext=%s\nreason=%s\npull=%s\n' \
     "$P_STAGES" "$P_FROM" "$P_FAILURES" "$P_NEXT" "$P_REASON" "$P_PULL" > "$PENDING_FILE.tmp.$$" \
     && mv -f "$PENDING_FILE.tmp.$$" "$PENDING_FILE"
+}
+
+# Parse-check hooks from the exact incoming tree before replacing files that
+# Claude executes directly. Preserve the legacy updater's original authority
+# fence; this is only its pre-activation safety gate.
+hook_incoming_hold() {
+  _hc_dir=$(mktemp -d "${TMPDIR:-/tmp}/gstack-session-hooks-XXXXXX" 2>/dev/null) || return 1
+  _hc_real_dir=$(cd "$_hc_dir" 2>/dev/null && pwd -P)
+  _hc_out=""
+  if git -C "$GSTACK_DIR" archive --format=tar "$1" 2>/dev/null | tar -xf - -C "$_hc_dir" 2>/dev/null; then
+    _hc_out=$("$HOOK_CHECK" "$_hc_dir" 2>/dev/null)
+  fi
+  rm -rf "$_hc_dir"
+  _hc_fail=$(printf '%s\n' "$_hc_out" | sed -n 's/^fail [^ ]* //p' | head -1)
+  [ -n "$_hc_fail" ] || return 1
+  case "$_hc_fail" in "$_hc_real_dir"/*) _hc_fail="${_hc_fail#"$_hc_real_dir"/}" ;; "$_hc_dir"/*) _hc_fail="${_hc_fail#"$_hc_dir"/}" ;; esac
+  printf 'hook-does-not-parse: %s\n' "$_hc_fail" | head -c 300
 }
 
 # ── Guard: gstack must be a git repo ──
@@ -74,6 +92,8 @@ if [ -f "$PENDING_FILE" ]; then
     case "$_P_PULL" in
       bun-too-old*)
         echo "gstack auto-update: update held ($_P_PULL); nothing was installed or changed. Fix now: bun upgrade && cd $GSTACK_DIR && git pull --ff-only && ./setup" ;;
+      hook-does-not-parse*)
+        echo "gstack auto-update: update held ($_P_PULL); nothing was installed or changed, and your current hooks keep running. This is a gstack bug; report ${_P_PULL#hook-does-not-parse: } at https://github.com/garrytan/gstack/issues. gstack retries at the next check. https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#auto-update-hook-does-not-parse" ;;
       *)
         echo "gstack auto-update: git pull did not finish ($_P_PULL); gstack is not updating. Fix now: cd $GSTACK_DIR && git pull --ff-only && ./setup" ;;
     esac
@@ -194,6 +214,9 @@ fi
   fi
   if [ "$PULL_EXIT" -eq 0 ] && [ "$INCOMING" != "$OLD_HEAD" ]; then
     BUN_HELD=$(gstack_bun_incoming_hold "$GSTACK_DIR" "$INCOMING" 2>/dev/null) || BUN_HELD=""
+  fi
+  if [ "$PULL_EXIT" -eq 0 ] && [ -z "$BUN_HELD" ] && [ "$INCOMING" != "$OLD_HEAD" ]; then
+    BUN_HELD=$(hook_incoming_hold "$INCOMING") || BUN_HELD=""
   fi
   if [ "$PULL_EXIT" -eq 0 ] && [ -z "$BUN_HELD" ]; then
     git -C "$GSTACK_DIR" merge --ff-only --autostash -q "$INCOMING" >/dev/null 2>"${PULL_ERR_FILE:-/dev/null}"
