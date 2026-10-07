@@ -65,7 +65,7 @@ export interface RedactPattern {
    * (crypto wallets), RFC1918-exclusion (public IPs), etc. Receives the
    * matched secret span (group 1 or match[0]) and the full match array.
    */
-  validate?: (span: string, match: RegExpExecArray) => boolean;
+  validate?: (span: string, match: RegExpExecArray, opts?: { sourcePath?: string }) => boolean;
   /**
    * Proximity requirement: the pattern only counts if `nearRegex` also matches
    * within `nearWindow` chars of the match. Used for AWS secret keys (need
@@ -589,6 +589,33 @@ function isCallExpression(span: string, match: RegExpExecArray): boolean {
   return !carriesSecretLiteral(call);
 }
 
+/**
+ * #3048: in a TypeScript/JSX file, an unquoted value after `:` is a type or an
+ * expression, never a string literal (`session: SessionState,`), and a JSX
+ * brace holding only names and property reads (`key={turn.requestId + turn.role}`)
+ * is an expression. Decided by file context, not by how the value looks:
+ * `API_KEY=VelvetRiverOrbitSunset;` in a .env or YAML file is still a literal.
+ * Without a known TS/JSX path nothing is exempt.
+ */
+const TS_SOURCE = /\.(?:[cm]?tsx?|jsx)$/i;
+const CODE_NAME_CHAIN = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*(?:<[\w$.,\s<>[\]|]*>)?(?:\[\])*$/;
+
+function isSourceExpression(span: string, match: RegExpExecArray, sourcePath: string | undefined): boolean {
+  if (!sourcePath || !TS_SOURCE.test(sourcePath)) return false;
+  const { start } = spanBounds(match);
+  const before = match.input[start - 1];
+  if (before === '"' || before === "'" || before === "`") return false;
+  if (span.startsWith("{")) {
+    const line = match.input.slice(start + 1).split("\n", 1)[0];
+    const close = line.indexOf("}");
+    if (close < 0 || /["'`]/.test(line.slice(0, close))) return false;
+    return line.slice(0, close).split("+").every(term => CODE_NAME_CHAIN.test(term.trim()));
+  }
+  const separator = match[0].slice(0, match[0].length - span.length).trimEnd().slice(-1);
+  if (separator !== ":") return false;
+  return CODE_NAME_CHAIN.test(span.replace(/[,;)=|]+$/, ""));
+}
+
 export const PATTERNS: RedactPattern[] = [
   // ===== HIGH — genuinely-secret credentials (block) =====
   {
@@ -863,13 +890,14 @@ export const PATTERNS: RedactPattern[] = [
     // literal (`os.getenv("X", "<secret>")`). A literal appended to the read
     // itself (`process.env.X||"…"`) is not an exact read and still fires.
     // #2899: a function call assigned to the name is code, not a value (see
-    // isCallExpression).
-    validate: (span, match) =>
+    // isCallExpression). #3048: so is a TS/JSX type or expression (isSourceExpression).
+    validate: (span, match, opts) =>
       isCredentialShapedEnvName(match[0]) &&
       !isPlaceholderSpan(span) &&
       !/^\$\{?[A-Za-z_]/.test(span) &&
       !isBareEnvRead(span, match) &&
       !isCallExpression(span, match) &&
+      !isSourceExpression(span, match, opts?.sourcePath) &&
       shannonEntropy(span) >= 3.0,
   },
   {

@@ -410,6 +410,28 @@ async function waitFor(predicate: () => boolean, timeoutMs = 30_000) {
 afterEach(() => { for (const base of bases.splice(0)) fs.rmSync(base, { recursive: true, force: true }); });
 
 describe('gstack update candidate CLI', () => {
+  test('trusted candidate holds before the source transaction when an incoming hook does not parse', async () => {
+    const fx = makeFixture('full');
+    const incomingHook = path.join(fx.seed, 'hosts/claude/hooks/question-log-hook');
+    fs.appendFileSync(incomingHook, '\nif then\n');
+    const target = publish(fx);
+    const api = await githubFixture(initialApiState(target));
+    try {
+      registerCodex(fx);
+      const before = git(fx.install, 'rev-parse', 'HEAD');
+      const resolved = await run(fx, api.url, resolver(fx), ['resolve']);
+      expect(resolved.status, resolved.stderr).toBe(0);
+      const applied = await run(fx, api.url, updater(fx), ['--apply-candidate', target]);
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(applied.stdout).toContain('UPDATE_DEFERRED hook-does-not-parse: hosts/claude/hooks/question-log-hook:');
+      expect(git(fx.install, 'rev-parse', 'HEAD')).toBe(before);
+      expect(git(fx.install, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+      expect(fs.readFileSync(path.join(fx.stateDir, 'session-update-pending'), 'utf8')).toContain('reason=hook-does-not-parse:');
+      expect(fs.existsSync(path.join(fx.stateDir, 'session-update-transaction'))).toBe(false);
+      expect(fs.existsSync(path.join(fx.stateDir, 'just-upgraded-from'))).toBe(false);
+    } finally { api.stop(); }
+  }, 120_000);
+
   test('other-origin discovery emits manual guidance through the real skill-start entrypoint', async () => {
     const fx = makeFixture('full');
     git(fx.install, 'remote', 'set-url', 'origin', 'https://github.com/garrytan/gstack.git');

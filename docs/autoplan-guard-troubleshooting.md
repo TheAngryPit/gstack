@@ -50,11 +50,30 @@ phase entry.
 | `sidechain` | The first turn or its ancestry is a sidechain (subagent) record, not the parent session. |
 | `agent` | The conversation ancestry passes through a subagent record. |
 | `cycle` | The journal's parent links form a loop. |
+| `too_large` | The session journal is over the 32 MiB limit the guard reads (the message names its size). See [Journal too large](#journal-too-large). |
 
 **What to do:** run the review phases by hand: `/plan-ceo-review`, then
 `/plan-devex-review`, then `/plan-eng-review`. Or start a new Claude Code
 session in the project directory and run `/autoplan` again. If a fresh session
 gets the same code, open an issue with the code and Claude Code version.
+
+<a id="journal-too-large"></a>
+### Journal too large (`too_large`)
+
+The guard must read the whole parent journal to verify that each phase report
+was published by this session, so it has a fixed 32 MiB limit and no user
+override. Long sessions get there, especially with screenshots, and a journal
+only grows: resuming or compacting keeps writing the same file, so retrying
+never helps.
+
+**What to do:** keep your work and move to a fresh journal:
+
+1. `/context-save`
+2. Start a new Claude Code session in the project (not `--resume`).
+3. `/context-restore`, then `/autoplan <plan path>`.
+
+Or run the reviews by hand: `/plan-ceo-review`, `/plan-devex-review`, then
+`/plan-eng-review`.
 
 ## Retry denials
 
@@ -65,7 +84,7 @@ The guard has not reached a conclusion. The message ends with
 |------|-------|
 | (none) | The journal does not yet hold the records the guard needs. This includes the current tool call, or an ancestor record Claude Code has not written yet. |
 | `changing` | Claude Code was writing the journal during every read in the 2-second window. |
-| `identity` | The journal path, its directories or the file itself failed the identity checks: for example a symlink, a foreign session, or the wrong directory layout. |
+| `identity` | The journal path, its directories or the file itself failed the identity checks: for example a symlink, a foreign session, or the wrong directory layout. A journal over the size limit reports `too_large` instead. |
 | `malformed` | A complete journal line is not valid JSON or UTF-8, or its records contradict each other. |
 
 If a retry keeps failing with the same code, use the fallback above.

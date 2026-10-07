@@ -92,5 +92,5 @@ test('all carved Codex skills emit manifest assets; another host still receives 
   expect(ship).toContain('**STOP.**');
   expect(ship).toContain('`sections/tests.md` relative to the installed `gstack-ship`');
   const actual=SECTION({skillName:'office-hours',tmplPath:join(root,'office-hours','SKILL.md.tmpl'),host:'factory',paths:HOST_PATHS.factory},['design-and-handoff']);
-  expect(actual).toBe(readFileSync(join(root,'office-hours','sections','design-and-handoff.md.tmpl'),'utf8').trimEnd());
+  expect(actual).toBe('> **STOP.** Before writing the design doc and running the tiered relationship handoff (Phases 5-6, after the conversation and alternatives are done), Read `sections/design-and-handoff.md` relative to the installed `gstack-office-hours` SKILL.md directory and execute it\n> in full. Do not work from memory — that section is the source of truth for this step.');
 });

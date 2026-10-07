@@ -52,6 +52,10 @@ const WINDOWS_FRAGILE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 // the failure mode is structural rather than detectable via source-file scan.
 export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }> = [
   {
+    file: 'test/ship-measure-seeded-fixture.test.ts',
+    reason: 'drives a POSIX shell stub project (`./evals.sh` with a shebang) that CreateProcess cannot exec; the measure runner itself is covered by ship-measure.test.ts with in-process fake runners',
+  },
+  {
     file: 'test/qa-evidence-producer.test.ts',
     reason: 'executes the registered Linux native actor and its inotify observer; portable capture and Windows job behavior are covered by qa-evidence.test.ts',
   },
@@ -225,6 +229,12 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
 // pattern hit is a false positive — the point of these files is Windows
 // coverage, so auto-excluding them defeats the regression tests they carry.
 export const KNOWN_WINDOWS_SAFE: Array<{ file: string; reason: string }> = [
+  // Named Windows coverage for fixes whose bug only bites on Windows: kept in
+  // the curated lane even if a future edit trips a content pattern.
+  { file: 'browse/test/cli-chain-stdin.test.ts', reason: 'piped-stdin browse chain against a stub daemon, and no-flow usage errors before any daemon boots; spawns the CLI through Bun argv' },
+  { file: 'browse/test/runtime-root-server-bundle.test.ts', reason: 'a runtime root copy without node_modules resolves the checkout bundle via .source-path and refuses on version skew; os.tmpdir layouts only' },
+  { file: 'test/cso-windows-docker.test.ts', reason: '/cso docker.exe discovery under known-folder roots (real path, no reparse points) and the native-transport-unsupported outcome; pure win32 path logic' },
+  { file: 'test/copilot-windows-bash.test.ts', reason: 'the Copilot glossary line that runs bash blocks in Git for Windows Bash; reads host config only' },
   { file: 'test/ship-hook-windows-paths.test.ts', reason: 'runs bin/ helpers through explicit bash and Bun argv with forward-slash paths; never executes a shebang; the path-spelling simulation is skipIf win32' },
   { file: 'test/state-root-parity.test.ts', reason: 'runs the bash twin and lib/state-root.ts over an env table with PATH empty; no shebang execution, raw-string comparison is platform-neutral' },
   { file: 'test/generator-eexist.test.ts',

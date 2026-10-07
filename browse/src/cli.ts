@@ -102,11 +102,64 @@ export function resolveNodeServerScript(
   // Compiled binary: browse/dist/browse → browse/dist/server-node.mjs
   if (execPath) {
     const adjacent = path.resolve(path.dirname(execPath), 'server-node.mjs');
-    if (fs.existsSync(adjacent)) return adjacent;
+    if (fs.existsSync(adjacent)) return reachesPlaywright(adjacent) ? adjacent : (sourceServerScript(execPath) ?? adjacent);
   }
 
   return null;
 }
+
+/** Node resolves the bundle's externals (playwright, …) by walking up from the bundle's directory. */
+function reachesPlaywright(script: string): boolean {
+  for (let dir = path.dirname(script); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, 'node_modules', 'playwright', 'package.json'))) return true;
+    if (path.dirname(dir) === dir) return false;
+  }
+}
+
+/**
+ * #3026: a host runtime root on Windows (~/.codex/skills/gstack, …) holds file
+ * copies of browse/dist and no node_modules, so its server-node.mjs cannot
+ * import playwright. setup records the source checkout in the root's
+ * .source-path; run that checkout's bundle, which sits beside node_modules.
+ * Refuses (throws) when the two builds differ.
+ */
+/**
+ * setup runs under Git Bash on Windows, so `.source-path` holds an MSYS path
+ * (`/d/a/gstack`). Node reads that as `\d\a\gstack` on the current drive,
+ * which does not exist, and the CLI fell back to the root's own bundle that
+ * cannot import playwright (windows-setup-e2e). Map the drive form to `D:/...`.
+ */
+export function nativeSourcePath(source: string, platform: NodeJS.Platform = process.platform): string {
+  const msys = platform === 'win32' ? /^\/([A-Za-z])(\/.*)?$/.exec(source) : null;
+  return msys ? `${msys[1]!.toUpperCase()}:${msys[2] ?? '/'}` : source;
+}
+
+function sourceServerScript(execPath: string): string | null {
+  const root = path.resolve(path.dirname(execPath), '..', '..');
+  let source: string;
+  try {
+    source = nativeSourcePath(fs.readFileSync(path.join(root, '.source-path'), 'utf8').trim());
+  } catch {
+    return null;
+  }
+  const script = path.join(source, 'browse', 'dist', 'server-node.mjs');
+  if (!path.isAbsolute(source) || !fs.existsSync(script) || !reachesPlaywright(script)) return null;
+  // The CLI here and the checkout's server must come from the same build
+  // (both write browse/dist/.version); a checkout rebuilt without refreshing
+  // this root would otherwise run a server its CLI does not match.
+  const cliVersion = readVersionHash(execPath);
+  const serverVersion = readVersionHash(script);
+  if (cliVersion && serverVersion && cliVersion !== serverVersion) {
+    throw new Error(
+      `this install's browse CLI (${root}, build ${cliVersion.slice(0, 12)}) and the gstack checkout's server bundle ` +
+      `(${source}, build ${serverVersion.slice(0, 12)}) are from different builds, so the server was not started. ` +
+      `Fix: cd "${source}" && ./setup (rebuilds and refreshes every runtime root). ${BROWSE_VERSION_SKEW_ANCHOR}`,
+    );
+  }
+  return script;
+}
+
+export const BROWSE_VERSION_SKEW_ANCHOR = 'https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#browse-runtime-version-skew';
 
 /**
  * Which server to start, resolved only when a server is actually started
@@ -840,8 +893,15 @@ async function ensureServer(flags?: GlobalFlags): Promise<ServerState> {
     // hint. No silent restart — that would drop tab state, cookies, and
     // logged-in sessions without warning.
     if (desiredHash && state.configHash && state.configHash !== desiredHash) {
-      console.error(`[browse] existing daemon has different config (proxy/headed mismatch).`);
-      console.error(`[browse] run 'browse disconnect' first to apply --proxy/--headed.`);
+      // #3030: a caller that passed no flags never asked to "apply" any.
+      if (flags?.proxyUrl || flags?.headed) {
+        console.error(`[browse] existing daemon has different config (proxy/headed mismatch).`);
+        console.error(`[browse] run 'browse disconnect' first to apply --proxy/--headed.`);
+      } else {
+        console.error(`[browse] a browse daemon for this project is running with --headed/--proxy (started by another session).`);
+        console.error(`[browse] pass the same flags to use it, or run 'browse disconnect' to start a plain one.`);
+        console.error(`[browse] why: BROWSER.md, "Daemon discipline": https://github.com/garrytan/gstack/blob/main/BROWSER.md#headed-mode--proxy--browser-native-downloads-v12800`);
+      }
       process.exit(1);
     }
     // Same path: existing daemon is plain (no flags) but caller passes
@@ -1650,6 +1710,33 @@ async function handlePairAgent(state: ServerState, args: string[]): Promise<void
  * replace it). Bun reads NO_PROXY when the first fetch runs, so this must run
  * before any fetch. The daemon inherits the same value.
  */
+export const CHAIN_NO_FLOW_ANCHOR = 'https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#browse-chain-no-flow';
+
+/**
+ * The flow `browse chain` runs when it has no arguments: stdin, read only when
+ * it is not a terminal. A terminal, empty input or a read error (EAGAIN, EOF)
+ * is a usage error.
+ */
+export function readChainFlow(isTTY: boolean, readStdin: () => string): { ok: true; flow: string } | { ok: false; error: string } {
+  let cause = 'stdin is a terminal';
+  if (!isTTY) {
+    try {
+      const flow = readStdin().trim();
+      if (flow) return { ok: true, flow };
+      cause = 'stdin was empty';
+    } catch (err: any) {
+      cause = `stdin could not be read (${err?.code ?? err?.message ?? String(err)})`;
+    }
+  }
+  return {
+    ok: false,
+    error: `[browse] chain: no flow to run (${cause}).\n` +
+      'Usage: echo \'[["goto","url"],["text"]]\' | browse chain\n' +
+      '   or: browse chain \'goto url | click @e5 | snapshot -ic\'\n' +
+      CHAIN_NO_FLOW_ANCHOR,
+  };
+}
+
 export function withLoopbackNoProxy(env: Record<string, string | undefined>): string {
   const entries = (env.NO_PROXY ?? env.no_proxy ?? '').split(',').map(e => e.trim()).filter(Boolean);
   for (const host of ['127.0.0.1', 'localhost', '::1']) if (!entries.includes(host)) entries.push(host);
@@ -2032,10 +2119,18 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
     await handleTunnel(commandArgs); // always exits
   }
 
-  // Special case: chain reads from stdin
+  // Special case: chain reads from stdin. Synchronously: on Windows an awaited
+  // Bun.stdin.text() inside this un-awaited main() did not keep the event loop
+  // alive, so a piped flow exited 0 with nothing sent to the daemon (#3039).
+  // No flow (a terminal, empty input, an unreadable stdin) is a usage error
+  // before ensureServer(): it never boots a daemon.
   if (command === 'chain' && commandArgs.length === 0) {
-    const stdin = await Bun.stdin.text();
-    commandArgs.push(stdin.trim());
+    const flow = readChainFlow(Boolean(process.stdin.isTTY), () => fs.readFileSync(0, 'utf8'));
+    if (!flow.ok) {
+      console.error(flow.error);
+      process.exit(1);
+    }
+    commandArgs.push(flow.flow);
   }
 
   // #2219 IRON RULE (pair-agent leg): capture whether a LIVE daemon predates

@@ -61,15 +61,13 @@ describe("PR #1169 bug #4: gstack-telemetry-sync mktemp fallback", () => {
 // transactional updater, so it must not grow a model-executable clone/swap
 // fallback beside that owner.
 describe("#2679: skill-content mktemp guards", () => {
-  test("redact-doc resolver guards REDACT_FILE=$(mktemp) with a loud exit", () => {
-    // The guard line contains a ${sink.noun} interpolation in the resolver
-    // source, so match to end-of-line rather than [^}]* (which stops at the
-    // interpolation's closing brace).
-    const body = readScript("scripts/resolvers/redact-doc.ts");
-    expect(body).toMatch(/REDACT_FILE=\$\(mktemp "\\\$\{TMPDIR:-\/tmp\}\/[^"]+"\)\s*\|\|\s*\{.*exit 1/);
-    // And the rendered output (interpolation resolved) carries the guard too.
+  test("the shared free-text block guards each mktemp with a loud exit (it creates /spec's REDACT_FILE)", () => {
+    // CEO-12 moved REDACT_FILE's creation from the redact-doc resolver into the
+    // shared free-text block (scripts/resolvers/free-text-file.ts).
+    const body = readScript("scripts/resolvers/free-text-file.ts");
+    expect(body).toMatch(/=\$\(mktemp "\\\$\{_GT:\?\}\/\$\{f\.stem\}\.XXXXXX"\) \|\| \{ echo "Not sent: [^"]*" >&2; exit 1; \}/);
     const rendered = readScript("spec/sections/gate-and-file.md");
-    expect(rendered).toMatch(/REDACT_FILE=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/[^"]+"\)\s*\|\|\s*\{[^}]*exit 1/);
+    expect(rendered).toMatch(/REDACT_FILE=\$\(mktemp "\$\{_GT:\?\}\/spec\.XXXXXX"\)\s*\|\|\s*\{[^}]*exit 1/);
   });
 
   test("ship pr-body template guards PR_BODY_FILE=$(mktemp ...) with a loud exit", () => {

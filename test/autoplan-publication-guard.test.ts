@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { initializePlan, prepareMethodology, createSnapshot, preparePhaseClose, prepareAmendedInput } from '../bin/gstack-autoplan-snapshot';
 import { evaluateAutoplanPublication, runPublicationHook, autoplanReadRange, type PublicationHookInput } from '../autoplan/bin/phase-publication-hook.ts';
-import { readOwnedClaudePublicTranscript, nativePathSpelling, ownedNativePath, sameNativePath, type ClaudeParentPublicEvent } from '../lib/claude-public-transcript';
+import { readOwnedClaudePublicTranscript, readPlanCountTranscript, transcriptReadLimit, OWNED_TRANSCRIPT_MAX_BYTES, nativePathSpelling, ownedNativePath, sameNativePath, type ClaudeParentPublicEvent } from '../lib/claude-public-transcript';
 import { prematureAutoplanPhaseEntry } from './helpers/autoplan-method-read-audit';
 import captured from './fixtures/autoplan-publication-boundary-361c.json';
 import consumption from './fixtures/autoplan-phase-consumption-491.json';
@@ -329,6 +329,57 @@ describe('Autoplan parent publication guard', () => {
     }
   });
 
+  const withReadLimit = async <T>(bytes: number, run: () => T | Promise<T>): Promise<T> => {
+    const prior = process.env.GSTACK_TRANSCRIPT_TEST_MAX_BYTES;
+    process.env.GSTACK_TRANSCRIPT_TEST_MAX_BYTES = String(bytes);
+    try { return await run(); } finally {
+      if (prior === undefined) delete process.env.GSTACK_TRANSCRIPT_TEST_MAX_BYTES; else process.env.GSTACK_TRANSCRIPT_TEST_MAX_BYTES = prior;
+    }
+  };
+  test('#3050: at the read limit the journal reads; one byte over is a hard too_large denial with its size and recovery', async () => {
+    const f = fixture();
+    f.message(); f.current(); f.journal();
+    const size = fs.statSync(f.input.transcript_path).size;
+    await withReadLimit(size, () => expect(readOwnedClaudePublicTranscript(f.input.transcript_path, f.input.cwd, f.sessionId).transcript.reason).not.toBe('too_large'));
+    const output: any = await withReadLimit(size - 1, async () => {
+      expect(readOwnedClaudePublicTranscript(f.input.transcript_path, f.input.cwd, f.sessionId).transcript.reason).toBe('too_large');
+      return withNativeProjectDirectory(f.cwd, () => runPublicationHook(f.input, ROOT));
+    });
+    const reason: string = output.hookSpecificOutput.permissionDecisionReason;
+    expect(output.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(reason).toMatch(/This session's journal is [\d.]+ MiB, over the [\d.]+ MiB limit \/autoplan can verify\./);
+    expect(reason).not.toContain(' 0 MiB');
+    expect(reason).toContain('Run /context-save, start a new session');
+    expect(reason).toContain('code too_large');
+    expect(reason).toContain('docs/autoplan-guard-troubleshooting.md#journal-too-large');
+    expect(reason).not.toContain('Retry this phase-entry tool');
+  });
+
+  test('#3050: the batch read and the narrowed parent loop report too_large, not a plain error', async () => {
+    const f = fixture();
+    f.message(); f.current(); f.journal();
+    const size = fs.statSync(f.input.transcript_path).size;
+    const config = path.dirname(path.dirname(path.dirname(f.input.transcript_path)));
+    await withReadLimit(size - 1, () => {
+      const batch = readPlanCountTranscript(config, f.input.cwd, () => {});
+      expect([batch.status, batch.reason]).toEqual(['error', 'too_large']);
+      const narrowed = readPlanCountTranscript(config, f.input.cwd, () => {}, f.input.transcript_path);
+      expect([narrowed.status, narrowed.reason]).toEqual(['error', 'too_large']);
+    });
+  });
+
+  test('#3050: the test seam can only lower the cap', async () => {
+    await withReadLimit(OWNED_TRANSCRIPT_MAX_BYTES * 4, () => expect(transcriptReadLimit()).toBe(OWNED_TRANSCRIPT_MAX_BYTES));
+  });
+
+  test('#3050: a real identity failure still reports identity', () => {
+    const f = fixture();
+    f.message(); f.current(); f.journal();
+    const other = path.join(path.dirname(f.input.transcript_path), 'not-this-session.jsonl');
+    fs.copyFileSync(f.input.transcript_path, other);
+    expect(readOwnedClaudePublicTranscript(other, f.input.cwd, f.sessionId).transcript.reason).toBe('identity');
+  });
+
   test('native hook accepts platform paths without evaluating shell escapes', async () => {
     // The same actual hook receives native separators in Windows CI.
     const f = fixture();
@@ -459,6 +510,49 @@ describe('Autoplan parent publication guard', () => {
       expect(f.evaluate().allow).toBe(false);
     });
   }
+
+  test('#3045: no init at all keeps the generic missing-evidence denial', () => {
+    const f = fixture(); f.message(); f.current(); f.events.splice(0, 2); f.reorder();
+    const reason = (f.evaluate() as any).reason;
+    expect(reason).toContain('Complete the existing snapshot init step');
+    expect(reason).not.toContain('cannot bind');
+  });
+  for (const [name, command] of [
+    ['a snapshot scope call', (f: any) => `bun "${ROOT}/bin/gstack-autoplan-snapshot.ts" scope "${f.active}"`],
+    ['an unrelated init', (f: any) => `bun other.ts init "${f.source}"`],
+  ] as const)
+    test(`#3045 control: ${name} keeps the generic missing-evidence denial`, () => {
+      const f = fixture(); f.message(); f.current();
+      (f.events[0] as any).input.command = command(f);
+      const reason = (f.evaluate() as any).reason;
+      expect(reason).toContain('Complete the existing snapshot init step');
+      expect(reason).not.toContain('cannot bind');
+    });
+  for (const [name, command] of [
+    ['a substituted tool path', (f: any) => `bun "$(realpath ${ROOT}/bin/gstack-autoplan-snapshot.ts)" init "${f.source}" "${f.active}" "${f.restore}"`],
+    ['a redirected literal init', (f: any) => `bun "${ROOT}/bin/gstack-autoplan-snapshot.ts" init "${f.source}" "${f.active}" "${f.restore}" > /dev/null`],
+  ] as const)
+    test(`#3045: ${name} is named as the cause`, () => {
+      const f = fixture(); f.message(); f.current();
+      (f.events[0] as any).input.command = command(f);
+      expect((f.evaluate() as any).reason).toContain('which this guard cannot bind');
+    });
+  for (const [name, command] of [
+    ['a resolved-variable init piped to tail', (f: any) => `ST=$(bun -e 'console.log(require("fs").realpathSync(process.argv[1]))' "${ROOT}/bin/gstack-autoplan-snapshot.ts"); bun "$ST" init "${f.source}" "${f.active}" "${f.restore}" 2>&1 | tail -5`],
+    ['an init through a variable from an earlier call', (f: any) => `bun "$SNAPSHOT_TOOL" init "${f.source}" "${f.active}" "${f.restore}"`],
+    ['a chained literal init', (f: any) => `bun "${ROOT}/bin/gstack-autoplan-snapshot.ts" init "${f.source}" "${f.active}" "${f.restore}" && echo done`],
+  ] as const)
+    test(`#3045: ${name} is named as the cause with the literal re-run; only the literal re-run binds`, () => {
+      const f = fixture(); f.message(); f.current();
+      (f.events[0] as any).input.command = command(f);
+      const reason = (f.evaluate() as any).reason;
+      expect(reason).toContain('which this guard cannot bind');
+      expect(reason).toContain('`bun "<SNAPSHOT_TOOL>" init "<SOURCE_PLAN>" "<ACTIVE_PLAN>" "<RESTORE_PATH>"`');
+      f.events.splice(2, 0, { ...(structuredClone(f.events[0]!) as any), toolUseId: 're-init',
+        input: { command: `bun "${ROOT}/bin/gstack-autoplan-snapshot.ts" init "${f.source}" "${f.active}" "${f.restore}"` } },
+        { ...(structuredClone(f.events[1]!) as any), toolUseId: 're-init', content: JSON.stringify({ ...f.init, reused: true }) });
+      f.reorder(); expect(f.evaluate()).toEqual({ allow: true });
+    });
 
   test('split successful close ranges through EOF are sufficient', () => {
     const f = fixture(); f.events.splice(4, 2); f.read('part1', f.packet.closePacketPath, 1, 10);

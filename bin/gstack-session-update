@@ -52,8 +52,27 @@ MARKER_FILE="$STATE_DIR/just-upgraded-from"
 THROTTLE_SECONDS=3600
 TASK_TMPDIR=/tmp
 [ -z "$TMPDIR" ] || TASK_TMPDIR="$TMPDIR"
+HOOK_CHECK="$SCRIPT_DIR/gstack-hook-check"
 MANUAL_SHA=""
 UPDATE_SUCCEEDED=0
+
+# Hold a candidate before activation if any Claude hook it registers does not
+# parse. Older installed updaters cannot protect their first update; the setup
+# gate validates the incoming updater before registering its hooks.
+hook_incoming_hold() {
+  local rev="$1" dir real_dir out fail
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/gstack-session-hooks-XXXXXX" 2>/dev/null)" || return 1
+  real_dir="$(cd "$dir" 2>/dev/null && pwd -P)"
+  out=""
+  if git -C "$GSTACK_DIR" archive --format=tar "$rev" 2>/dev/null | tar -xf - -C "$dir" 2>/dev/null; then
+    out="$("$HOOK_CHECK" "$dir" 2>/dev/null)"
+  fi
+  rm -rf "$dir"
+  fail="$(printf '%s\n' "$out" | sed -n 's/^fail [^ ]* //p' | head -1)"
+  [ -n "$fail" ] || return 1
+  case "$fail" in "$real_dir"/*) fail="${fail#"$real_dir"/}" ;; "$dir"/*) fail="${fail#"$dir"/}" ;; esac
+  printf 'hook-does-not-parse: %s\n' "$fail" | head -c 300
+}
 
 install_recovery_runner() {
   local bundle="$STATE_DIR/session-update-recovery" lib="$STATE_DIR/session-update-recovery/lib" tmp
@@ -403,7 +422,7 @@ resolve_candidate() {
   esac
 }
 update_worker() {
-  local lock_rc output target from version old_version dirty stash_before stash_after txn candidate_result setup_out setup_rc row host scope project dest root source row_version prefix render updated model commit installed_scope installed_project installed_root installed_source installed_prefix installed_render installed_model installed_commit rc
+  local lock_rc output target from version old_version dirty stash_before stash_after txn candidate_result setup_out setup_rc row host scope project dest root source row_version prefix render updated model commit installed_scope installed_project installed_root installed_source installed_prefix installed_render installed_model installed_commit rc hook_hold
   if [ "$RECOVERY_ONLY" = 1 ]; then
     local attempt=0 recovery_owner
     while :; do
@@ -468,6 +487,12 @@ update_worker() {
     return 0
   fi
   git -C "$GSTACK_DIR" merge-base --is-ancestor "$from" "$target" 2>/dev/null || { log_entry "UPDATE_DEFERRED target_not_fast_forward"; defer_update target_not_fast_forward; return 0; }
+  hook_hold="$(hook_incoming_hold "$target")" || hook_hold=""
+  if [ -n "$hook_hold" ]; then
+    log_entry "UPDATE_DEFERRED $hook_hold sha=$target"
+    defer_update "$hook_hold"
+    return 0
+  fi
   stash_before="$(git -C "$GSTACK_DIR" stash list --format='%gd:%H' 2>/dev/null)"
   txn="$(mktemp -d "$(dirname "$GSTACK_DIR")/$(basename "$GSTACK_DIR").update-XXXXXX" 2>/dev/null)" || { log_entry "UPDATE_DEFERRED snapshot_dir_unavailable"; defer_update snapshot_dir_unavailable; return 0; }
   TXN="$txn"
