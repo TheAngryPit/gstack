@@ -115,6 +115,7 @@ REMOVAL_VALVE=20
 ST_HELD='[]'
 ST_DRAINABLE=0
 ST_NOTE=""
+BRAIN_SYNC_PUBLISH_REMOVALS_LIST=""
 
 # origin host for receipt records (github.com etc).
 remote_host() {
@@ -992,25 +993,32 @@ sync_removals() {
   rm -f "$list"
 }
 
+cleanup_publish_removals() {
+  local list="${BRAIN_SYNC_PUBLISH_REMOVALS_LIST:-}"
+  if [ -n "$list" ]; then rm -f "$list" "$list.gone"; fi
+  BRAIN_SYNC_PUBLISH_REMOVALS_LIST=""
+  gstack_brain_lock_release
+}
+
 subcmd_publish_removals() {
-  local confirm="${1:-}" list n rc=0
+  local confirm="${1:-}" n rc=0
   sync_active || { echo "BRAIN_SYNC: artifacts sync is not active; nothing to publish" >&2; exit 1; }
   gstack_brain_lock_acquire "$GSTACK_HOME" try || { echo "BRAIN_SYNC: another sync is running; try again" >&2; exit 1; }
-  list=$(mktemp "${TMPDIR:-/tmp}/brain-sync-removals.XXXXXX") || exit 1
-  trap 'rm -f "$list" "$list.gone"; gstack_brain_lock_release' EXIT INT TERM
-  removal_candidates "$list" || { echo "BRAIN_SYNC: could not list removed files" >&2; exit 1; }
-  n=$(grep -c . "$list" 2>/dev/null || true)
+  trap 'cleanup_publish_removals' EXIT INT TERM
+  BRAIN_SYNC_PUBLISH_REMOVALS_LIST=$(mktemp "${TMPDIR:-/tmp}/brain-sync-removals.XXXXXX") || exit 1
+  removal_candidates "$BRAIN_SYNC_PUBLISH_REMOVALS_LIST" || { echo "BRAIN_SYNC: could not list removed files" >&2; exit 1; }
+  n=$(grep -c . "$BRAIN_SYNC_PUBLISH_REMOVALS_LIST" 2>/dev/null || true)
   if [ "$n" -eq 0 ]; then
     echo "no removals to publish"
     exit 0
   fi
   if [ "$confirm" != "--yes" ]; then
     echo "$n synced file(s) are gone from disk:"
-    sed 's/^/  /' "$list"
+    sed 's/^/  /' "$BRAIN_SYNC_PUBLISH_REMOVALS_LIST"
     echo "publish their removal: $SELF_BIN --publish-removals --yes"
     exit 0
   fi
-  publish_removals "$list" || rc=$?
+  publish_removals "$BRAIN_SYNC_PUBLISH_REMOVALS_LIST" || rc=$?
   case "$rc" in
     0) echo "published $n removal(s)" ;;
     1) echo "BRAIN_SYNC: error: committing the removals failed" >&2; exit 1 ;;

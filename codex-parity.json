@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "upstream_repository": "https://github.com/garrytan/gstack.git",
-  "upstream_commit": "52eec18c6347a018ba51a9c9daf1766ce25ef6c8",
-  "upstream_version": "1.91.42.0",
+  "upstream_commit": "20eb6202fa8ea83a882e7c0463b722cd8a31af1e",
+  "upstream_version": "1.91.68.0",
   "host": "codex",
   "installation": "manual",
   "tests": [

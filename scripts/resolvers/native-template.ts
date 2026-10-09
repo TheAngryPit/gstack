@@ -62,19 +62,6 @@ collect actual final results before report. Failed, unavailable or timed-out rev
 unverified, not clean. Preserve the latest static/runtime evidence gates and never let
 reviewer agreement upgrade self-reported execution or test assurance.`);
   }
-  if (ctx.skillName === 'design-shotgun' && source.endsWith('/SKILL.md.tmpl')) {
-    const generationContract = '**Generate every variant with one `$D variants --briefs-file` call.**';
-    if (!text.includes(generationContract)) throw new Error('Codex design-shotgun generation contract anchor drift');
-    const stagingExplanation = 'directory: in sandboxed sessions `$D` output under `~/.gstack/` can abort ("The operation\nwas aborted"), while the temp dir works.';
-    if (text.split(stagingExplanation).length !== 2) throw new Error('Codex design-shotgun staging contract anchor drift');
-    text = text.replace(stagingExplanation, `${stagingExplanation}
-
-Codex permission boundary: the documented temporary directory is the normal staging
-path. If staging or the final \`gstack-design-claim\` write is denied, preserve the
-refusal and stop; do not retry through another path, tool, host or provider, or move
-the files manually. Continue only after the exact access is granted.`);
-    return text;
-  }
   if (ctx.skillName === 'ship' && /\/(?:test-coverage|plan-completion|greptile)\.md\.tmpl$/.test(source)) {
     if (source.endsWith('/test-coverage.md.tmpl')) {
       text = replaceBlock(text, '### Shared subagent dispatch', '**Generation allowance:**',
@@ -160,7 +147,7 @@ smallest pending decision; never auto-approve, stage or publish.`);
       .replaceAll('Codex flagged:', 'The native reviewer flagged:')
       .replaceAll('Codex still flags:', 'The native reviewer still flags:');
 
-    const preflight = '{{OUTSIDE_PREFLIGHT:opt-in}}';
+    const preflight = '{{OUTSIDE_PREFLIGHT:opt-in:plan-review}}';
     if (text.indexOf(preflight) < 0 || text.indexOf(preflight) !== text.lastIndexOf(preflight)) {
       throw new Error('spec native preflight anchor drift');
     }

@@ -35,10 +35,9 @@ const agy = defineHost({
     nameMatchesDirectory: true,
   },
 
-  // Literal ~/.gemini/antigravity-cli paths (the Copilot model) so skills
-  // without the preamble still resolve; .source-path (written by setup) lets
-  // /gstack-upgrade find the checkout behind the runtime root.
   pathRewrites: [
+    { from: 'if [ "agy" = copilot ]; then\n  SOURCE_DIR="$(cat "$HOME/.copilot/skills/gstack/.source-path" 2>/dev/null || true)"\nfi', to: 'if [ "agy" = agy ]; then\n  SOURCE_DIR="$(cat "$HOME/.gemini/antigravity-cli/skills/gstack/.source-path" 2>/dev/null || true)"\nfi' },
+    { from: 'For GitHub Copilot CLI, run `./setup --host copilot --refresh-registered`', to: 'For Antigravity CLI, run `./setup --host agy --refresh-registered`' },
     { from: 'if [ -d "$HOME/.claude/skills/gstack/.git" ]', to: 'if [ -d "$(cat "$HOME/.gemini/antigravity-cli/skills/gstack/.source-path" 2>/dev/null)/.git" ]' },
     { from: 'INSTALL_DIR="$HOME/.claude/skills/gstack"', to: 'INSTALL_DIR="$(cat "$HOME/.gemini/antigravity-cli/skills/gstack/.source-path")"' },
     { from: '$HOME/.claude/skills/gstack', to: '$HOME/.gemini/antigravity-cli/skills/gstack' },

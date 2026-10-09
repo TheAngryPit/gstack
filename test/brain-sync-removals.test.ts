@@ -16,9 +16,9 @@ const ROOT = path.resolve(import.meta.dir, '..');
 let home: string;
 let remote: string;
 
-function run(argv: string[]) {
+function run(argv: string[], overrides: NodeJS.ProcessEnv = {}) {
   const r = spawnSync(path.join(ROOT, 'bin', argv[0]), argv.slice(1), {
-    env: { ...process.env, HOME: home, GSTACK_HOME: home },
+    env: { ...process.env, HOME: home, GSTACK_HOME: home, ...overrides },
     encoding: 'utf-8',
     timeout: 60_000,
   });
@@ -142,7 +142,20 @@ describe('artifacts_sync_removals', () => {
     expect(remoteFiles()).toEqual(['projects/p/designs/b.md']);
     const remoteB = spawnSync('git', ['--git-dir=' + remote, 'show', 'main:projects/p/designs/b.md'], { encoding: 'utf-8', timeout: 30_000 });
     expect(remoteB.stdout).toBe('# doc\n');
-    expect(run(['gstack-brain-sync', '--publish-removals', '--yes']).stdout).toContain('no removals to publish');
+    const empty = run(['gstack-brain-sync', '--publish-removals', '--yes']);
+    expect(empty.stderr).toBe('');
+    expect(empty.status).toBe(0);
+    expect(empty.stdout).toContain('no removals to publish');
+  });
+
+  test('--publish-removals releases its lock when temp-file creation fails', () => {
+    syncAll(['projects/p/designs/a.md']);
+    fs.rmSync(path.join(home, 'projects/p/designs/a.md'));
+    const failed = run(['gstack-brain-sync', '--publish-removals', '--yes'], { TMPDIR: path.join(home, 'missing-tmpdir') });
+    expect(failed.status).toBe(1);
+    const retry = run(['gstack-brain-sync', '--publish-removals', '--yes']);
+    expect(retry.status).toBe(0);
+    expect(remoteFiles()).toEqual([]);
   });
 
   test('config rejects values other than on and off', () => {

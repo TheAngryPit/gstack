@@ -159,11 +159,17 @@ describe('plan-review role membership in shared generators', () => {
     ['ship', ctx => RESOLVERS.DESIGN_REVIEW_LITE(ctx)],
     ['document-release', generateCodexDocReview],
   ];
+  const nativeCodexReviews = new Set(['plan-ceo-review', 'plan-eng-review', 'plan-devex-review', 'plan-design-review']);
   for (const host of ['claude', 'codex'] as const) {
     const roleMarker = host === 'claude' ? '_CODEX_OUT=$("$_CODEX_PROBE" role-ready exec) || exit $?' : '--role plan-review';
     for (const [skill, render] of roleBearing) {
       test(`${host}: ${skill} invokes with the plan-review role only`, () => {
         const text = render(ctxFor(skill, host, HOST_PATHS.claude));
+        if (host === 'codex' && nativeCodexReviews.has(skill)) {
+          expect(text).toContain('fresh native reviewer');
+          expect(text).not.toMatch(/--role plan-review|role-ready|codex exec|claude -p|probe-model/);
+          return;
+        }
         expect(text).toContain(roleMarker);
         expect(text).not.toMatch(/select-model (exec|review)|probe-model|_gstack_codex_/);
         expect(text).not.toContain('without overriding either');

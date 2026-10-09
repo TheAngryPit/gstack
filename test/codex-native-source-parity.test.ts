@@ -126,7 +126,7 @@ describe('original source to native obligations', () => {
     expect(output).not.toContain('codex exec');
   });
 
-  test('generated Codex review, planning, ship and office-hours outputs retain current gates; design-shotgun keeps its CLI contract', async () => {
+  test('generated Codex review, planning, ship and office-hours outputs retain current gates; design-shotgun uses native image generation', async () => {
     const outputRoot = mkdtempSync(resolve(tmpdir(), 'gstack-codex-native-render-'));
     try {
       const generated = await runGeneration({ host: 'codex', outputRoot, contentLinkRoot: null, log: () => {} });
@@ -174,8 +174,8 @@ describe('original source to native obligations', () => {
 
       const shotgun = rendered('design-shotgun');
       expect(shotgun).toContain('Use AskUserQuestion to confirm before spending API credits:');
-      expect(shotgun).toContain('Generate every variant with one `$D variants --briefs-file` call.');
-      expect(shotgun).toContain('Codex permission boundary: the documented temporary directory is the normal staging');
+      expect(shotgun).toContain("Generate each variant with Codex's built-in `$imagegen` skill");
+      expect(shotgun).toContain('Codex permission boundary: if an image save, read or claim is refused');
       expect(shotgun).not.toMatch(/Launch N (?:Agent|native) workers|Native worker task template|fresh-context worker API/);
     } finally {
       rmSync(outputRoot, { recursive: true, force: true });
@@ -223,8 +223,9 @@ describe('original source to native obligations', () => {
     expect(() => replaceBlock('start start end', 'start', 'end', 'native')).toThrow('anchor drift');
     const path = 'autoplan/sections/ceo-phase.md.tmpl';
     expect(() => adaptNativeTemplate(read(path).replace('{{OUTSIDE_INVOCATION:autoplan}}', '{{CHANGED_INVOCATION}}'), ctx('autoplan'), path)).toThrow('Autoplan ceo native dispatch anchor drift');
-    const shotgunPath = 'design-shotgun/SKILL.md.tmpl';
-    expect(() => adaptNativeTemplate(read(shotgunPath).replace('Generate every variant with one `$D variants --briefs-file` call.', 'Launch N Agent subagents'), ctx('design-shotgun'), shotgunPath)).toThrow('Codex design-shotgun generation contract anchor drift');
-    expect(() => adaptNativeTemplate(read(shotgunPath).replace('while the temp dir works.', 'while a temp dir works.'), ctx('design-shotgun'), shotgunPath)).toThrow('Codex design-shotgun staging contract anchor drift');
+    const shotgun = RESOLVERS.DESIGN_SHOTGUN_GENERATION(ctx('design-shotgun'));
+    expect(shotgun).toContain("Generate each variant with Codex's built-in `$imagegen` skill");
+    expect(shotgun).toContain('Codex permission boundary: if an image save, read or claim is refused');
+    expect(shotgun).not.toMatch(/\$D variants --briefs-file|\$D generate|\$D evolve/);
   });
 });

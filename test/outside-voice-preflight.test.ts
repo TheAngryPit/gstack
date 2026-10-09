@@ -144,7 +144,7 @@ describe('own-harness review fallback instructions', () => {
           expect(text).toContain('Only dispatch the native reviewer when the block reports');
           expect(text).not.toMatch(/under_codex|under_current_harness/);
           expect(text).not.toContain('gstack-claude-code');
-          continue;
+          return;
         }
         const mode = name === 'plan' ? 'under_current_harness' : 'under_codex';
         const preflight = text.match(/```bash\n([\s\S]*?)\n```/)![1];
@@ -208,7 +208,7 @@ describe('outside reviewer runtime discovery in fresh shells', () => {
     const result = f.preflight();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('CODEX_MODE: ready');
-    expect(result.stdout).toContain(`RESOLVED_ROOT: ${f.local}`);
+    expect(result.stdout).toContain(`RESOLVED_ROOT: ${path.join(fs.realpathSync(f.repo), '.agents/skills/gstack')}`);
     expect(result.stderr).toBe('');
     // The availability probe resolves a CLI; it must not dispatch a review.
     expect(fs.existsSync(f.capture)).toBe(false);
@@ -231,10 +231,10 @@ describe('outside reviewer runtime discovery in fresh shells', () => {
     const explicit = f.install(path.join(f.home, 'explicit runtime'));
     expect(f.preflight({ GSTACK_ROOT: explicit }).stdout).toContain(`RESOLVED_ROOT: ${explicit}`);
     // C1: only an exported GSTACK_ROOT (with bin/ and lib/) is honored; a lone GSTACK_BIN falls back to the repo-local install.
-    expect(f.preflight({ GSTACK_BIN: path.join(explicit, 'bin') }).stdout).toContain(`RESOLVED_ROOT: ${f.local}`);
+    expect(f.preflight({ GSTACK_BIN: path.join(explicit, 'bin') }).stdout).toContain(`RESOLVED_ROOT: ${path.join(fs.realpathSync(f.repo), '.agents/skills/gstack')}`);
     const result = f.preflight({ GSTACK_ROOT: '/missing/gstack', GSTACK_BIN: '/missing/gstack/bin' });
     expect(result.stdout).toContain('CODEX_MODE: ready');
-    expect(result.stdout).toContain(`RESOLVED_ROOT: ${f.local}`);
+    expect(result.stdout).toContain(`RESOLVED_ROOT: ${path.join(fs.realpathSync(f.repo), '.agents/skills/gstack')}`);
   });
 
   test('missing CLI reports not_installed rather than an import-path failure', () => {

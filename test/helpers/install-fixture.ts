@@ -25,7 +25,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 export const ROOT = resolve(import.meta.dir, '../..');
 const listed = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: ROOT, encoding: 'utf8', timeout: 10_000 });
 if (listed.status !== 0) throw new Error(listed.stderr);
-const SOURCE_FILES = listed.stdout.split('\0').filter(rel => rel && !/^(?:test|docs|browse\/test|\.github|node_modules)\//.test(rel) && existsSync(join(ROOT, rel)));
+const SOURCE_FILES = listed.stdout.split('\0').filter(rel => rel && !/^(?:test|docs|browse\/test|\.github|node_modules(?:\/|$))/.test(rel) && existsSync(join(ROOT, rel)));
 const STUB_BINARIES = ['browse/dist/browse', 'design/dist/design', 'make-pdf/dist/pdf', 'browse/dist/.build-complete'];
 const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const POSIX = process.platform !== 'win32';

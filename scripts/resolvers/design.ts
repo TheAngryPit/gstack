@@ -1396,6 +1396,10 @@ If the built-in tool is unavailable, report that and stop: Codex has no API fall
 It never overwrites and prints the final (possibly bumped) path; use FINAL from here on. If a
 claim fails, report the error; the image stays at its saved path.
 
+Codex permission boundary: if an image save, read or claim is refused, preserve the refusal
+and stop. Do not retry through another path, tool, host or provider, or move an image
+manually. Continue only after that same access is granted.
+
 ### Step 3d: Results
 
 <!-- design:round-accounting -->

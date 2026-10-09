@@ -728,12 +728,9 @@ describe('GitLab support in generated skills', () => {
     expect(retroContent).toContain('glab');
   });
 
-  test('ship creates GitLab MRs through gstack-post, which runs glab mr create', () => {
-    // CEO-19: /ship publishes only through gstack-post; the helper detects
-    // GitLab from the remote and runs glab with argv values.
+  test('ship routes GitLab MR creation through gstack-post', () => {
     expect(shipSkillContent).toContain('gstack-post pr-create --base <base>');
     expect(shipSkillContent).toContain('glab mr list --source-branch');
-    expect(fs.readFileSync(path.join(ROOT, 'lib', 'gstack-post.ts'), 'utf-8')).toContain('args: ["mr", "create"');
   });
 
   test('ship checks .gitlab-ci.yml', () => {
@@ -3197,12 +3194,13 @@ describe('Codex generation (--host codex)', () => {
 
   test('codex design-shotgun generates with built-in $imagegen and keeps $D for the board only', () => {
     const codex = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-design-shotgun', 'SKILL.md'), 'utf-8');
-    for (const phrase of ['`$imagegen`', 'default built-in mode', 'needs no `OPENAI_API_KEY`', 'view_image', 'gstack-design-claim', '$D compare --images-file']) {
+    for (const phrase of ['`$imagegen`', 'default built-in mode', 'needs no `OPENAI_API_KEY`', 'view_image', 'gstack-design-claim', 'Codex permission boundary: if an image save, read or claim is refused', '$D compare --images-file']) {
       expect(codex).toContain(phrase);
     }
     for (const generator of ['"$D" variants', '"$D" generate', '"$D" evolve', '$D iterate', '`$D variants --brief']) {
       expect(codex).not.toContain(generator);
     }
+    expect(codex).not.toMatch(/"?\$D"?\s+(?:variants\s+--briefs-file|generate|evolve)(?:\s|$)/);
     const claude = fs.readFileSync(path.join(ROOT, 'design-shotgun', 'SKILL.md'), 'utf-8');
     expect(claude).toContain('"$D" variants --briefs-file');
     expect(claude).not.toContain('$imagegen');

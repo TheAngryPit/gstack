@@ -45,7 +45,11 @@ describe('Codex native capability parity', () => {
     expect(output).toContain('not MCP runtime proof');
     expect(output).not.toContain('claude mcp');
     expect(output).not.toContain('mcp remove');
-    expect(RESOLVERS.GBRAIN_HOST_MCP({ ...ctx, host: 'claude' })).toContain('claude mcp add');
+    const claude = RESOLVERS.GBRAIN_HOST_MCP({ ...ctx, host: 'claude' });
+    expect(claude).toContain('claude mcp add');
+    expect(claude).toContain('BUN_ROOT="${BUN_INSTALL:-$HOME/.bun}"');
+    expect(claude).toContain('gbrain/src/cli.ts');
+    expect(claude).toContain('PGLite brain');
   });
 
   test('transcript guidance never conflates source type, scope, capture or sync', () => {
