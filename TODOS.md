@@ -2,44 +2,103 @@
 
 ## NEXT PRIORITY
 
-### P1–P3: Oct 6 fix-wave follow-ups (filed 2026-10-06)
+### P1/P2: /cso capacity follow-ups (filed 2026-10-08)
 
-Deferred from the approved plan (docs/designs/FIX_WAVE_2026_10_06.md), each with its reason.
+Left open by v1.91.42.0, which lifted the snapshot file-count ceiling.
 
-- **Bounded or incremental owned-journal read (P1, next wave)** — /autoplan's
-  guard reads the whole parent journal and refuses at 32 MiB (`too_large`,
-  #3050); long sessions reach 50-70 MiB. Read incrementally while keeping every
-  ownership and ancestry check. Acceptance: /autoplan completes in a session
-  whose journal is over 100 MiB, with phase-entry latency and peak memory
-  measured on macOS and Linux. **Effort:** L. **Priority:** P1.
-- **Greptile in parallel during /ship (#3020, full version)** — push early so
-  Greptile reviews while /ship runs its other passes, then merge its findings
-  into the review. This wave only skips triage when no PR exists.
+- **Tracked symlinks refuse the whole /cso run** — `capture()` fails closed on
+  any tracked symlink ("Symlink or special source file"). 5 of 8 mid-size OSS
+  repos measured for v1.91.42.0 stop there (django, rails, terraform, grafana,
+  vscode; 1-10 symlinks each, mostly test fixtures). Recording them as unread
+  exclusions in the manifest, like dependency trees, is a security design call
+  for Garry. **Effort:** M. **Priority:** P1.
+- **64 MiB aggregate source cap (#2993)** — files over 1 MiB are withheld from
+  the audit but still read and counted. Stream-hash them without counting
+  toward the cap, report them as unread coverage, and add an admission estimate
+  to `doctor`. grafana (211 MiB) and vscode (540 MiB) hit it once symlinks are
+  out of the way. A `GSTACK_CSO_SNAPSHOT_MAX_BYTES` knob was deferred with it.
+  **Effort:** L. **Priority:** P2.
+- **`inspect` prints the whole public manifest** — about 2.8 MB of stdout for
+  5,000 files, more than an agent's tool output keeps. The skill reads paths
+  from it, so trimming it is a skill-contract change with evals.
   **Effort:** M. **Priority:** P2.
-- **Executed-subcommand Codex probe** — turn `bin/gstack-codex-probe` into an
-  executed command (`gstack-codex-probe select-model exec` printing its status
-  lines) so skills stop depending on the calling shell. The zsh fix (#3024)
-  keeps sourcing because skills call its functions across a block.
-  **Effort:** M. **Priority:** P2.
-- **Argument-array posting helper** — one gstack helper that posts PR and issue
-  text by passing arguments as an array, never through a shell string (the
-  stronger form of the free-text file rule). **Effort:** M. **Priority:** P2.
-- **Free text the lint cannot see yet** — question tuning's inline
-  `printf '%s' "<question summary>" | … --summary-stdin`, /ship's `NEW_TITLE`
-  restore and Step 18's `"<current title>"` prose, and the heredoc template in
-  `docs/gbrain-write-surfaces.md` should use the agent-written file too.
+- **Repair bundles carry every transformation** — `lib/cso/verification.ts`
+  binds the full transformation list into a 1 MiB immutable bundle. Only
+  runtime verification writes bundles, and no qualified runtime catalog exists
+  yet. **Effort:** M. **Priority:** P3.
+
+### P2/P3: iOS QA fix-wave follow-ups (filed 2026-10-07, v1.91.38.0)
+
+Left open by the iPad and route-drop release, each with its reason.
+
+- **Device verification of v1.91.38.0** — the iPad bootstrap, route-drop
+  recovery on a real Xcode 26 tunnel drop, the multiple-devices error and the
+  `NOT READY` path were proven only against the simulated device; the changed
+  `StateServer` passed `swiftc -parse` but no Apple-SDK build. Run
+  `test/skill-e2e-ios-device.test.ts` and the Swift build lane on a Mac with an
+  iPhone and an iPad. **Effort:** S. **Priority:** P2.
+- **`GSTACK_IOS_LAUNCH_ENV` (split from #1796, @Bmathews721)** — pass launch
+  environment to the app through `devicectl process launch`. Nothing equivalent
+  exists on main; land it as its own small PR with credit, then close #1796.
   **Effort:** S. **Priority:** P2.
-- **/plan-tune free-text tune events** — preference writes from skills no
-  longer pass the user's own words (`free_text`), because they travelled
-  inside a single-quoted JSON argument. Pass them through the agent-written
-  file. **Effort:** S. **Priority:** P2.
+- **A restarted daemon still relaunches the app once** — a new daemon has no
+  session bearer and the one-use boot token is gone. Fixing it needs either a
+  device-side re-mint with proof of the old session or a persisted bearer under
+  the state root, and both change the token's security model. Needs a design.
+  **Effort:** M. **Priority:** P3.
+- **iPad Stage Manager and multiple scenes** — overlay and window selection
+  (`frontmostWindow`, `searchRoots`) are unverified on iPad multi-window
+  layouts. **Effort:** S (verify) / M (fix). **Priority:** P3.
+- **Stale "Session warm-start" phase in `/ios-qa`** — Phase 0 describes an
+  `ios-qa-session.json` cache that no daemon code writes. Implement it with the
+  state-root chain or remove the phase. **Effort:** S. **Priority:** P3.
+- **Sanctioned input-routing hook for SwiftUI gestures** (#1975 finding 2) —
+  synthesized touches miss `DragGesture` on iOS 26; a documented `#if DEBUG`
+  hook would let gesture-driven apps route `/tap` and `/swipe` to their own
+  handlers. **Effort:** M. **Priority:** P3.
+
+### P2/P3: Oct 7 fix-wave follow-ups (filed 2026-10-07)
+
+Left open by the Oct 7 wave (docs/designs/FOLLOWUP_WAVE_2026_10_07.md), each with its reason.
+
+- **/autoplan permission cards after a background reviewer finishes (Claude Code
+  2.1.292)** — once a background reviewer's completion notice starts a new turn,
+  Claude Code stops applying the skill's allowed tools, so Reads outside the
+  project (the close packet, the next phase's section file) show permission
+  cards. Seen in both foreground and `--bg` PTY runs. Options: keep those
+  artifacts readable without a card, or detect it and explain it once.
+  **Effort:** M. **Priority:** P2.
+- **macOS numbers for the bounded journal read** — the guard's 120 MiB read
+  meets the Linux budget (0.43-0.87 s, at most 235 MiB peak RSS on 4 vCPU) and a
+  resumed 102 MiB session entered Phase 1 end to end. The macOS run is recorded
+  by dispatching `.github/workflows/measure-journal-read.yml`, which GitHub only
+  allows once the workflow is on main. **Effort:** S. **Priority:** P3.
+- **Every-transition manual /autoplan session on 2.1.292** — the replay
+  fixtures and the scripted live boundary (foreground and `--bg`) cover the
+  guard; one full recorded run through every phase transition is still to do.
+  **Effort:** S. **Priority:** P3.
+- **Remove the sourced Codex probe (on or after 2026-10-21)** — delete the
+  sourcing path of `bin/gstack-codex-probe`, its deprecation line, the zsh
+  self-locate block, the probe's entry in the zsh sourced-helper test and
+  `test/helpers/codex-probe-sourcing.ts`. **Effort:** S. **Priority:** P3.
+- **Move the remaining PR and issue writers to gstack-post** — /document-release's
+  PR body and title edit (with its own scan) and the test-failure triage issue
+  (`--assignee`) still call gh/glab directly. **Effort:** S. **Priority:** P3.
+- **`gstack-doctor --json`** — machine-readable rows for CI and bug-report
+  bots. Deferred as DX polish. **Effort:** S. **Priority:** P3.
+- **Doctor guard check against a named session journal** — run the guard's
+  reader on a given journal from `gstack-doctor`. Deferred: doctor runs outside
+  a session and the design is unclear. **Effort:** M. **Priority:** P3.
+- **One secret scanner for artifacts sync** — replace `bin/gstack-brain-sync`'s
+  Python scanner (and the hook copies written by init and restore) with
+  `lib/redact-engine.ts`. Deferred: a cross-language rewrite outside the
+  per-file hold. **Effort:** L. **Priority:** P3.
+- **Timed novice install journey** — measure a fresh install to a first skill
+  run, end to end. Deferred: outside a fix wave. **Effort:** M. **Priority:** P3.
 - **Native Windows Docker transport for /cso (#3028)** — `lib/cso/docker.ts`
   accepts only `unix:///` endpoints, so /cso on Windows reports "static
   assessment only" even with a trusted `docker.exe`. Add named-pipe transport
   with the same trust checks. **Effort:** L. **Priority:** P2.
-- **Readiness command** — a `gstack doctor` (or a Codex row in
-  `./setup --status`) that shows CODEX_MODE, the self-locate result and the
-  hook check without starting a skill. **Effort:** S. **Priority:** P3.
 
 ### P2/P3: reliability follow-ups deferrals (filed 2026-10-04, v1.91.30.0)
 
@@ -199,10 +258,10 @@ Deferred from the approved severe fix wave (docs/designs/SEVERE_FIX_WAVE_2026_10
 - **Redaction repo allowlist (#2598)** — a per-repo `+++ b/<path>` skip list
   (generated `*.svg`/`*.excalidraw`, #2827) for noise context rules cannot
   cover. New config surface, so out of the wave. **Effort:** M. **Priority:** P2.
-- **Global-discover Codex session schema (#2750)**, **ios-qa boot-token fixes
-  (#1837, #1975; need a device)**, **absolute bun path for compiled browse
-  spawns (#931; macOS repro unclear)** and **GitLab CI `curl | bash` (#1713)** —
-  out of the wave's scope. **Priority:** P3 each.
+- **Global-discover Codex session schema (#2750)**, **absolute bun path for
+  compiled browse spawns (#931; macOS repro unclear)** and **GitLab CI
+  `curl | bash` (#1713)** — out of the wave's scope. (The ios-qa boot-token
+  items #1837 and #1975 landed in v1.91.38.0.) **Priority:** P3 each.
 - **Upstream gbrain batch lookup** — a per-slug existence lookup and a separate
   `pending` list in `gbrain import --json`, so the landing check need not list a
   whole source and spawn `get` per page. **Effort:** M (upstream). **Priority:** P2.

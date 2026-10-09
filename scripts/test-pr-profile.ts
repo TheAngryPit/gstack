@@ -227,6 +227,7 @@ export const FREE_ONLY_PR_FILES = [
   '.github/workflows/dependency-review.yml',
   '.github/workflows/free-tests.yml',
   '.github/workflows/make-pdf-gate.yml',
+  '.github/workflows/measure-journal-read.yml',
   '.github/workflows/native-qualification.yml',
   '.github/workflows/osv-scanner.yml',
   '.github/workflows/platform-qualification.yml',
@@ -235,6 +236,9 @@ export const FREE_ONLY_PR_FILES = [
   '.github/workflows/scorecard.yml',
   '.github/workflows/skill-docs.yml',
   '.github/workflows/test-health.yml',
+  '.github/workflows/eval-sweep.yml', // The weekly off-ship sweep on main; no PR-gate case reads it, and it never gates a PR.
+  '.github/actionlint.yaml', // Runner labels for actionlint only.
+  'scripts/ship-measure-sweep.ts', // The weekly sweep CLI; it launches paid cases, never runs inside one.
   '.github/workflows/version-gate.yml',
   '.github/workflows/windows-free-tests.yml',
   '.github/workflows/windows-setup-e2e.yml',

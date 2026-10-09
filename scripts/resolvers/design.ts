@@ -5,7 +5,7 @@ import { binaryAssignment } from './runtime-root';
 import { usesLazySections } from './sections';
 import { generateCodexNativeReview } from './codex-native-review';
 import { replaceBlock } from './native-template-utils';
-import { AI_SLOP_BLACKLIST, OPENAI_HARD_REJECTIONS, OPENAI_LITMUS_CHECKS, CC_BACKGROUND_DEFAULT_SINCE } from './constants';
+import { AI_SLOP_BLACKLIST, OPENAI_HARD_REJECTIONS, OPENAI_LITMUS_CHECKS, CC_BACKGROUND_DEFAULT_SINCE, FOREGROUND_IF_AVAILABLE, BACKGROUND_RECOVERY } from './constants';
 import { OVERUSED_FONTS_DISPLAY, BANNED_FONTS, FONTS_BODY_UI_OK, FONTS_MONO_OK, FONTS_VERIFIED_FREE, HANDOFF_COMMANDS, selectCatalog, catalogEntries, renderCatalog, detectorSlopEntries, judgmentTellEntries } from '../../lib/design-catalog';
 import { SENTINEL, DETECT_EXIT_ECHO, DETECT_LIMITS } from '../../lib/design-detect-contract';
 import { DOM_DUMP_FILE } from '../../lib/dom-dump-script';
@@ -691,7 +691,7 @@ ${outsideVoiceInvocation(ctx, { timeoutMs: 300000, reasoningEffort: 'medium', pu
 
 ${outsideVoiceProvenance(ctx, 'design-sketch')}
 
-2. **${outsideVoiceFor(ctx).nativeLabel} subagent** (via Agent tool, \`run_in_background: false\` — subagents default to background since ${CC_BACKGROUND_DEFAULT_SINCE}):
+2. **${outsideVoiceFor(ctx).nativeLabel} subagent** (via Agent tool, ${FOREGROUND_IF_AVAILABLE} — subagents default to background since ${CC_BACKGROUND_DEFAULT_SINCE}; ${BACKGROUND_RECOVERY}):
 "For this product approach, what design direction would you recommend? What aesthetic, typography, and interaction patterns fit? What would make this approach feel inevitable to the user? Be specific — font names, hex colors, spacing values. Do not fall back on these defaults: a cream ground with a high-contrast serif and terracotta accent; near-black with one neon accent and glowing edges; italic accent words inside headlines; numbered 01 / 02 / 03 section labels; tiny tracked monospace labels; pill-shaped buttons. If your first idea is one of these, name it and choose again."
 
 Present ${outsideVoiceFor(ctx).label} output under \`${outsideVoiceFor(ctx).label.toUpperCase()} SAYS (design sketch):\` and subagent output under \`${outsideVoiceFor(ctx).nativeLabel.toUpperCase()} SUBAGENT (design direction):\`.
@@ -914,7 +914,7 @@ Prompt (include the actual plan/product/frontend source context, not only file p
 
 ${outsideVoiceInvocation(ctx, { timeoutMs: 300000, reasoningEffort, ...(isDesignConsultation ? { purpose: 'design-direction' as const } : {}) })}
 
-2. **${outsideVoiceFor(ctx).nativeLabel} design subagent** (Agent tool, \`run_in_background: false\`; await its result):
+2. **${outsideVoiceFor(ctx).nativeLabel} design subagent** (Agent tool, ${FOREGROUND_IF_AVAILABLE}; await its result. ${BACKGROUND_RECOVERY}):
 "${subagentPrompt}"
 
 **Error handling (all non-blocking):**

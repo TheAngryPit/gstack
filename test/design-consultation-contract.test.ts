@@ -14,8 +14,6 @@ for (const { name: host } of ALL_HOST_CONFIGS) {
   test(`${host}: proposal prompt requests the same completion marker that dispatch validates`, () => {
     const text = generateDesignOutsideVoices(context(host));
     const prompt = text.match(/"(Given this product context, propose a complete design direction:[\s\S]*?)"\n/);
-    expect(validateOutsideReview('Recommendation: use a compact triage table because operators compare many incident rows.', 'review').completed).toBe(true);
-    expect(validateOutsideReview('A compact table sounds nice.', 'review').completed).toBe(false);
     if (host === 'codex') {
       expect(prompt).toBeNull();
       expect(text).toContain('## Design Outside Voices (native Codex contexts)');
@@ -30,6 +28,8 @@ for (const { name: host } of ALL_HOST_CONFIGS) {
 
     expect(prompt).not.toBeNull();
     expect(prompt![1]).toContain('Recommendation: <direction> because <product-specific reason>');
+    expect(validateOutsideReview('Recommendation: use a compact triage table because operators compare many incident rows.', 'proposal').completed).toBe(true);
+    expect(validateOutsideReview('A compact table sounds nice.', 'proposal').completed).toBe(false);
     const preparation = outsideVoiceInvocation(context(host), { timeoutMs: 300000, purpose: 'design-direction' });
     expect(preparation).toContain('missing Recommendation marker');
     expect(preparation).not.toMatch(/severity|no.findings|clean\/PASS/i);

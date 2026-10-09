@@ -1,5 +1,251 @@
 # Changelog
 
+## [1.91.42.0] - 2026-10-08
+
+**/cso lifts its file-count ceiling: repositories with tens of thousands of files reach the audit.**
+**Repositories with more than 64 MiB of tracked source, or with a tracked symlink, are still refused, and the message now says which limit applied and what to do.**
+
+/cso refused any repository with more than about 3,100 files before an audit started, with "Snapshot manifest exceeds the 1 MiB private-state admission limit" (#3068). The snapshot's file list shared a 1 MiB limit with every other private file /cso keeps, and so did the report it writes, the list of files with secret-like findings, and Git's own file listing. The snapshot list now has its own 16 MiB limit (about 50,000 files) and is written compactly. Per-file lists in the report and the evidence file keep their first entries and end with one line saying how many more there are. The counts in the report stay exact.
+
+### The numbers that matter
+
+Shallow clones measured on 2026-10-08 with `start --offline`, before and after this release:
+
+| Repository | Files | Tracked source | Before | After |
+|---|---|---|---|---|
+| sveltejs/svelte | 9,182 | 6.9 MiB | refused (file list over 1 MiB) | audit starts; 2.8 MiB file list, 10 KB report |
+| facebook/react | 7,252 | 38.7 MiB | refused (file list over 1 MiB) | audit starts; 2.3 MiB file list, 53 KB report |
+| laravel/framework | 3,439 | 25.7 MiB | refused (file list over 1 MiB) | audit starts; 1.0 MiB file list, 30 KB report |
+| django/django | 7,085 | 44.0 MiB | refused (4 tracked symlinks) | refused (symlinks); starts once they are removed |
+| rails/rails | 5,007 | 38.1 MiB | refused (1 tracked symlink) | refused (symlink); starts once it is removed |
+| hashicorp/terraform | 5,562 | 25.6 MiB | refused (10 tracked symlinks) | refused (symlinks); starts once they are removed |
+| grafana/grafana | 23,749 | 210.7 MiB | refused (Git file listing over 1 MiB) | refused (symlinks); then the 64 MiB source cap |
+| microsoft/vscode | 20,238 | 540.0 MiB | refused (Git file listing over 1 MiB) | refused (symlink); then the 64 MiB source cap |
+
+On a synthetic 5,000-file repository with long nested paths, where most files are excluded or withheld and 1,000 files carry secret-like strings, the report is 267 KB and the evidence file 524 KB. Unbounded, the same lists took 1.97 MB and 1.68 MB, over the 1 MiB limit. A free test drives that shape through start, inspect, findings, finish and recheck.
+
+### What this means for you
+
+Run `/gstack-upgrade`, then run `/cso` on a repository with more than 3,100 files: the audit starts instead of stopping at the snapshot. If /cso still refuses, the message names the limit (the 16 MiB snapshot list, the 64 MiB source cap, or a symlink), the measured size, what counts toward it and the next step. No setting raises these limits yet; the 64 MiB source cap is tracked in #2993, and `docs/troubleshooting.md#cso-capacity` explains all three.
+
+### Itemized changes
+
+#### Fixed
+- /cso refused repositories with more than about 3,100 files before an audit. The snapshot file list is written compactly and capped at 16 MiB; every other private file keeps its 1 MiB limit. Snapshot lists written by earlier releases still load in recheck and inspect. (#3068)
+- Report coverage gaps, exclusions and transformations, and the evidence file of secret-like findings, keep their first entries and end with an omitted count, so a large repository no longer overflows the report partway through an audit.
+- Git's file listings during capture are allowed up to the snapshot list size, so repositories past roughly 11,000 to 23,000 files, depending on path length (7,000 to 10,000 with `--diff` or `--base`), no longer fail with "Could not read bounded Git metadata: ls-tree exceeded the output limit".
+- The snapshot-list and 64 MiB source-cap errors state the measured value, the limit, what counts toward it, the next step and the #2993 link. A single file that would cross 64 MiB now gets the same message before it is read. (#2993)
+
+#### For contributors
+- `readJson` takes a per-artifact size cap. `readSnapshotManifest(dir)` is the only reader of `snapshot.json`, and a source test fails on a direct read.
+- `boundedList` in `lib/cso/state.ts` bounds a per-entry list by the pretty-printed bytes it adds and appends one omitted-count item.
+- `runProcess` lets raw callers opt in to up to 16 MiB of output; everything else keeps the `MAX_OUTPUT` clamp, which stays 1 MiB.
+- Thanks to @almoatasemm for the report (#3068) and @saanjay for the capacity diagnosis of the manifest, reader and source caps (#2993).
+
+## [1.91.38.0] - 2026-10-07
+
+**`/ios-qa` works on iPads, and a dropped USB route no longer restarts the app you are testing.**
+
+Three things went wrong on real devices. The daemon accepted only iPhones, so a paired iPad was refused with "not an iPhone" (#2743). Once a session was running, any blip in Xcode 26's CoreDevice tunnel made the daemon start over: the app had already deleted its one-use boot token, so the only way back in was `devicectl process launch --terminate-existing`, which threw away the app's in-memory QA state in the middle of a test flow (#1975). And if the app could not write that boot token in the first place, `StateServer` failed silently with `try?`, so the daemon kept relaunching an app that could never let it in (#1837).
+
+### The numbers that matter
+
+Measured with the simulated-device tests in `ios-qa/daemon/test/daemon-integration.test.ts` (a `devicectl` emulator plus a StateServer with the real token rules). Real iPhone and iPad runs have not been done for this release.
+
+| Check | Before | After |
+|---|---|---|
+| Paired iPad on USB, no target set | refused ("not an iPhone") | bootstraps |
+| iPhone and iPad both on USB, no target set | silently drives whichever devicectl listed first | stops and lists both UDIDs with a ready `export GSTACK_IOS_TARGET_UDID=...` line |
+| One route drop during a session | 1 `--terminate-existing` relaunch, in-app state lost | 0 relaunches, state kept, same bearer |
+| Three requests failing on the same drop | one bootstrap and one relaunch | one shared recovery, no relaunch |
+| App that cannot write its boot token | silent; daemon relaunches it once, then `boot_token_unavailable` with no cause | `NOT READY` in the device log; daemon names the cause and does not relaunch |
+
+### What this means for you
+
+Run `/gstack-upgrade`, then rerun `gstack-ios-qa-regen` in your app so the new `StateServer` lands in `DebugBridge/`. Plug in an iPad and run `/ios-qa`: it connects like an iPhone. With an iPhone and an iPad both plugged in, the daemon prints both UDIDs and the `export GSTACK_IOS_TARGET_UDID=<udid>` line to run. When the tunnel drops mid-session, the daemon log says `tunnel recovered: kept the session` and the app keeps its state. A restarted daemon still relaunches the app once, because a new daemon has no session bearer.
+
+### Itemized changes
+
+#### Fixed
+- **Physical iPads are accepted** (#2743). Device selection takes iPhones and iPads (platform iOS or iPadOS); errors say "iPhone or iPad". Watches, Vision Pro and other devices are still refused. Contributed by @loulanyue (#2779), reported by @Artic0din.
+- **Two devices are never guessed between.** When an iPhone and an iPad (or any two devices) tie for the default, bootstrap fails with `multiple_devices`, lists each device with its UDID, and prints the export line.
+- **A route drop keeps the session** (#1975, finding 1). On `503 device_disconnected` or `504 upstream_timeout` the daemon re-selects the device with the same rules, re-resolves the tunnel address for the same UDID, checks the unauthenticated `/healthz` owner, and probes `/state/snapshot` with the bearer it already holds. If the app accepts it, the session continues. It bootstraps only when the app rejects the bearer (401, the app was relaunched), the app is confirmed not running (one normal launch), or a different device is now selected. The bearer is only sent to the address `devicectl` reports for that UDID, or to the address the session already used, never to another device. Concurrent failures share one recovery, and a tap or other mutation whose response was lost is still never replayed. Diagnosis by @jpb33333 in #1975; @Bmathews721 traced the same rotate-then-rebootstrap failure in #1796.
+- **A failed boot-token write is loud** (#1837). `StateServer.start()` writes the 0600 token file in a `do`/`catch`, logs the path and error (never the token), logs `gstack-ios-qa-bootstrap NOT READY`, and reports `boot_token_error` on `/healthz`. The daemon turns that into `boot_token_unavailable` with the cause instead of relaunching the app. Reported by @aweevenson-sea.
+
+#### Docs
+- `/ios-qa` no longer tells you to capture the boot token from `os_log`; the token left `os_log` in v1.65.0.0. The stale comments in `StateServer` are gone too (#1837, #1735 item 7).
+- Source-control guidance for the generated `DebugBridge/` package: commit it or ignore it, never hand-edit it (#1735 item 7, reported by @frank-alvarado).
+- A new "Known limits" section: in-process synthesized touches do not reach SwiftUI `DragGesture` on iOS 26 and `/swipe` only scrolls a `UIScrollView` (#1975 findings 2 and 3, @jpb33333); on iOS 26.3.1 `/elements` returns only the hosting views (device data from @sternryan in #1755); iPad Stage Manager is not verified.
+- The iOS how-to, README and skill index cover iPads, `GSTACK_IOS_TARGET_UDID`, and the new failure rows.
+
+#### For contributors
+- `selectDevice()` and `recoverTunnel()` in `ios-qa/daemon/src/tunnel-bootstrap.ts`; `refreshTunnel` in `startDaemon()` coalesces refreshes per failed tunnel. The CLI wiring is `deviceTunnelSource()` in `ios-qa/daemon/src/index.ts`, so tests drive exactly what the daemon runs.
+- `ios-qa/daemon/test/fake-device.ts` simulates a device: a `devicectl` emulator plus a StateServer with the one-use token file, rotation, relaunch and black-holed requests.
+- Pinned by `ios-qa/daemon/test/daemon-integration.test.ts` (live route drop, lost tap, concurrent drops, stopped app, Xcode relaunch, device change), `ios-qa/daemon/test/tunnel-bootstrap.test.ts` (iPad, Watch, multiple devices, recovery address and owner rules, token-write error) and `test/ios-qa-stateserver-hardening.test.ts` (no silent `try?` write, no os_log claim) on both the template and the fixture copy.
+- Not verified here: Swift compilation of the changed `StateServer` (only `swiftc -parse` ran; no Apple SDK), and any iPhone or iPad run.
+
+## [1.91.36.0] - 2026-10-07
+
+**Python and Rails repairs can now reach `runtime_tested` and replay, and a killed verification leaves nothing behind.**
+
+Runtime verification had four defects that the private evaluator's Lane R found on its Python, Rails and watchdog checks. First, a verified Python repair could never replay: offline preparation wrote timestamped `.pyc` bytecode, so every preparation hashed differently and `replay` reported "Replay changed verification outcomes, preparation, or provenance inputs". Second, Rails replays failed the same way, because RubyGems build logs record a random temporary directory. Third, no Rails verification could finish on a 4-vCPU host: an attempt prepares the application twice, each Rails preparation compiles native extensions for about four minutes, and the attempt watchdog, executor and assertion witness were each capped at five minutes. Fourth, after a helper was killed mid-verification, the watchdog removed every container, but `resume` and `finish` left the dead attempt's control directory and archive staging in the run directory.
+
+### The numbers that matter
+
+Measured on amd64 (4 vCPU) with `gstack-cso` built from 28f1385 plus these fixes, the staged runtime images from staging run 37555192492, and the evaluator's private corpus.
+
+| Check | Before | After |
+|---|---|---|
+| Two Python offline preparations of the same app | prepared dependency trees differ | 0 differing files |
+| One Rails offline preparation | about 245 s | unchanged |
+| Rails verification attempt | ended by the 300 s watchdog during its second preparation | certifies within the 900 s bound |
+| Helper SIGKILL during preparation or with the app running, then `resume` and `finish` | `preparation-execution` (and `archive-staging`) not empty | empty |
+
+### What this means for you
+
+Python projects locked with `requirements.txt` or `uv.lock`, and Rails projects with native gems, can now be verified and replayed. Node and Bun keep their 300-second attempt. If a verification is interrupted, `resume` now reclaims its scratch once the watchdog has recorded cleanup.
+
+### Itemized changes
+
+#### Fixed
+- Python offline preparation sets `SOURCE_DATE_EPOCH`, so `venv`, ensurepip and pip write checked-hash `.pyc` files and two preparations of the same app produce identical trees.
+- The prepared manifest and dependency hashes leave out RubyGems and mini_portile build diagnostics (`extensions/**/gem_make.out`, `extensions/**/mkmf.log`, `gems/*/ext/**/tmp/**/*.log`). These logs name random build directories and are never loaded; the compiled extensions stay in the identity.
+- A Rails verification attempt and a Rails replay get 900 seconds instead of 300, still capped by the run's reporting deadline. The attempt watchdog, the Docker verification executor and the assertion witness lifetime now share that one bound (`MAX_VERIFICATION_ATTEMPT_MS`) instead of each enforcing 300 seconds. Other stacks keep 300 seconds.
+- `resume` and `finish` reclaim a killed attempt's `supervision`, `preparation-execution`, `archive-staging`, `archive-materializations` and `verification` scratch. They do this under the run lock and only when no detached watchdog cleanup is still pending.
+
+#### For contributors
+- `preparedIdentityEntry()` in `lib/cso/preparation-executor.ts`, `verificationAttemptMs()` in `lib/cso/cli.ts`, `MAX_VERIFICATION_ATTEMPT_MS` in `lib/cso/contracts.ts`, and `reclaimDeadAttemptScratch()` in `lib/cso/state.ts`. They are pinned by `test/cso-preparation-executor.test.ts`, `test/cso-preparation.test.ts`, `test/cso-cli-lifecycle.test.ts`, `test/cso-witness.test.ts` and `test/cso-snapshot-state.test.ts`.
+
+## [1.91.34.0] - 2026-10-07
+
+**/autoplan works again on current Claude Code, including long sessions and `claude --bg`.**
+**The pre-push scan and the artifacts sync stop raising false alarms, and neither got weaker.**
+
+On Claude Code 2.1.29x, /autoplan refused every reviewer it dispatched and said "retry", which never helped. Two Claude Code changes caused it. In interactive sessions the fork-subagent setting drops `run_in_background` from the copy of the reviewer dispatch that hooks see, while the session journal keeps it, so the guard decided the call had been tampered with. Claude Code also often writes a tool call to the journal only after the hook has returned, so the guard waited two seconds for a record that never came. Sessions with a journal over 32 MiB were refused outright. The pre-push scan flagged your own email and emails already in the repo's history. One flagged file stopped the artifacts sync entirely, without telling you: one contributor's machine went 18 days without a push.
+
+### The numbers that matter
+
+All measured on Claude Code 2.1.292 unless marked otherwise. The paid runs are single trials.
+
+| Check | Before | After |
+|---|---|---|
+| Reviewer dispatches allowed in a default interactive session | 0 (each denied, "retry") | all; the live PTY case logs 3 verified allows |
+| Same, through `claude --bg` + `claude attach` | 0 | 3 verified allows |
+| Largest session journal the guard accepts | 32 MiB | any size; only a single record over 32 MiB counts as too large |
+| One guarded read of a 120 MiB journal (4 vCPU Linux, appending during the read) | refused | 0.43-0.87 s, 170-235 MiB peak memory |
+| Resumed 102 MiB session entering Phase 1 | refused | allowed, in 70 s |
+| Replay fixtures shaped like the reported timelines | 3 of 28 pass (the controls) | 28 of 28 |
+| Codex reviews listing 7 and 8 High/Medium findings | reported `VERDICT: clean` | reported as findings |
+| Artifacts sync with one flagged file | nothing pushes, no notice | that file waits, the rest pushes, and every skill start says so |
+
+### What this means for you
+
+Run `/gstack-upgrade`. No restart is needed. An /autoplan run already in progress may get one denial asking you to publish the phase report in its own message; do that and continue. You no longer need `CLAUDE_CODE_FORK_SUBAGENT=false` (keeping it is harmless). Then try `~/.claude/skills/gstack/bin/gstack-doctor` to see what's ready before you start a skill.
+
+#### If /autoplan denied every reviewer on Claude Code 2.1.29x
+
+The guard now ignores only the one key Claude Code drops. When the current call isn't in the journal yet, it checks the call Claude Code handed to the hook against everything already written. A phase report counts once something later in the journal follows it, so each phase now publishes its report in its own message, whose only tool call is `true autoplan-published <phase>` (no output, no permission prompt).
+
+When Claude Code itself leaves a call impossible to check, /autoplan continues and prints a visible warning instead of blocking. That covers an unknown journal shape, a journal that never catches up, a rewritten journal, an oversized record, or a newer Claude Code that drops another key. A changed reviewer prompt, a model override, a skipped report or any other integrity problem is still refused. Every message names a code with its own section in `docs/autoplan-guard-troubleshooting.md`. If a denial still appears, the fallback is `/plan-ceo-review`, then `/plan-devex-review`, then `/plan-eng-review`; or `/context-save`, a new session, `/context-restore`, then `/autoplan <plan path>`.
+
+#### If the pre-push hook warned on your own email
+
+The scan no longer reports your own address (`git config user.email`) or addresses already in the destination's history: authors and committers of the commits you push, of the remote branch you replace, and, for a new branch, of that remote's other branches. Mailmapped addresses count too. Each MEDIUM finding now names its rule, file and line, never the value. Addresses that only some other remote knows still report, and HIGH secrets still block. To allow a team or support address in one repo, run `git config --add gstack.redact.allowEmail support@example.com`. If the hook says "existing-email suppression was limited for this push", it couldn't read the history within 5 seconds, so known authors may be listed that one time.
+
+#### If artifacts sync stopped pushing
+
+Run `~/.claude/skills/gstack/bin/gstack-brain-sync --status`. Each held file is listed with the scanner rule that matched and two fixes. Edit the file and the next skill run syncs it. If you never want it synced, run `~/.claude/skills/gstack/bin/gstack-brain-sync --skip-file <path>`; undo that with `--unskip-file <path>`. A git index lock left behind by a killed sync is now cleared once it is 10 minutes old.
+
+### Behavior changes you may notice
+
+- **/ship opens the PR early in repos that use Greptile.** That means a `.greptile/` folder, a `greptile.json`, or Greptile comments on PRs in the last 90 days. /ship pushes and opens a draft as soon as its tests pass, Greptile reviews while /ship runs its own checks, and /ship waits up to 10 minutes for that review, then folds the comments into the same pass. On a public repo it asks once first, and remembers your answer for that repo. If /ship stops partway, the draft stays open with a comment saying why. To keep the old order, run `~/.claude/skills/gstack/bin/gstack-config set ship_greptile_early false`.
+- **Outside reviews that list findings without a tag, a severity label or a "no issues" statement show `unverified`, never `clean`.** Severity labels such as `High:` or `Severity: Medium` now count the same as `[P1]`-style tags.
+- **Skills run the Codex probe as a command.** Skills rendered before this release still source it. That keeps working, but prints one line saying it is deprecated; sourcing stops working in a release on or after 2026-10-21. `/gstack-upgrade` re-renders them.
+- **Browser skills offer a tab you're already signed in to** (title and origin only, for the site you named). They attach only after you confirm it once, instead of looping on "sign in again" for apps that keep the session in the tab or URL.
+- **/context-restore no longer hands you an older checkpoint without saying so.** When another branch's worktree saved a newer checkpoint for the same task, restore shows both and proposes the newer one. Generic titles like "wip" need a matching ticket number. Restoring from a folder above a repo also offers saves made in that repo.
+
+### Itemized changes
+
+#### Added
+- `bin/gstack-doctor`: one row each for install, state root, Bun, hooks, Codex (with the last cached model check and its age), artifacts sync, the browse bundle, the Claude Code version, your largest session journal, and the last five /autoplan guard codes. Each row reads ok, warn, not configured or fail, and only fail makes the exit code non-zero. Every fix line is a full path you can paste. It spends nothing unless you add `--live`. `./setup --status` gains a Codex row and ends with the doctor's path, and a new bug-report issue template asks for the doctor's output.
+- `bin/gstack-post`: posts PR and issue comments, replies, titles, bodies and new PRs or issues. Every value goes to `gh` or `glab` as an argument, never through a shell string, so a title like `--repo evil/x` is posted as text. It scans exactly the bytes it sends: a credential is refused, and a MEDIUM finding needs a confirmation token tied to those exact bytes. /ship, /spec and Greptile replies post through it.
+- `gstack-codex-probe` subcommands: `select-model`, `check-auth`, `show-sandbox`, `check-sandbox`, `probe-model`, `check-version`, `show-first-use-notice`, `run-with-timeout`, `log-event`, `log-hang` and `help`.
+- `gstack-brain-sync --unskip-file <path>` and `--attention`. The `--status` JSON gains `held` (path, rule and fixes for each held file), `held_count`, `drainable`, `last_drain_at` and `last_push_at`.
+- Every /autoplan guard decision, allow or deny, is logged without content to `~/.gstack/analytics/autoplan-guard.jsonl` (the last 1,000 lines are kept).
+- `ship_greptile_early` config key (default `true`).
+
+#### Changed
+- CI runs Claude Code 2.1.292 (was 2.1.284). A daily `autoplan-schema-canary` installs the newest Claude Code release and fails when its hook payload and journal record disagree in a new way.
+- Question tuning, /plan-tune and brain saves pass your words through a file. /plan-tune once again records what you said when you tune a question.
+- Phase reports in /autoplan are published in their own message, before the next phase starts in a later one.
+
+#### Fixed
+- /autoplan's publication guard on Claude Code 2.1.29x, in the foreground and with `--bg`: the dropped `run_in_background` key, a current call not yet in the journal, journals over 32 MiB, and a background reviewer that finishes after the turn ended. (#3062, #3050)
+- The pre-push scan's false alarms on your own email and on emails already in the repo history. MEDIUM findings now name rule, file and line. (#3060)
+- Artifacts sync: one flagged file no longer blocks every push. Decision logs and their active snapshots are held together, so the remote never gets half of a pair. Every gstack writer to the sync repo shares one lock. A failed commit keeps the queue. Undecodable bytes can no longer pass the scanner as clean. The pre-commit hooks written by init and restore now catch `Bearer`/`Basic`/`Token`-prefixed JSON auth headers, like the drain does. (#3055)
+- The outside-review classifier reported reviews with severity words and no `[Pn]` tags as clean.
+- /context-restore picked an older checkpoint from a nested repo or a task worktree. (#3065)
+- Browse cookbook: the script mistakes that look like page bugs (non-serializable `evaluate` results, a top-level `return`, `pg.press`, empty DOM reads). (#3063, #3064)
+- `ship-measure report` no longer crashes on a measurement saved by v1.91.32.0; it lists that round as an older format to re-measure.
+- The paid shared-code cases recognize Claude Code 2.1.292's own internal git probe, which now disables every git hook by name, instead of reading it as an unguarded git call from the skill.
+- Credits in the v1.64.0.0 entry: the extension token fix (#1822) goes to @Mike-E-Log, and the polyfill `exited` promise (#1743) to @habassa5. (#3054)
+
+#### For contributors
+- The guard's reason codes, dispositions and anchors live in `autoplan/bin/guard-reasons.ts`. The journal reader is `lib/claude-owned-journal.ts` (two-pass, append-tolerant) over the shared extractor `lib/claude-journal-records.ts`, and `autoplan/bin/guard-journal.ts` holds the invocation window. A free test fails on any denial that advises a retry without naming what to do first.
+- New paid cases: `autoplan-guard-pty` (gate, haiku) and `autoplan-long-session` (periodic). `autoplan-schema-canary` runs daily from `evals-periodic.yml`, or on dispatch with `schema_canary_only: true`. `scripts/measure-journal-read.ts` and the dispatch-only `measure-journal-read.yml` record read latency and memory.
+- `gstack-post`, the probe subcommands and `gstack-greptile-early` are not supported on native Windows yet; their CLI tests are excluded from the curated Windows subset, and the in-process tests for `gstack-post`, Greptile detection and the doctor run there.
+- Thanks to @yolo-jared and @crblabs (#3062), @akmandhania (#3060), @v639dragoon (#3055), @tomg65 (#3063, #3064, #3065), @Mike-E-Log (#3054) and @dgrant (#3020).
+
+## [1.91.33.0] - 2026-10-06
+
+**A red eval case now gets one clear verdict from its measurement: meets, qualified, extend once, or fix.**
+**A weekly sweep measures main's flakiest gate cases before any ship hits them.**
+
+/ship already measured a red case alone before rerunning the gate, but every 8 out of 10 was "below target", even when both reds were a provider outage. Now the measurement follows one bar. 9/10 meets it. 8/10 meets it as qualified when every red is a proven provider error, judge noise at the threshold, or a model miss with a cited transcript line. 7/10, or an 8/10 that does not qualify, gets exactly one more batch on the identical tree and is decided once on all 20 trials. Anything else, and any timeout, hang, regression or known fixable cause, is a fix round. Separately, a new weekly workflow picks the gate cases that cost the gate's all-green chance the most and measures them on main, with a hard $150-a-week cap.
+
+### The numbers that matter
+
+The bar numbers are binomial for a case whose true per-trial pass rate is p (rule kind, 10 trials). The sweep numbers come from `bun run scripts/ship-measure.ts sweep --dry-run` against main's pass-rate history on 2026-10-06.
+
+| Case with true pass rate p | Clears the bar in one batch | Clears it with one extension (reds unqualified) | Clears it when every red qualifies |
+|---|---|---|---|
+| 0.95 (healthy) | 91.4% | 95.9% | 99.8% |
+| 0.90 | 73.6% | 80.4% | 97.2% |
+| 0.80 (flaky) | 37.6% | 40.8% | 75.3% |
+
+| Sweep, latest gate census | Value |
+|---|---|
+| Gate verdicts in the census | 106 |
+| Predicted all-green probability from history | 30.7% |
+| Cases flagged (top 5 by cost to that probability) | 87% to 91% per-trial pass rate each |
+| Estimated cost to measure all 5 at 10 trials | about $76, under the $150 weekly cap |
+
+A healthy 95% case used to be sent to a pointless fix round 8.6% of the time; with one extension that drops to 4.1%, while a flaky 80% case still fails the bar about 60% of the time.
+
+### What this means for you
+
+When /ship's measure loop prints needs-classify, read the listed reds and record each one with `ship-measure classify`; it decides for you. A hand-picked "provider" label is refused unless the trial's own failure cause shows a provider or transport error. The weekly sweep report (artifact `ship-measure-sweep-report`, also the job summary) lists each flagged case with its decision, cost and captures, ready for an agent to fix.
+
+### Itemized changes
+
+#### Added
+- `ship-measure classify`, `decide` and `extend`, and exit codes 5 (needs-classify) and 6 (EXTEND). EXTEND refuses to pool when any input changed (working tree, runner, Claude CLI, model, CI image, Bun, eval policy or harness version) and names the field; there is never a third batch.
+- Void batches: more than 30% of trials failing on provider evidence voids a batch, which is redispatched once; both batches are reported.
+- `ship-measure sweep` and `.github/workflows/eval-sweep.yml` (Mondays 12:00 UTC and on dispatch with `k`, `cap_usd` and `dry_run`). Config keys `ship_measure_sweep_cases` (5) and `ship_measure_sweep_budget_usd` (150, per 7 days, shared with every sweep that week). The workflow only reads; it never pushes or opens a pull request.
+
+#### Changed
+- Behavior cases are decided on the trial count over 12 (11 meets, 10 qualified, 9 extends; 22 and 20 of 24 pooled) instead of also requiring every panel to pass on its own; a contract violation still sends the case to a fix round at any count.
+- The `ship-measure report` table shows each round's decision and batches, and lists qualified results under their own heading.
+
+#### Fixed
+- `ship-measure measure` no longer refuses a case that shares its test file with other cases (for example `ship-exploratory-late-input`): the no-cost selection check before the first paid trial now accepts the per-case trial shard such a case lists.
+- `ship-measure measure` runs cases that keep native evidence (functional QA, docs faults) outside CI: each trial gets its own `EVALS_RUN_ID`, where before every trial stopped at "requires EVALS_RUN_ID" without starting a session.
+- The `plan-mode-no-op` gate case no longer times out on large pull requests: its CEO review reads a fixed small plan instead of the branch diff.
+
+#### For contributors
+- The bar is one pure module, `scripts/lib/measure-bar.ts`, pinned by `test/ship-measure-bar.test.ts`; the sweep is `scripts/ship-measure-sweep.ts`, pinned by `test/ship-measure-sweep.test.ts` and `test/eval-sweep-workflow.test.ts`. `eval:pass-rates` history loading is now `loadPassRateHistory()` in `scripts/eval-flake-rank.ts`, shared with the sweep.
+- Diagnostic trials still never become verdicts and never enter pass-rate history or EVAL_POLICY pooling. See `docs/TESTING_INTERNALS.md#ship-measure` and `#ship-measure-sweep`.
+
 ## [1.91.32.0] - 2026-10-06
 
 **Codex second opinions work on macOS again, and text from a PR or reviewer can no longer run as a shell command.**
@@ -3055,7 +3301,7 @@ generation works again. Update gstack and the wave is yours.
   never enters the transcript.
 - The extension denies token/port reads to content scripts and foreign
   extensions, reimplemented for the v1.63 pinned-origin token model.
-  Contributed by @punksterlabs.
+  Contributed by @Mike-E-Log (#1822).
 - diff 9.0.0 (GHSA-73rr-hh4g-fpgx, @genisis0x); OpenAI key file written
   0600-at-create (@bunlongheng); injection-denylist and phone-pattern
   false positives calibrated (@Masashi-Ono0611, @JonasFocus, @abkrim).
@@ -3103,7 +3349,7 @@ generation works again. Update gstack and the wave is yours.
 - All three plan-tune hooks spawn their bins through a shared
   Windows-aware helper (@rafassousa); setup registers the SessionStart
   hook with a bash prefix (@NikhileshNanduri); BROWSE_BIN gets its .exe
-  (@rroojrooj); the polyfill exposes an exited promise (@punksterlabs)
+  (@rroojrooj); the polyfill exposes an exited promise (@habassa5)
   and the CJK terminal issues are gone (double-send fixed by
   @mindsurf0176, full-width font cells by @tomfluff).
 - New Windows regression tests run on windows-latest CI, not just as
