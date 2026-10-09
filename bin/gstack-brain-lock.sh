@@ -24,16 +24,16 @@
 #     Removes the lock only when this process took it and still owns it.
 #
 # The lock is a directory (mkdir is atomic on every POSIX filesystem; flock(1)
-# is not on macOS) holding `pid` and `owner`. A lock whose pid is dead is
-# stale and is cleared. A lock directory with no pid file is a holder killed
-# between mkdir and the pid write once it is older than 10 minutes.
+# is not on macOS) holding `pid` and `owner`. A lock whose pid is confirmed
+# absent is stale and is cleared. A directory with no pid file has ambiguous
+# ownership and is kept; age alone does not prove its creator is gone.
 
 _GSTACK_BRAIN_LOCK_DIR=""
 _GSTACK_BRAIN_LOCK_MINE=0
 _GSTACK_BRAIN_LOCK_HOLDER=""
 
 _gstack_brain_lock_try_once() {
-  local dir="$1" pid
+  local dir="$1" pid ps_pid
   if mkdir "$dir" 2>/dev/null; then
     GSTACK_BRAIN_LOCK_TOKEN="$$-${RANDOM:-0}-$(date +%s 2>/dev/null || echo 0)"
     export GSTACK_BRAIN_LOCK_TOKEN
@@ -47,7 +47,12 @@ _gstack_brain_lock_try_once() {
     _GSTACK_BRAIN_LOCK_HOLDER="$pid"
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$pid" 2>/dev/null && return 1
-  elif [ -z "$(find "$dir" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+    # kill -0 can also fail for a live but inaccessible PID. Confirm the PID
+    # is absent before treating the lock as abandoned; if ps cannot answer,
+    # preserve the lock and fail closed.
+    ps_pid=$(ps -p "$pid" -o pid= 2>/dev/null) || return 1
+    [ -z "$ps_pid" ] || return 1
+  else
     _GSTACK_BRAIN_LOCK_HOLDER=""
     return 1
   fi

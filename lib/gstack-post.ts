@@ -15,16 +15,16 @@
  */
 import { createHash } from "crypto";
 import { scan, type Finding, type RepoVisibility } from "./redact-engine";
-import { canonicalRemote } from "./remote-identity";
 
 export const OPS = ["pr-comment", "issue-comment", "reply", "pr-title", "pr-body", "pr-create", "issue-create"] as const;
 export type Op = (typeof OPS)[number];
 export type HostKind = "github" | "gitlab";
 
 export interface RunResult { status: number; stdout: string; stderr: string }
+export type RouteEnv = Readonly<Record<string, string | undefined>>;
 export interface PostEnv {
-  /** Runs `cmd` with an argv array (no shell). `input` goes to stdin. */
-  run(cmd: string, args: string[], input?: string): RunResult;
+  /** Runs `cmd` with argv (no shell), stdin bytes and an optional child-only env patch. */
+  run(cmd: string, args: string[], input?: string, routeEnv?: RouteEnv): RunResult;
   readFile(path: string): string;
   out(text: string): void;
   err(text: string): void;
@@ -119,32 +119,128 @@ function parseArgs(argv: string[]): Request {
 
 interface Remote { host: string; segments: string[]; kind: HostKind }
 
-function hostedId(url: string) {
-  const id = canonicalRemote(url.trim());
-  return id.hosted && id.segments.length >= 2 ? { host: id.canonical.split("/")[0]!, segments: id.segments } : undefined;
+function hostedId(value: string) {
+  const raw = value.trim();
+  if (!raw || /[\u0000-\u001f\u007f?#]/.test(raw)) return undefined;
+  let host = "";
+  let pathname = "";
+  const scheme = raw.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+  if (scheme) {
+    let url: URL;
+    try { url = new URL(raw); } catch { return undefined; }
+    const protocol = url.protocol.toLowerCase();
+    if (protocol !== "https:" && protocol !== "ssh:") return undefined;
+    if (url.search || url.hash || (url.port && !(protocol === "ssh:" && url.port === "22"))) return undefined;
+    host = url.hostname.toLowerCase();
+    pathname = url.pathname.replace(/^\//, "");
+  } else {
+    const scp = raw.match(/^(?:[^@/]+@)?([^/:]+):(.+)$/);
+    if (!scp) return undefined;
+    host = scp[1]!.toLowerCase();
+    pathname = scp[2]!;
+  }
+  if (!host || host.includes(":")) return undefined;
+  pathname = pathname.replace(/\/+$/, "").replace(/\.git$/i, "");
+  if (!pathname || pathname.includes("//")) return undefined;
+  const segments: string[] = [];
+  for (const encoded of pathname.split("/")) {
+    let segment: string;
+    try { segment = decodeURIComponent(encoded); } catch { return undefined; }
+    if (!segment || segment === "." || segment === ".." || /[\\/\u0000-\u001f\u007f]/.test(segment)) return undefined;
+    segments.push(segment);
+  }
+  return segments.length >= 2 ? { host, segments } : undefined;
+}
+
+function repoRef(remote: Remote): string {
+  return `${remote.host}/${remote.segments.join("/")}`;
+}
+
+function repoUrl(remote: Remote): string {
+  return `https://${remote.host}/${remote.segments.map(encodeURIComponent).join("/")}`;
+}
+
+function sameRemote(a: { host: string; segments: string[] }, b: { host: string; segments: string[] }): boolean {
+  return a.host.toLowerCase() === b.host.toLowerCase()
+    && a.segments.length === b.segments.length
+    && a.segments.every((segment, index) => segment.toLowerCase() === b.segments[index]!.toLowerCase());
+}
+
+/** Remove ambient provider routing and pin documented host settings to origin. */
+function routingEnv(remote: Remote): RouteEnv {
+  if (remote.kind === "github") return {
+    GH_HOST: remote.host,
+    GH_REPO: undefined,
+  };
+  return {
+    GITLAB_HOST: remote.host,
+    GITLAB_URI: undefined,
+    GL_HOST: undefined,
+    GITLAB_API_HOST: remote.host,
+    GLAB_API_PROTOCOL: "https",
+    // GitLab CI auto-login can ignore explicit host variables and route via
+    // CI_SERVER_FQDN when enabled; the helper must retain its origin binding.
+    GLAB_ENABLE_CI_AUTOLOGIN: "false",
+    API_PROTOCOL: undefined,
+    GITLAB_REPO: undefined,
+    GLAB_REPO: undefined,
+    GITLAB_HEAD_REPO: undefined,
+    GITLAB_SUBFOLDER: undefined,
+  };
+}
+
+function runHosted(env: PostEnv, remote: Remote, cmd: "gh" | "glab", args: string[], input?: string): RunResult {
+  return env.run(cmd, args, input, routingEnv(remote));
 }
 
 /**
- * The origin remote's host and path. A hostname that names neither GitHub nor
- * GitLab (an enterprise host, a proxy) is resolved by asking gh, then glab,
- * for the repository URL.
+ * `GITLAB_SUBFOLDER` is unset in hosted calls so per-host glab config can
+ * otherwise add an installation prefix to API requests. Read that effective
+ * setting through glab's host-scoped config lookup and refuse prefixes until
+ * the route can be bound explicitly.
+ */
+function verifyGitLabRoute(env: PostEnv, remote: Remote): void {
+  const config = runHosted(env, remote, "glab", ["config", "get", "subfolder", `--host=${remote.host}`]);
+  if (config.status !== 0) throw new UsageError(`cannot verify GitLab's configured API subfolder for ${remote.host}; refusing to post`);
+  const subfolder = config.stdout.trim().replace(/^\/+|\/+$/g, "");
+  if (subfolder) throw new UsageError(`GitLab host ${remote.host} has a configured API subfolder; gstack-post cannot bind that route safely and will not post`);
+}
+
+/**
+ * The origin remote's host and path. Custom hosts require an explicit provider
+ * or a provider query that is itself routed to this exact origin.
  */
 function resolveRemote(env: PostEnv, forced?: HostKind): Remote {
   const r = env.run("git", ["remote", "get-url", "origin"]);
   const origin = r.status === 0 ? hostedId(r.stdout) : undefined;
   if (!origin) throw new UsageError("cannot read a hosted origin remote (git remote get-url origin)");
-  const named: HostKind | undefined = origin.host.includes("github") ? "github" : origin.host.includes("gitlab") ? "gitlab" : undefined;
-  if (named && (!forced || forced === named)) return { ...origin, kind: named };
+  const named: HostKind | undefined = origin.host === "github.com" || origin.host.endsWith(".ghe.com")
+    ? "github"
+    : origin.host === "gitlab.com" ? "gitlab" : undefined;
+  if (named && forced && forced !== named) throw new UsageError(`--host ${forced} conflicts with origin host ${origin.host}`);
+  if (named) {
+    const remote = { ...origin, kind: named };
+    if (named === "gitlab") verifyGitLabRoute(env, remote);
+    return remote;
+  }
+  if (forced) {
+    const remote = { ...origin, kind: forced };
+    if (forced === "gitlab") verifyGitLabRoute(env, remote);
+    return remote;
+  }
   for (const kind of forced ? [forced] : (["github", "gitlab"] as const)) {
+    const probeRemote = { ...origin, kind };
+    if (kind === "gitlab") verifyGitLabRoute(env, probeRemote);
     const q = kind === "github"
-      ? env.run("gh", ["repo", "view", "--json", "url", "--jq", ".url"])
-      : env.run("glab", ["repo", "view", "--output", "json"]);
+      ? runHosted(env, probeRemote, "gh", ["repo", "view", repoRef(probeRemote), "--json", "url", "--jq", ".url"])
+      : runHosted(env, probeRemote, "glab", ["repo", "view", repoUrl(probeRemote), "--output", "json"]);
+    if (q.status !== 0) continue;
     let url = q.status === 0 ? q.stdout : "";
     if (kind === "gitlab" && url) { try { url = String(JSON.parse(url).web_url ?? ""); } catch { url = ""; } }
     const id = url ? hostedId(url) : undefined;
-    if (id) return { ...id, kind };
+    if (!id || !sameRemote(origin, id)) throw new UsageError(`${kind} resolved a repository other than origin ${repoRef({ ...origin, kind })}`);
+    return { ...origin, kind };
   }
-  if (forced) return { ...origin, kind: forced };
   throw new UsageError(`cannot tell whether ${origin.host} is GitHub or GitLab; pass --host github|gitlab`);
 }
 
@@ -177,7 +273,7 @@ function readText(env: PostEnv, file: string, what: "title" | "body"): string {
   return text;
 }
 
-function visibility(env: PostEnv, req: Request, kind: HostKind, configBin: string): RepoVisibility {
+function visibility(env: PostEnv, req: Request, remote: Remote, configBin: string): RepoVisibility {
   if (req.visibility) return req.visibility;
   const norm = (s: string) => {
     const v = s.trim().toLowerCase();
@@ -186,11 +282,11 @@ function visibility(env: PostEnv, req: Request, kind: HostKind, configBin: strin
   const cfg = env.run(configBin, ["get", "redact_repo_visibility"]);
   const fromConfig = cfg.status === 0 ? norm(cfg.stdout) : undefined;
   if (fromConfig) return fromConfig;
-  if (kind === "github") {
-    const gh = env.run("gh", ["repo", "view", "--json", "visibility", "--jq", ".visibility"]);
+  if (remote.kind === "github") {
+    const gh = runHosted(env, remote, "gh", ["repo", "view", repoRef(remote), "--json", "visibility", "--jq", ".visibility"]);
     return (gh.status === 0 && norm(gh.stdout)) || "unknown";
   }
-  const gl = env.run("glab", ["repo", "view", "--output", "json"]);
+  const gl = runHosted(env, remote, "glab", ["repo", "view", repoUrl(remote), "--output", "json"]);
   if (gl.status !== 0) return "unknown";
   try { return norm(String(JSON.parse(gl.stdout).visibility ?? "")) ?? "unknown"; } catch { return "unknown"; }
 }
@@ -218,63 +314,68 @@ export function confirmationToken(fields: Record<string, unknown>, parts: Array<
 }
 
 /** The argv that sends one operation; `stdin` carries the body where the CLI reads it from "-". */
-function command(kind: HostKind, op: Op, n: string | undefined, req: Request, title?: string, body?: string): { cmd: string; args: string[]; stdin?: string } {
-  if (kind === "github") {
+function command(remote: Remote, op: Op, n: string | undefined, req: Request, title?: string, body?: string): { cmd: "gh" | "glab"; args: string[]; stdin?: string } {
+  if (remote.kind === "github") {
+    const repo = repoRef(remote);
+    const apiRepo = remote.segments.map(encodeURIComponent).join("/");
     switch (op) {
-      case "pr-comment": return { cmd: "gh", args: ["pr", "comment", n!, "--body-file=-"], stdin: body };
-      case "issue-comment": return { cmd: "gh", args: ["issue", "comment", n!, "--body-file=-"], stdin: body };
-      case "reply": return { cmd: "gh", args: ["api", "--method=POST", `repos/{owner}/{repo}/pulls/${n}/comments/${req.to}/replies`, "--field=body=@-"], stdin: body };
-      case "pr-title": return { cmd: "gh", args: ["pr", "edit", n!, `--title=${title}`] };
-      case "pr-body": return { cmd: "gh", args: ["pr", "edit", n!, "--body-file=-"], stdin: body };
-      case "pr-create": return { cmd: "gh", args: ["pr", "create", `--base=${req.base}`, ...(req.head ? [`--head=${req.head}`] : []), `--title=${title}`, "--body-file=-", ...(req.draft ? ["--draft"] : [])], stdin: body };
-      case "issue-create": return { cmd: "gh", args: ["issue", "create", `--title=${title}`, "--body-file=-"], stdin: body };
+      case "pr-comment": return { cmd: "gh", args: ["pr", "comment", n!, "--body-file=-", "--repo", repo], stdin: body };
+      case "issue-comment": return { cmd: "gh", args: ["issue", "comment", n!, "--body-file=-", "--repo", repo], stdin: body };
+      case "reply": return { cmd: "gh", args: ["api", `--hostname=${remote.host}`, "--method=POST", `repos/${apiRepo}/pulls/${n}/comments/${req.to}/replies`, "--field=body=@-"], stdin: body };
+      case "pr-title": return { cmd: "gh", args: ["pr", "edit", n!, `--title=${title}`, "--repo", repo] };
+      case "pr-body": return { cmd: "gh", args: ["pr", "edit", n!, "--body-file=-", "--repo", repo], stdin: body };
+      case "pr-create": return { cmd: "gh", args: ["pr", "create", `--base=${req.base}`, ...(req.head ? [`--head=${req.head}`] : []), `--title=${title}`, "--body-file=-", ...(req.draft ? ["--draft"] : []), "--repo", repo], stdin: body };
+      case "issue-create": return { cmd: "gh", args: ["issue", "create", `--title=${title}`, "--body-file=-", "--repo", repo], stdin: body };
     }
   }
+  const repo = repoUrl(remote);
+  const inRepo = (args: string[]) => [...args, "--repo", repo];
   switch (op) {
-    case "pr-comment": return { cmd: "glab", args: ["mr", "note", n!, `--message=${body}`] };
-    case "issue-comment": return { cmd: "glab", args: ["issue", "note", n!, `--message=${body}`] };
-    case "pr-title": return { cmd: "glab", args: ["mr", "update", n!, `--title=${title}`] };
-    case "pr-body": return { cmd: "glab", args: ["mr", "update", n!, `--description=${body}`] };
-    case "pr-create": return { cmd: "glab", args: ["mr", "create", `--target-branch=${req.base}`, ...(req.head ? [`--source-branch=${req.head}`] : []), `--title=${title}`, `--description=${body}`, "--yes", ...(req.draft ? ["--draft"] : [])] };
-    case "issue-create": return { cmd: "glab", args: ["issue", "create", `--title=${title}`, `--description=${body}`, "--yes"] };
+    case "pr-comment": return { cmd: "glab", args: inRepo(["mr", "note", n!, `--message=${body}`]) };
+    case "issue-comment": return { cmd: "glab", args: inRepo(["issue", "note", n!, `--message=${body}`]) };
+    case "pr-title": return { cmd: "glab", args: inRepo(["mr", "update", n!, `--title=${title}`]) };
+    case "pr-body": return { cmd: "glab", args: inRepo(["mr", "update", n!, `--description=${body}`]) };
+    case "pr-create": return { cmd: "glab", args: inRepo(["mr", "create", `--target-branch=${req.base}`, ...(req.head ? [`--source-branch=${req.head}`] : []), `--title=${title}`, `--description=${body}`, "--yes", ...(req.draft ? ["--draft"] : [])]) };
+    case "issue-create": return { cmd: "glab", args: inRepo(["issue", "create", `--title=${title}`, `--description=${body}`, "--yes"]) };
     default: throw new UsageError(`${op} is not supported on GitLab`);
   }
 }
 
 /** `gh pr edit` can fail on the retired projectCards GraphQL field; the REST PATCH sends the same bytes. */
-function restEdit(op: Op, n: string, title?: string, body?: string) {
+function restEdit(remote: Remote, op: Op, n: string, title?: string, body?: string): { cmd: "gh"; args: string[]; stdin?: string } {
+  const apiRepo = remote.segments.map(encodeURIComponent).join("/");
   return op === "pr-title"
-    ? { cmd: "gh", args: ["api", "--method=PATCH", `repos/{owner}/{repo}/pulls/${n}`, `--raw-field=title=${title}`] }
-    : { cmd: "gh", args: ["api", "--method=PATCH", `repos/{owner}/{repo}/pulls/${n}`, "--field=body=@-", "--silent"], stdin: body };
+    ? { cmd: "gh", args: ["api", `--hostname=${remote.host}`, "--method=PATCH", `repos/${apiRepo}/pulls/${n}`, `--raw-field=title=${title}`] }
+    : { cmd: "gh", args: ["api", `--hostname=${remote.host}`, "--method=PATCH", `repos/${apiRepo}/pulls/${n}`, "--field=body=@-", "--silent"], stdin: body };
 }
 
-function readBackTitle(env: PostEnv, kind: HostKind, n: string): string | undefined {
-  const r = kind === "github"
-    ? env.run("gh", ["pr", "view", n, "--json", "title", "--jq", ".title"])
-    : env.run("glab", ["mr", "view", n, "--output", "json"]);
+function readBackTitle(env: PostEnv, remote: Remote, n: string): string | undefined {
+  const r = remote.kind === "github"
+    ? runHosted(env, remote, "gh", ["pr", "view", n, "--json", "title", "--jq", ".title", "--repo", repoRef(remote)])
+    : runHosted(env, remote, "glab", ["mr", "view", n, "--output", "json", "--repo", repoUrl(remote)]);
   if (r.status !== 0) return undefined;
-  if (kind === "github") return r.stdout.replace(/\r?\n$/, "");
+  if (remote.kind === "github") return r.stdout.replace(/\r?\n$/, "");
   try { return String(JSON.parse(r.stdout).title); } catch { return undefined; }
 }
 
-function send(env: PostEnv, kind: HostKind, req: Request, n: string | undefined, title?: string, body?: string): number {
-  let c = command(kind, req.op, n, req, title, body);
-  let r = env.run(c.cmd, c.args, c.stdin);
-  if (r.status !== 0 && kind === "github" && (req.op === "pr-title" || req.op === "pr-body") && /projectCards/.test(r.stderr)) {
-    c = restEdit(req.op, n!, title, body);
-    r = env.run(c.cmd, c.args, c.stdin);
+function send(env: PostEnv, remote: Remote, req: Request, n: string | undefined, title?: string, body?: string): number {
+  let c = command(remote, req.op, n, req, title, body);
+  let r = runHosted(env, remote, c.cmd, c.args, c.stdin);
+  if (r.status !== 0 && remote.kind === "github" && (req.op === "pr-title" || req.op === "pr-body") && /projectCards/.test(r.stderr)) {
+    c = restEdit(remote, req.op, n!, title, body);
+    r = runHosted(env, remote, c.cmd, c.args, c.stdin);
   }
   if (r.status !== 0) {
     env.err(`gstack-post: ${c.cmd} failed (exit ${r.status}); nothing more was sent.\n${r.stderr}`);
     return EXIT.cliFailed;
   }
   if (req.op === "pr-title") {
-    for (let attempt = 0; readBackTitle(env, kind, n!) !== title; attempt++) {
+    for (let attempt = 0; readBackTitle(env, remote, n!) !== title; attempt++) {
       if (attempt === 1) {
         env.err("gstack-post: the PR title still differs from the title file after one retry.\n");
         return EXIT.cliFailed;
       }
-      if (env.run(c.cmd, c.args, c.stdin).status !== 0) {
+      if (runHosted(env, remote, c.cmd, c.args, c.stdin).status !== 0) {
         env.err("gstack-post: retrying the title edit failed.\n");
         return EXIT.cliFailed;
       }
@@ -301,7 +402,7 @@ export function runPost(argv: string[], env: PostEnv, configBin = "gstack-config
     if (title !== undefined) parts.push(["title", title]);
     if (body !== undefined) parts.push(["body", body]);
 
-    const vis = visibility(env, req, remote.kind, configBin);
+    const vis = visibility(env, req, remote, configBin);
     const email = env.run("git", ["config", "user.email"]);
     const { found, oversize } = scanParts(parts, vis, email.status === 0 ? email.stdout.trim() || undefined : undefined);
     env.out(`REPO_VISIBILITY: ${vis}\n`);
@@ -329,7 +430,7 @@ export function runPost(argv: string[], env: PostEnv, configBin = "gstack-config
         return EXIT.confirm;
       }
     }
-    return send(env, remote.kind, req, n, title, body);
+    return send(env, remote, req, n, title, body);
   } catch (e) {
     if (!(e instanceof UsageError)) throw e;
     env.err(`gstack-post: ${e.message} (gstack-post --help shows usage)\n`);

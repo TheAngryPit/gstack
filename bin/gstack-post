@@ -17,13 +17,22 @@ import { spawnSync } from "child_process";
 import { runPost } from "../lib/gstack-post";
 
 const code = runPost(process.argv.slice(2), {
-  run(cmd, args, input) {
+  run(cmd, args, input, routeEnv) {
+    let childEnv: NodeJS.ProcessEnv | undefined;
+    if (routeEnv) {
+      childEnv = { ...process.env };
+      for (const [name, value] of Object.entries(routeEnv)) {
+        if (value === undefined) delete childEnv[name];
+        else childEnv[name] = value;
+      }
+    }
     const r = spawnSync(cmd, args, {
       input: input ?? "",
       encoding: "utf8",
       timeout: 120_000,
       maxBuffer: 16 * 1024 * 1024,
       stdio: ["pipe", "pipe", "pipe"],
+      ...(childEnv ? { env: childEnv } : {}),
     });
     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? (r.error ? String(r.error) : "") };
   },

@@ -66,6 +66,10 @@ Timeout, failed dispatch, or missing final output is review_not_run, never clean
 
   text = text.replaceAll('{{NATIVE_LABEL}}', 'Primary native reviewer')
     .replaceAll('Codex (in-host)', 'Primary native reviewer')
+    .replaceAll('Claude Code: set Agent `run_in_background: false` if its schema exposes it.',
+      "Codex: use the session's advertised native worker API; keep the task handle and await terminal completion before moving on.")
+    .replaceAll('Codex: set Agent `run_in_background: false` if its schema exposes it.',
+      "Codex: use the session's advertised native worker API; keep the task handle and await terminal completion before moving on.")
     .replace(/\*\*Primary native reviewer ([^\n]+) subagent\*\* \((?:via Agent tool|native tool)\):/g,
       '**Primary native reviewer $1 review** (advertised native fresh-context API):')
     .replaceAll(/Claude Code: set Agent `run_in_background: false` if its schema exposes it\.\n\s*Other hosts: foreground; await completion when supported\./g,

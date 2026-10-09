@@ -413,6 +413,15 @@ describe('scheduled paid lanes: concurrency and branch dispatch scope', () => {
     concurrency: { group: string; 'cancel-in-progress': boolean }; jobs: Record<string, { if?: string; steps: Step[] }> };
   const parse = (source: string) => Bun.YAML.parse(source) as Wf;
 
+  test('periodic paid jobs and the schema canary are fenced to the official repository', () => {
+    const wf = parse(periodicYml);
+    expect(wf.jobs['build-image']!.if).toBe("${{ github.repository == 'garrytan/gstack' }}");
+    expect(wf.jobs['schema-canary']!.if)
+      .toBe("${{ github.repository == 'garrytan/gstack' && (github.event.schedule == '30 7 * * *' || inputs.schema_canary_only) }}");
+    expect(wf.jobs['schema-canary']!.steps.find(step => step.name === 'Run autoplan-schema-canary on the latest Claude Code')?.env?.ANTHROPIC_API_KEY)
+      .toBe('${{ secrets.ANTHROPIC_API_KEY }}');
+  });
+
   test('periodic and marathon groups key on ref and event, so a branch or manual dispatch never cancels the scheduled main run', () => {
     for (const [name, source, prefix] of [['evals-periodic.yml', periodicYml, 'evals-periodic'], ['evals-marathon.yml', marathonYml, 'evals-marathon']] as const) {
       const { concurrency } = parse(source);

@@ -712,18 +712,14 @@ print("; ".join(parts))
 PYEOF
 }
 
-# Remove .git/index.lock when it is older than 10 minutes. Call only while
-# holding the drain lock: every gstack writer takes that lock before running
-# git here, so an old index lock is one a killed git process left behind.
-# Returns 1 when a younger index lock is present (a live git process).
+# A Git index lock does not identify its owner, so its age cannot prove the
+# process that created it is gone. Preserve it and fail closed; the operator
+# can inspect the process and repository before deciding how to recover it.
+# Returns 1 whenever an index lock is present.
 clear_stale_index_lock() {
   local idx="$GSTACK_HOME/.git/index.lock"
   [ -e "$idx" ] || return 0
-  [ -n "$(find "$idx" -maxdepth 0 -mmin +10 2>/dev/null)" ] || return 1
-  rm -f "$idx" 2>/dev/null || return 1
-  ST_NOTE="$ST_NOTE; removed a stale git index lock left by an interrupted git process"
-  echo "BRAIN_SYNC: removed a stale git index lock (older than 10 minutes)" >&2
-  return 0
+  return 1
 }
 
 # Stage the paths listed in $1 with `git add -f` (forces past .gitignore=*).
@@ -1070,14 +1066,13 @@ subcmd_once() {
   local n_stageable
   n_stageable=$(grep -c . "$paths_file" 2>/dev/null || true)
 
-  # Every add, reset and commit below needs the git index. The drain lock
-  # proves no other gstack writer is running git here, so an index lock older
-  # than 10 minutes is abandoned and is removed; a younger one is a live git
-  # process (the user's own), which the drain reports and waits out.
+  # Every add, reset and commit below needs the git index. The shared drain
+  # lock excludes other gstack writers but cannot identify a manual Git
+  # process, so any index lock is preserved and the queue waits for inspection.
   if ! clear_stale_index_lock; then
     ST_DRAINABLE=$n_stageable
-    write_status "error" "a git index lock ($GSTACK_HOME/.git/index.lock) younger than 10 minutes shows another git process running in the artifacts repo; queue kept, the next sync retries"
-    echo "BRAIN_SYNC: error: git index lock present; another git process is running in $GSTACK_HOME" >&2
+    write_status "error" "a git index lock ($GSTACK_HOME/.git/index.lock) is present and its owner cannot be verified; queue kept until the lock is inspected"
+    echo "BRAIN_SYNC: error: git index lock present and owner cannot be verified in $GSTACK_HOME" >&2
     exit 0
   fi
 

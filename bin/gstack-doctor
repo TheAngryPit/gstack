@@ -3,11 +3,11 @@
 #
 # Usage:
 #   gstack-doctor          print one row per check; spends nothing
-#   gstack-doctor --live   also run the paid Codex model probe (one short call)
+#   gstack-doctor --live   also run the paid outside-Codex-CLI model probe when applicable
 #
-# Rows: install root, state root, bun, hooks, codex, codex probe, artifacts
-# sync, browse bundle, claude code, session journal, guard log. Each row is
-# `ok`, `warn`, `not configured` or `fail`; a row that is not ok carries a fix
+# Rows: install root, state root, bun, hooks, optional outside Codex CLI, codex
+# probe, artifacts sync, browse bundle, claude code, session journal, guard log.
+# Each row is `ok`, `warn`, `not configured` or `fail`; a row that is not ok carries a fix
 # line, and every gstack helper in a fix line is an absolute path under this
 # install root. Exit 1 when any row is `fail`, 2 on a usage error, else 0.
 #
@@ -162,6 +162,13 @@ check_hooks() {
 check_codex() {
   local reviews probe="$BIN/gstack-codex-probe" sel rc model src
   CODEX_READY=0
+  if gstack_codex_native_session_marked; then
+    local cli_state live_note=""
+    if command -v codex >/dev/null 2>&1; then cli_state="optional external Codex CLI is present"; else cli_state="optional external Codex CLI is not detected"; fi
+    [ "$LIVE" -eq 0 ] || live_note="; --live model probe skipped"
+    row warn codex "Codex session markers present; native tool availability and reviewed coverage are unverified by shell doctor; $cli_state$live_note" ""
+    return
+  fi
   reviews=$("$BIN/gstack-config" get codex_reviews 2>/dev/null || echo enabled)
   if [ "$reviews" = disabled ]; then
     row "not configured" codex "codex_reviews disabled; $CODEX_FEATURES skip Codex" "$BIN/gstack-config set codex_reviews enabled"

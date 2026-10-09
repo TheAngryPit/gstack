@@ -30,6 +30,13 @@ gstack_codex_cache_read() {
   return 0
 }
 
+# A shell cannot inspect the native tools advertised to a Codex session. These
+# runtime markers select wording that says exactly that; they never prove a
+# reviewer, tool, or completed review is available.
+gstack_codex_native_session_marked() {
+  [ -n "${CODEX_SESSION_ID:-}" ] && [ -n "${CODEX_THREAD_ID:-}" ] && [ -n "${CODEX_VERSION:-}" ]
+}
+
 # gstack_codex_age_text SECONDS — "40s ago", "12m ago", "3h ago", "2d ago";
 # "age unknown" when SECONDS is empty.
 gstack_codex_age_text() {
@@ -60,6 +67,11 @@ gstack_codex_version() {
 gstack_codex_status_line() {
   _gcx_reviews=$("$1/bin/gstack-config" get codex_reviews 2>/dev/null || echo enabled)
   case "$_gcx_reviews" in enabled|disabled) ;; *) _gcx_reviews=unknown ;; esac
+  if gstack_codex_native_session_marked; then
+    if command -v codex >/dev/null 2>&1; then _gcx_optional_cli=present; else _gcx_optional_cli=not-detected; fi
+    printf 'Codex: session markers present; native tool availability and reviewed coverage are unverified by shell status; optional external Codex CLI %s; model probe skipped (codex_reviews=%s)\n' "$_gcx_optional_cli" "$_gcx_reviews"
+    return 0
+  fi
   if ! command -v codex >/dev/null 2>&1; then
     printf 'Codex: not installed (codex_reviews=%s; outside reviews in /review, /ship, /autoplan and /codex need it)\n' "$_gcx_reviews"
     return 0

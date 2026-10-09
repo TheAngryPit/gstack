@@ -41,6 +41,7 @@ env:
 
 jobs:
   image:
+    if: ${{ github.repository == 'garrytan/gstack' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -82,6 +83,7 @@ jobs:
   sweep:
     runs-on: ubicloud-standard-16
     needs: image
+    if: ${{ github.repository == 'garrytan/gstack' }}
     timeout-minutes: 240
     permissions:
       contents: read

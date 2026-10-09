@@ -186,6 +186,25 @@ describe('gstack-doctor', () => {
     expect(broken.status).toBe(1);
   });
 
+  test('native Codex session markers never stand in for native tools, reviews or a paid CLI probe', () => {
+    const f = makeFixture();
+    const r = doctor(f, ['--live'], { CODEX_SESSION_ID: 'session-fixture', CODEX_THREAD_ID: 'thread-fixture', CODEX_VERSION: 'fixture' });
+    expect(r.row('codex').state).toBe('warn');
+    expect(r.row('codex').detail).toContain('native tool availability and reviewed coverage are unverified');
+    expect(r.row('codex').detail).toContain('--live model probe skipped');
+    expect(r.out).not.toContain('npm install -g @openai/codex');
+    expect(r.out).not.toContain('GSTACK_CODEX_MODEL=');
+    expect(probeCalls(f)).not.toContain('probe-model');
+  });
+
+  test('a partial marker or CODEX_MODE hint alone preserves ordinary CLI readiness behavior', () => {
+    const f = makeFixture();
+    const r = doctor(f, [], { CODEX_THREAD_ID: 'thread-fixture', CODEX_MODE: 'ready' });
+    expect(r.row('codex').state).toBe('ok');
+    expect(r.row('codex').detail).toContain('self-locate ok');
+    expect(r.row('codex').detail).not.toContain('native tool availability');
+  });
+
   test('the cached probe is reported with its age; only --live runs probe-model', () => {
     const f = makeFixture();
     const now = Math.floor(Date.now() / 1000);
@@ -338,6 +357,17 @@ describe('./setup --status Codex row', () => {
     const r = status(f);
     expect(r.stdout).toContain('Codex: not installed (codex_reviews=disabled;');
     expect(fs.readdirSync(f.state).sort()).toEqual(before);
+  });
+
+  test('native session markers report unverified native coverage and skip external model probing', () => {
+    const f = makeFixture();
+    const r = spawnSync('bash', [path.join(f.root, 'setup'), '--status'], {
+      cwd: f.work, encoding: 'utf8', env: { ...f.env, CODEX_SESSION_ID: 'session-fixture', CODEX_THREAD_ID: 'thread-fixture', CODEX_VERSION: 'fixture' }, timeout: 60_000,
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('native tool availability and reviewed coverage are unverified by shell status');
+    expect(r.stdout).toContain('model probe skipped');
+    expect(probeCalls(f)).toBe('');
   });
 });
 

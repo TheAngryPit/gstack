@@ -47,7 +47,13 @@ describe('original source to native obligations', () => {
 
   test('all pinned upstream inputs remain present and every other-host adapter is identity', () => {
     expect(ORIGINAL).toMatch(/^[0-9a-f]{40}$/);
-    git('merge-base', '--is-ancestor', ORIGINAL, 'HEAD');
+    // During pre-commit parity validation, the exact upstream pin is the active
+    // merge target. Once committed, it must instead be reachable from HEAD.
+    // In either state the manifest's immutable commit must be in the checked
+    // source history; a VERSION-only match is not enough.
+    const inHead = Bun.spawnSync(['git', 'merge-base', '--is-ancestor', ORIGINAL, 'HEAD'], { cwd: root, timeout: 30_000 });
+    const inMerge = Bun.spawnSync(['git', 'merge-base', '--is-ancestor', ORIGINAL, 'MERGE_HEAD'], { cwd: root, timeout: 30_000 });
+    expect(inHead.exitCode === 0 || inMerge.exitCode === 0).toBe(true);
     expect(git('show', `${ORIGINAL}:VERSION`).trim()).toBe(JSON.parse(read('codex-parity.json')).upstream_version);
     expect(paths.length).toBeGreaterThan(0);
     expect(read('VERSION').trim()).toBe(JSON.parse(read('codex-parity.json')).upstream_version);

@@ -18,6 +18,15 @@ const sweep = workflow.jobs.sweep;
 const step = (name: string) => sweep.steps.find((s: any) => s.name === name);
 
 describe('eval-sweep.yml', () => {
+  test('paid image and sweep jobs run only in the upstream repository', () => {
+    const officialRepo = "${{ github.repository == 'garrytan/gstack' }}";
+    for (const name of ['image', 'sweep']) {
+      expect(workflow.jobs[name].if, `${name} must be fenced to the official repository`).toBe(officialRepo);
+    }
+    expect(workflow.jobs.sweep.steps.find((s: any) => s.name === 'Run the sweep').env.ANTHROPIC_API_KEY)
+      .toBe('${{ secrets.ANTHROPIC_API_KEY }}');
+  });
+
   test('runs weekly after the 06:00 UTC periodic census, plus dispatch with k, cap and dry-run inputs', () => {
     expect(Object.keys(workflow.on).sort()).toEqual(['schedule', 'workflow_dispatch']);
     const [hour] = /cron: '0 (\d+) \* \* 1'/.exec(source)!.slice(1).map(Number);

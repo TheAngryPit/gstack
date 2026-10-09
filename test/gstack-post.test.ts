@@ -7,9 +7,9 @@
  * the real executable against stub gh/glab on POSIX.
  */
 import { describe, expect, test } from "bun:test";
-import { EXIT, runPost, type PostEnv } from "../lib/gstack-post";
+import { EXIT, runPost, type PostEnv, type RouteEnv } from "../lib/gstack-post";
 
-interface Call { cmd: string; args: string[]; input?: string }
+interface Call { cmd: string; args: string[]; input?: string; routeEnv?: RouteEnv }
 
 function fakeEnv(opts: {
   remote?: string;
@@ -23,8 +23,8 @@ function fakeEnv(opts: {
   const err: string[] = [];
   let title = "";
   const env: PostEnv = {
-    run(cmd, args, input) {
-      const call = { cmd, args, input };
+    run(cmd, args, input, routeEnv) {
+      const call = { cmd, args, input, routeEnv };
       calls.push(call);
       const custom = opts.respond?.(call);
       if (custom) return { stdout: "", stderr: "", ...custom };
@@ -46,8 +46,10 @@ function fakeEnv(opts: {
     out: t => { out.push(t); },
     err: t => { err.push(t); },
   };
-  const posts = () => calls.filter(c => (c.cmd === "gh" || c.cmd === "glab") && !(c.args[0] === "repo" || c.args[1] === "view"));
-  return { env, calls, posts, stdout: () => out.join(""), stderr: () => err.join("") };
+  const hostedCalls = () => calls.filter(c => c.cmd === "gh" || c.cmd === "glab");
+  const posts = () => hostedCalls().filter(c => !(c.args[0] === "repo" || c.args[0] === "config" || c.args[1] === "view"))
+    .map(({ cmd, args, input }) => ({ cmd, args, input }));
+  return { env, calls, posts, hostedCalls, stdout: () => out.join(""), stderr: () => err.join("") };
 }
 
 const run = (argv: string[], f: ReturnType<typeof fakeEnv>) => runPost(argv, f.env, "cfg");
@@ -59,32 +61,82 @@ describe("gstack-post posts through argv, never a shell string", () => {
     const body = "Fixed in `abc123`. $(touch pwned) \"quoted\" and 'single'\n";
     const f = fakeEnv({ files: { "/b": body } });
     expect(run(["pr-comment", "12", "--body-file", "/b"], f)).toBe(EXIT.posted);
-    expect(f.posts()).toEqual([{ cmd: "gh", args: ["pr", "comment", "12", "--body-file=-"], input: body }]);
+    expect(f.posts()).toEqual([{ cmd: "gh", args: ["pr", "comment", "12", "--body-file=-", "--repo", "github.com/acme/widget"], input: body }]);
     expect(f.stdout()).toContain("POSTED: pr-comment 12");
   });
 
   test("a title of --repo evil/x is posted as text, in --title=<value> form", () => {
     const f = fakeEnv({ files: { "/t": "--repo evil/x\n" } });
     expect(run(["pr-title", "7", "--title-file", "/t"], f)).toBe(EXIT.posted);
-    expect(f.posts()[0]).toEqual({ cmd: "gh", args: ["pr", "edit", "7", "--title=--repo evil/x"], input: undefined });
+    expect(f.posts()[0]).toEqual({ cmd: "gh", args: ["pr", "edit", "7", "--title=--repo evil/x", "--repo", "github.com/acme/widget"], input: undefined });
     const g = fakeEnv({ files: { "/t": "--repo evil/x", "/b": "body" } });
     expect(run(["pr-create", "--base", "main", "--draft", "--title-file", "/t", "--body-file", "/b"], g)).toBe(EXIT.posted);
-    expect(g.posts()[0]!.args).toEqual(["pr", "create", "--base=main", "--title=--repo evil/x", "--body-file=-", "--draft"]);
+    expect(g.posts()[0]!.args).toEqual(["pr", "create", "--base=main", "--title=--repo evil/x", "--body-file=-", "--draft", "--repo", "github.com/acme/widget"]);
   });
 
   test("every operation's GitHub and GitLab argv", () => {
     const files = { "/t": "v1.2.3 fix: title", "/b": "line one\nline two" };
     const gh = (argv: string[]) => { const f = fakeEnv({ files }); expect(run(argv, f)).toBe(0); return f.posts()[0]!; };
-    expect(gh(["issue-comment", "3", "--body-file", "/b"]).args).toEqual(["issue", "comment", "3", "--body-file=-"]);
-    expect(gh(["reply", "4", "--to", "991", "--body-file", "/b"]).args).toEqual(["api", "--method=POST", "repos/{owner}/{repo}/pulls/4/comments/991/replies", "--field=body=@-"]);
-    expect(gh(["pr-body", "5", "--body-file", "/b"])).toEqual({ cmd: "gh", args: ["pr", "edit", "5", "--body-file=-"], input: files["/b"] });
-    expect(gh(["issue-create", "--title-file", "/t", "--body-file", "/b"]).args).toEqual(["issue", "create", "--title=v1.2.3 fix: title", "--body-file=-"]);
+    expect(gh(["issue-comment", "3", "--body-file", "/b"]).args).toEqual(["issue", "comment", "3", "--body-file=-", "--repo", "github.com/acme/widget"]);
+    expect(gh(["reply", "4", "--to", "991", "--body-file", "/b"]).args).toEqual(["api", "--hostname=github.com", "--method=POST", "repos/acme/widget/pulls/4/comments/991/replies", "--field=body=@-"]);
+    expect(gh(["pr-body", "5", "--body-file", "/b"])).toEqual({ cmd: "gh", args: ["pr", "edit", "5", "--body-file=-", "--repo", "github.com/acme/widget"], input: files["/b"] });
+    expect(gh(["issue-create", "--title-file", "/t", "--body-file", "/b"]).args).toEqual(["issue", "create", "--title=v1.2.3 fix: title", "--body-file=-", "--repo", "github.com/acme/widget"]);
     const gl = (argv: string[]) => { const f = fakeEnv({ files, remote: "https://gitlab.com/grp/sub/proj.git" }); expect(run(argv, f)).toBe(0); return f.posts()[0]!; };
-    expect(gl(["pr-comment", "8", "--body-file", "/b"]).args).toEqual(["mr", "note", "8", "--message=line one\nline two"]);
-    expect(gl(["pr-body", "8", "--body-file", "/b"]).args).toEqual(["mr", "update", "8", "--description=line one\nline two"]);
+    expect(gl(["pr-comment", "8", "--body-file", "/b"]).args).toEqual(["mr", "note", "8", "--message=line one\nline two", "--repo", "https://gitlab.com/grp/sub/proj"]);
+    expect(gl(["pr-body", "8", "--body-file", "/b"]).args).toEqual(["mr", "update", "8", "--description=line one\nline two", "--repo", "https://gitlab.com/grp/sub/proj"]);
     expect(gl(["pr-create", "--base", "main", "--title-file", "/t", "--body-file", "/b"]).args)
-      .toEqual(["mr", "create", "--target-branch=main", "--title=v1.2.3 fix: title", "--description=line one\nline two", "--yes"]);
-    expect(gl(["issue-create", "--title-file", "/t", "--body-file", "/b"]).args).toEqual(["issue", "create", "--title=v1.2.3 fix: title", "--description=line one\nline two", "--yes"]);
+      .toEqual(["mr", "create", "--target-branch=main", "--title=v1.2.3 fix: title", "--description=line one\nline two", "--yes", "--repo", "https://gitlab.com/grp/sub/proj"]);
+    expect(gl(["issue-create", "--title-file", "/t", "--body-file", "/b"]).args).toEqual(["issue", "create", "--title=v1.2.3 fix: title", "--description=line one\nline two", "--yes", "--repo", "https://gitlab.com/grp/sub/proj"]);
+  });
+
+  test("visibility lookups use the same explicit host and repository route as writes", () => {
+    const github = fakeEnv({ files: { "/b": "hi" }, respond: c => c.cmd === "cfg" ? { status: 1 } : undefined });
+    expect(run(["pr-comment", "1", "--body-file", "/b"], github)).toBe(EXIT.posted);
+    expect(github.hostedCalls()[0]!.args).toEqual(["repo", "view", "github.com/acme/widget", "--json", "visibility", "--jq", ".visibility"]);
+    expect(github.hostedCalls()[0]!.routeEnv).toMatchObject({ GH_HOST: "github.com", GH_REPO: undefined });
+
+    const gitlab = fakeEnv({
+      files: { "/b": "hi" }, remote: "https://gitlab.com/group/nested/project.git",
+      respond: c => c.cmd === "cfg" ? { status: 1 } : undefined,
+    });
+    expect(run(["pr-comment", "1", "--body-file", "/b"], gitlab)).toBe(EXIT.posted);
+    expect(gitlab.hostedCalls()[0]!.args).toEqual(["config", "get", "subfolder", "--host=gitlab.com"]);
+    expect(gitlab.hostedCalls()[0]!.routeEnv).toMatchObject({
+      GITLAB_HOST: "gitlab.com", GITLAB_API_HOST: "gitlab.com", GLAB_API_PROTOCOL: "https",
+      GLAB_ENABLE_CI_AUTOLOGIN: "false", GITLAB_SUBFOLDER: undefined,
+    });
+    const repoView = gitlab.hostedCalls().find(c => c.cmd === "glab" && c.args[0] === "repo" && c.args[1] === "view")!;
+    expect(repoView.args).toEqual(["repo", "view", "https://gitlab.com/group/nested/project", "--output", "json"]);
+    expect(repoView.routeEnv).toMatchObject({
+      GITLAB_HOST: "gitlab.com", GITLAB_API_HOST: "gitlab.com", GLAB_API_PROTOCOL: "https",
+      GLAB_ENABLE_CI_AUTOLOGIN: "false", GITLAB_URI: undefined, GL_HOST: undefined, API_PROTOCOL: undefined,
+      GITLAB_REPO: undefined, GLAB_REPO: undefined, GITLAB_HEAD_REPO: undefined,
+    });
+  });
+
+  test("a configured GitLab installation subfolder fails closed before visibility lookup or write", () => {
+    const f = fakeEnv({
+      files: { "/b": "hi" }, remote: "https://gitlab.example.internal/group/nested/project.git",
+      respond: c => c.cmd === "glab" && c.args[0] === "config" && c.args[1] === "get"
+        ? { status: 0, stdout: "apps/gitlab\n" }
+        : undefined,
+    });
+    expect(run(["pr-comment", "1", "--host", "gitlab", "--body-file", "/b"], f)).toBe(EXIT.usage);
+    expect(f.hostedCalls()).toHaveLength(1);
+    expect(f.hostedCalls()[0]!.args).toEqual(["config", "get", "subfolder", "--host=gitlab.example.internal"]);
+    expect(f.posts()).toEqual([]);
+    expect(f.stderr()).toContain("configured API subfolder");
+  });
+
+  test("a failed GitLab config lookup fails closed instead of assuming a root installation", () => {
+    const f = fakeEnv({
+      files: { "/b": "hi" }, remote: "https://gitlab.example.internal/group/project.git",
+      respond: c => c.cmd === "glab" && c.args[0] === "config" && c.args[1] === "get" ? { status: 1 } : undefined,
+    });
+    expect(run(["pr-comment", "1", "--host", "gitlab", "--body-file", "/b"], f)).toBe(EXIT.usage);
+    expect(f.hostedCalls()).toHaveLength(1);
+    expect(f.posts()).toEqual([]);
+    expect(f.stderr()).toContain("cannot verify GitLab's configured API subfolder");
   });
 
   test("a target is a number or a URL of this repository on the same host", () => {
@@ -132,7 +184,7 @@ describe("gstack-post owns the redaction scan", () => {
     expect(t).toMatch(/^[0-9a-f]{24}$/);
     const second = fakeEnv({ files, visibility: "public" });
     expect(run(["issue-comment", "9", "--body-file", "/b", "--confirm", t], second)).toBe(EXIT.posted);
-    expect(second.posts()).toEqual([{ cmd: "gh", args: ["issue", "comment", "9", "--body-file=-"], input: files["/b"] }]);
+    expect(second.posts()).toEqual([{ cmd: "gh", args: ["issue", "comment", "9", "--body-file=-", "--repo", "github.com/acme/widget"], input: files["/b"] }]);
   });
 
   test("changed bytes with the same rule and line need a new token", () => {
@@ -159,6 +211,17 @@ describe("gstack-post owns the redaction scan", () => {
     }
   });
 
+  test("a confirmation from a different enterprise origin is rejected", () => {
+    const files = { "/b": "Ping jane.roe@acme-corp.io about it." };
+    const first = fakeEnv({ files, remote: "https://git.example-a.internal/acme/widget.git" });
+    expect(run(["pr-comment", "9", "--host", "github", "--body-file", "/b"], first)).toBe(EXIT.confirm);
+    const old = token(first.stdout())!;
+    const second = fakeEnv({ files, remote: "https://git.example-b.internal/acme/widget.git" });
+    expect(run(["pr-comment", "9", "--host", "github", "--body-file", "/b", "--confirm", old], second)).toBe(EXIT.confirm);
+    expect(token(second.stdout())).not.toBe(old);
+    expect(second.posts()).toEqual([]);
+  });
+
   test("the title is scanned too, and the pusher's own email is not a finding", () => {
     const f = fakeEnv({ files: { "/t": "v1 fix for jane.roe@acme-corp.io", "/b": "body" } });
     expect(run(["pr-create", "--base", "main", "--title-file", "/t", "--body-file", "/b"], f)).toBe(EXIT.confirm);
@@ -178,7 +241,73 @@ describe("gstack-post reports CLI failures and repairs known edit failures", () 
   test("the projectCards GraphQL failure falls back to the REST PATCH with the same bytes", () => {
     const f = fakeEnv({ files: { "/b": "new body" }, respond: c => (c.args[1] === "edit" ? { status: 1, stderr: "GraphQL: repository.pullRequest.projectCards is deprecated" } : undefined) });
     expect(run(["pr-body", "6", "--body-file", "/b"], f)).toBe(EXIT.posted);
-    expect(f.posts().at(-1)).toEqual({ cmd: "gh", args: ["api", "--method=PATCH", "repos/{owner}/{repo}/pulls/6", "--field=body=@-", "--silent"], input: "new body" });
+    expect(f.posts().at(-1)).toEqual({ cmd: "gh", args: ["api", "--hostname=github.com", "--method=PATCH", "repos/acme/widget/pulls/6", "--field=body=@-", "--silent"], input: "new body" });
+  });
+
+  test("enterprise REST fallback, retry and readback stay pinned to the GitHub origin", () => {
+    let reads = 0;
+    const origin = "https://github.enterprise.internal/acme/widget";
+    const f = fakeEnv({
+      files: { "/b": "new body", "/t": "v2 feat: route safely" }, remote: `${origin}.git`,
+      respond: c => {
+        if (c.cmd === "gh" && c.args[0] === "pr" && c.args[1] === "edit") return { status: 1, stderr: "GraphQL: repository.pullRequest.projectCards is deprecated" };
+        if (c.cmd === "gh" && c.args[0] === "pr" && c.args[1] === "view") return { status: 0, stdout: reads++ === 0 ? "old\n" : "v2 feat: route safely\n" };
+        return undefined;
+      },
+    });
+    expect(run(["pr-body", "6", "--host", "github", "--body-file", "/b"], f)).toBe(EXIT.posted);
+    expect(run(["pr-title", "6", "--host", "github", "--title-file", "/t"], f)).toBe(EXIT.posted);
+    const hosted = f.hostedCalls();
+    const restCalls = hosted.filter(c => c.args[0] === "api" && c.args.includes("--method=PATCH"));
+    expect(restCalls).toHaveLength(3);
+    expect(restCalls[0]!.args).toEqual(["api", "--hostname=github.enterprise.internal", "--method=PATCH", "repos/acme/widget/pulls/6", "--field=body=@-", "--silent"]);
+    expect(restCalls[0]!.input).toBe("new body");
+    expect(restCalls.slice(1).every(c => c.args[3] === "repos/acme/widget/pulls/6" && c.args[4] === "--raw-field=title=v2 feat: route safely")).toBe(true);
+    expect(restCalls.slice(1).every(c => c.input === undefined)).toBe(true);
+    const titleEdits = hosted.filter(c => c.args[0] === "pr" && c.args[1] === "edit" && c.args.some(a => a.startsWith("--title=")));
+    const titleReads = hosted.filter(c => c.args[0] === "pr" && c.args[1] === "view");
+    expect(titleEdits).toHaveLength(1);
+    expect(titleReads).toHaveLength(2);
+    expect([...titleEdits, ...titleReads, ...restCalls].every(c => c.routeEnv?.GH_HOST === "github.enterprise.internal" && c.routeEnv.GH_REPO === undefined)).toBe(true);
+    expect(titleEdits.every(c => c.args.includes("github.enterprise.internal/acme/widget"))).toBe(true);
+    expect(titleReads.every(c => c.args.includes("github.enterprise.internal/acme/widget"))).toBe(true);
+  });
+
+  test("custom GitLab discovery binds the probe and rejects another returned repository", () => {
+    const origin = "https://git.example.internal/team/nested/project";
+    const accepted = fakeEnv({
+      files: { "/b": "hi" }, remote: `${origin}.git`,
+      respond: c => {
+        if (c.cmd === "gh" && c.args[0] === "repo") return { status: 1 };
+        if (c.cmd === "glab" && c.args[0] === "repo" && c.args[1] === "view") return { status: 0, stdout: JSON.stringify({ web_url: origin, visibility: "private" }) };
+        return undefined;
+      },
+    });
+    expect(run(["pr-comment", "4", "--body-file", "/b"], accepted)).toBe(EXIT.posted);
+    const probe = accepted.hostedCalls().find(c => c.cmd === "glab" && c.args[0] === "repo" && c.args[1] === "view")!;
+    expect(probe.args).toEqual(["repo", "view", origin, "--output", "json"]);
+    expect(probe.routeEnv?.GITLAB_HOST).toBe("git.example.internal");
+    expect(probe.routeEnv?.GITLAB_API_HOST).toBe("git.example.internal");
+    expect(accepted.posts().at(-1)!.args).toContain(origin);
+
+    const rejected = fakeEnv({
+      files: { "/b": "hi" }, remote: `${origin}.git`,
+      respond: c => {
+        if (c.cmd === "gh" && c.args[0] === "repo") return { status: 1 };
+        if (c.cmd === "glab" && c.args[0] === "repo" && c.args[1] === "view") return { status: 0, stdout: JSON.stringify({ web_url: "https://git.example.internal/other/repo" }) };
+        return undefined;
+      },
+    });
+    expect(run(["pr-comment", "4", "--body-file", "/b"], rejected)).toBe(EXIT.usage);
+    expect(rejected.posts()).toEqual([]);
+    expect(rejected.stderr()).toContain("resolved a repository other than origin");
+  });
+
+  test("enterprise GitHub reply pins the API host and literal repository path", () => {
+    const f = fakeEnv({ files: { "/b": "reply" }, remote: "https://github.enterprise.internal/acme/widget.git" });
+    expect(run(["reply", "8", "--host", "github", "--to", "91", "--body-file", "/b"], f)).toBe(EXIT.posted);
+    expect(f.posts()[0]!.args).toEqual(["api", "--hostname=github.enterprise.internal", "--method=POST", "repos/acme/widget/pulls/8/comments/91/replies", "--field=body=@-"]);
+    expect(f.hostedCalls()[0]!.routeEnv).toMatchObject({ GH_HOST: "github.enterprise.internal", GH_REPO: undefined });
   });
 
   test("a title that does not read back is retried once, then reported", () => {
@@ -190,9 +319,29 @@ describe("gstack-post reports CLI failures and repairs known edit failures", () 
     expect(run(["pr-title", "2", "--title-file", "/t"], stuck)).toBe(EXIT.cliFailed);
   });
 
-  test("an unrecognized remote host asks gh for the repository URL", () => {
-    const f = fakeEnv({ files: { "/b": "hi" }, remote: "https://proxy.internal/acme/widget.git", respond: c => (c.args[0] === "repo" && c.cmd === "gh" ? { status: 0, stdout: "https://github.com/acme/widget\n" } : undefined) });
-    expect(run(["pr-comment", "https://github.com/acme/widget/pull/3", "--body-file", "/b"], f)).toBe(EXIT.posted);
-    expect(f.posts()[0]!.args.slice(0, 3)).toEqual(["pr", "comment", "3"]);
+  test("a custom-host provider probe cannot replace the origin with another repository", () => {
+    const f = fakeEnv({ files: { "/b": "hi" }, remote: "https://proxy.internal/acme/widget.git", respond: c => (c.args[0] === "repo" && c.cmd === "gh" ? { status: 0, stdout: "https://github.com/other/repo\n" } : undefined) });
+    expect(run(["pr-comment", "https://proxy.internal/acme/widget/pull/3", "--body-file", "/b"], f)).toBe(EXIT.usage);
+    expect(f.posts()).toEqual([]);
+  });
+
+  test("a custom-host probe and later GitHub write retain the exact origin", () => {
+    const origin = "https://github.enterprise.internal/acme/widget";
+    const f = fakeEnv({
+      files: { "/b": "hi" }, remote: `${origin}.git`,
+      respond: c => c.cmd === "gh" && c.args[0] === "repo" ? { status: 0, stdout: `${origin}\n` } : undefined,
+    });
+    expect(run(["pr-comment", "4", "--body-file", "/b"], f)).toBe(EXIT.posted);
+    expect(f.hostedCalls().map(c => c.args)).toEqual([
+      ["repo", "view", "github.enterprise.internal/acme/widget", "--json", "url", "--jq", ".url"],
+      ["pr", "comment", "4", "--body-file=-", "--repo", "github.enterprise.internal/acme/widget"],
+    ]);
+    expect(f.hostedCalls().every(c => c.routeEnv?.GH_HOST === "github.enterprise.internal" && c.routeEnv.GH_REPO === undefined)).toBe(true);
+  });
+
+  test("a provider flag cannot reinterpret a recognized public origin", () => {
+    const f = fakeEnv({ files: { "/b": "hi" } });
+    expect(run(["pr-comment", "4", "--host", "gitlab", "--body-file", "/b"], f)).toBe(EXIT.usage);
+    expect(f.posts()).toEqual([]);
   });
 });

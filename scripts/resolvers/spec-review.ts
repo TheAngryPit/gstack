@@ -204,8 +204,8 @@ export function generateSpecReviewLoop(_ctx: TemplateContext): string {
   if (_ctx.skillName === 'office-hours') {
     const officeHours = generateOfficeHoursSpecReviewLoop();
     if (_ctx.host !== 'codex') return officeHours;
-    const legacyDispatch = `Use the Agent tool with \`run_in_background: false\` and its returned \`dispatch\`
-string unchanged as the prompt. The reviewer must Read the entire prepared prompt
+    const legacyDispatch = `Use the Agent tool with ${FOREGROUND_IF_AVAILABLE} and its returned \`dispatch\`
+string unchanged as the prompt. ${BACKGROUND_RECOVERY} The reviewer must Read the entire prepared prompt
 file before reviewing the design. Do not recreate the prompt, copy selected fields,
 or summarize prior findings. A parent Read does not deliver the file to the reviewer.
 The reviewer has fresh context and cannot see the brainstorming conversation.

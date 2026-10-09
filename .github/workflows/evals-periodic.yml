@@ -62,6 +62,7 @@ env:
 
 jobs:
   build-image:
+    if: ${{ github.repository == 'garrytan/gstack' }}
     runs-on: ubicloud-standard-8
     timeout-minutes: 15
     permissions:
@@ -195,7 +196,7 @@ jobs:
   schema-canary:
     runs-on: ubicloud-standard-2
     needs: build-image
-    if: ${{ github.event.schedule == '30 7 * * *' || inputs.schema_canary_only }}
+    if: ${{ github.repository == 'garrytan/gstack' && (github.event.schedule == '30 7 * * *' || inputs.schema_canary_only) }}
     timeout-minutes: 20
     permissions:
       contents: read

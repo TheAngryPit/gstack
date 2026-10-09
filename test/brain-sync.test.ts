@@ -678,16 +678,30 @@ describe('gstack-brain-sync per-file hold', () => {
       expect(remoteFiles()).not.toContain(CLEAN);
     });
 
-    test('an index lock older than 10 minutes is cleared under the drain lock and the queue syncs', () => {
+    test('an old index lock is preserved because its owner cannot be proven dead', () => {
       init();
       write(CLEAN, '# a plan\n');
       fs.writeFileSync(indexLock(), '');
       age(indexLock(), 11 * 60_000);
       expect(drain().status).toBe(0);
-      expect(fs.existsSync(indexLock())).toBe(false);
-      expect(statusJson().status).toBe('ok');
-      expect(statusJson().message).toContain('stale git index lock');
-      expect(remoteFiles()).toContain(CLEAN);
+      expect(fs.existsSync(indexLock())).toBe(true);
+      expect(statusJson().status).toBe('error');
+      expect(statusJson().message).toContain('owner cannot be verified');
+      expect(spoolText()).toContain(CLEAN);
+      expect(remoteFiles()).not.toContain(CLEAN);
+    });
+
+    test('an old lock directory without an owner PID is preserved', () => {
+      init();
+      write(CLEAN, '# a plan\n');
+      const lockDir = path.join(tmpHome, '.brain-sync.lock.d');
+      fs.mkdirSync(lockDir);
+      age(lockDir, 60 * 60_000);
+      expect(drain().status).toBe(0);
+      expect(fs.existsSync(lockDir)).toBe(true);
+      expect(fs.existsSync(path.join(lockDir, 'pid'))).toBe(false);
+      expect(spoolText()).toContain(CLEAN);
+      expect(remoteFiles()).not.toContain(CLEAN);
     });
 
     test('an old index lock while another writer holds the drain lock is left alone', () => {
