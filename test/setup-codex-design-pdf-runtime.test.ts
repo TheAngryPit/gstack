@@ -54,6 +54,11 @@ function makeSource(sandbox: string): string {
   }
   fs.mkdirSync(path.join(src, 'design', 'src'), { recursive: true });
   fs.writeFileSync(path.join(src, 'make-pdf', 'SKILL.md'), '---\nname: make-pdf\n---\n');
+  for (const skill of ['office-hours', 'plan-design-review']) {
+    const rendered = path.join(src, '.agents', 'skills', `gstack-${skill}`, 'SKILL.md');
+    fs.mkdirSync(path.dirname(rendered), { recursive: true });
+    fs.writeFileSync(rendered, `Codex render for ${skill} with $GSTACK_ROOT\n`);
+  }
   return src;
 }
 
@@ -85,19 +90,16 @@ const BUILDERS: Record<string, (sandbox: string, src: string) => Built> = {
     };
   },
   'agents sidecar': (sandbox, src) => {
-    const repo = path.join(sandbox, 'repo');
-    fs.mkdirSync(repo, { recursive: true });
-    spawnSync('git', ['init', '-q'], { cwd: repo, timeout: 30000 });
-    const rootDir = path.join(repo, '.agents', 'skills', 'gstack');
+    const rootDir = path.join(src, '.agents', 'skills', 'gstack');
     return {
-      script: `SOURCE_GSTACK_DIR="${src}"\ncreate_agents_sidecar "${repo}"`,
+      script: `SOURCE_GSTACK_DIR="${src}"\ncreate_agents_sidecar "${src}"`,
       rootDir,
-      preflight: { cwd: repo, env: rootEnv(sandbox, rootDir) },
+      preflight: { cwd: src, env: rootEnv(sandbox, rootDir) },
     };
   },
 };
 
-const FUNCTIONS = ['_link_or_copy', '_link_runtime_dists', '_copy_skill_md', '_sidecar_root_user_owned', '_gstack_generated_header', 'create_agents_sidecar', 'create_codex_runtime_root']
+const FUNCTIONS = ['_link_or_copy', '_link_runtime_dists', '_copy_runtime_skill_refs', '_copy_skill_md', '_sidecar_root_user_owned', '_gstack_generated_header', 'create_agents_sidecar', 'create_codex_runtime_root']
   .filter(name => SETUP_SRC.includes(`\n${name}() {`))
   .map(extractFunction)
   .join('\n');
@@ -118,6 +120,14 @@ describe.skipIf(process.platform === 'win32')('setup: Codex roots expose design 
           expect(fs.lstatSync(path.join(built.rootDir, 'design', 'dist')).isSymbolicLink()).toBe(isWindows === '0');
           expect(fs.existsSync(path.join(built.rootDir, 'make-pdf', 'SKILL.md'))).toBe(false);
           expect(fs.existsSync(path.join(built.rootDir, 'design', 'src'))).toBe(false);
+          if (name === 'agents sidecar') {
+            for (const skill of ['office-hours', 'plan-design-review']) {
+              const copied = path.join(built.rootDir, skill, 'SKILL.md');
+              expect(fs.existsSync(copied)).toBe(true);
+              expect(fs.lstatSync(copied).isSymbolicLink()).toBe(false);
+              expect(fs.readFileSync(copied, 'utf8')).toBe(`Codex render for ${skill} with $GSTACK_ROOT\n`);
+            }
+          }
 
           const d = run(DESIGN_PREFLIGHT, built.preflight);
           expect(d.stdout).toContain('DESIGN_READY:');

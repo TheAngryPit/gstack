@@ -145,7 +145,7 @@ describe('CI workflow clarity regressions', () => {
         expect(source).not.toContain('under_current_harness');
         continue;
       }
-      const mode = 'under_codex';
+      const mode = 'under_current_harness';
       expect([...new Set(source.match(/under_codex|under_current_harness/g))]).toEqual([mode]);
       expect(source).toMatch(/SOURCE=in-host, OUTSIDE_STATUS=unavailable, and STATUS=clean or issues_found/);
       expect(source).not.toContain('Sections 1-10/11 and current report');
@@ -662,7 +662,7 @@ describe('outside-voice commitment queue', () => {
         continue;
       }
       const provider = 'Codex';
-      const mismatch = host.name === 'codex' ? 'under_current_harness' : 'under_codex';
+      const mismatch = 'under_current_harness';
       // B1: the heading also admits `unverified`.
       expect(eng).toContain('**If `CODEX_MODE: ready`');
       expect(eng).toContain(`— run ${provider}:**`);
@@ -681,7 +681,7 @@ describe('outside-voice commitment queue', () => {
         expect(eng).not.toContain('codex exec');
       } else {
         expect(eng).toContain('codex exec');
-        expect(eng).toMatch(/then follow \*\*Native fallback\*\*/i);
+        expect(eng).toContain('_CODEX_OUT=$("$_CODEX_PROBE" role-ready exec) || exit $?');
       }
     }
   });

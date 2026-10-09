@@ -144,24 +144,24 @@ describe('own-harness review fallback instructions', () => {
           expect(text).toContain('Only dispatch the native reviewer when the block reports');
           expect(text).not.toMatch(/under_codex|under_current_harness/);
           expect(text).not.toContain('gstack-claude-code');
-        } else {
-          const mode = 'under_codex';
-          const preflight = text.match(/```bash\n([\s\S]*?)\n```/)![1];
-          expect(preflight).toContain(mode);
-          expect([...new Set(text.match(/under_codex|under_current_harness/g))]).toEqual([mode]);
-          expect(text.includes("retain the section's native pass if defined")).toBe(false);
-
-          const fallback = text.slice(text.indexOf('**Native fallback'), text.indexOf('Dispatch via the Agent tool'));
-          const ownHarnessBranch = `On \`CODEX_MODE: ${mode}\``;
-          expect(text.split(ownHarnessBranch)).toHaveLength(2);
-          expect(fallback).toContain(ownHarnessBranch);
-          expect(fallback).toContain('`outside_status: unavailable`');
-          expect(fallback).toContain('run no outside CLI');
-          expect(fallback).toContain('use the native subagent below');
-          expectMentions(fallback, [['never', 'supplies', 'coverage']], 'fallback');
-          expectMentions(fallback, [['never', 'disabled', 'fallback']], 'fallback');
-          expect(fallback).toContain('`CODEX_MODE: disabled`, finish this section with `outside_status: disabled`;');
+          continue;
         }
+        const mode = name === 'plan' ? 'under_current_harness' : 'under_codex';
+        const preflight = text.match(/```bash\n([\s\S]*?)\n```/)![1];
+        expect(preflight).toContain(mode);
+        expect([...new Set(text.match(/under_codex|under_current_harness/g))]).toEqual([mode]);
+        expect(text.includes("retain the section's native pass if defined")).toBe(false);
+
+        const fallback = text.slice(text.indexOf('**Native fallback'), text.indexOf('Dispatch via the Agent tool'));
+        const ownHarnessBranch = `On \`CODEX_MODE: ${mode}\``;
+        expect(text.split(ownHarnessBranch)).toHaveLength(2);
+        expect(fallback).toContain(ownHarnessBranch);
+        expect(fallback).toContain('`outside_status: unavailable`');
+        expect(fallback).toContain('run no outside CLI');
+        expect(fallback).toContain('use the native subagent below');
+        expectMentions(fallback, [['never', 'supplies', 'coverage']], 'fallback');
+        expectMentions(fallback, [['never', 'disabled', 'fallback']], 'fallback');
+        expect(fallback).toContain('`CODEX_MODE: disabled`, finish this section with `outside_status: disabled`;');
       });
     }
   }

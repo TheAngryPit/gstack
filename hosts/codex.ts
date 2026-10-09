@@ -39,15 +39,6 @@ const codex = defineHost({
     { from: 'CLAUDE.md', to: 'AGENTS.md' },
   ],
 
-  // Mirrors create_codex_runtime_root in setup. design/dist and make-pdf/dist
-  // back $GSTACK_DESIGN and $GSTACK_MAKE_PDF (#2891).
-  runtimeRoot: {
-    globalSymlinks: ['bin', 'lib', 'browse/dist', 'browse/bin', 'design/dist', 'make-pdf/dist', 'freeze/bin', 'careful/bin', 'gstack-upgrade', 'ETHOS.md'],
-    globalFiles: {
-      'review': ['checklist.md', 'design-checklist.md', 'greptile-triage.md', 'TODOS-format.md'],
-    },
-  },
-
   // Codex review adapters and Review Army dispatch use native bounded
   // contexts. GBrain remains suppressed until the generator validates the
   // explicit binding.
