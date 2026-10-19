@@ -52,6 +52,11 @@ const BUN_EXE = '.bun/bin/bun.exe';
 const ENTRY = '.bun/install/global/node_modules/gbrain/src/cli.ts';
 
 describe('setup-gbrain local stdio MCP registration', () => {
+  test('documents the Windows console workaround and the local PGLite single-writer readback caveat', () => {
+    expect(SKILL).toContain('On Windows (Git Bash/MSYS) the `gbrain.exe` binstub starts bun in a new');
+    expect(SKILL).toContain('If `mcp__gbrain__*` tools work in that session, the registration is');
+  });
+
   test('Windows (MINGW64): registers bun.exe with the gbrain entry, not the binstub', () => {
     const { home, argv } = register('MINGW64_NT-10.0-26100', [BUN_EXE, ENTRY]);
     expect(argv).toEqual(['mcp', 'add', '--scope', 'user', 'gbrain', '--', path.join(home, BUN_EXE), path.join(home, ENTRY), 'serve']);

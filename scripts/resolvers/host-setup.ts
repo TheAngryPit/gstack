@@ -10,7 +10,8 @@ export function generateSpecHostDispatch(ctx: TemplateContext): string {
 cd -- "\${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
 [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was spawned." >&2; exit 1; }
 SPAWN_PATH=$(pwd -P)
-cat "$ARCHIVE_PATH" | (cd "$SPAWN_PATH" && claude -p 2>&1) &
+CONTRACT=$(~/.claude/skills/gstack/bin/gstack-autoplan contract) || { echo "ERROR: gstack-autoplan contract failed; nothing was spawned." >&2; exit 1; }
+{ cat "$ARCHIVE_PATH"; printf '\\n\\n%s\\n' "$CONTRACT"; } | (cd "$SPAWN_PATH" && GSTACK_SESSION_KIND=spawned claude -p 2>&1) &
 SPAWN_PID=$!
 echo "Spawned: PID $SPAWN_PID in $SPAWN_PATH (branch $SPAWN_BRANCH)"
 echo "Follow with: cd $SPAWN_PATH && claude --resume"
@@ -31,6 +32,8 @@ If the worktree was created, dispatch an authorised native Codex worker
 using the tools actually advertised in this session. Use a fresh context
 (\`fork_turns: "none"\` where the native API supports it), the approved spec,
 exact worktree path/branch, bounded file ownership and verification criteria.
+Include the full coordinator contract above verbatim in the worker prompt as
+inherited lane data, after the approved spec.
 Preserve the selected model and effort. Tell the worker other agents may be
 editing the repository: preserve their changes and remain in its assigned worktree.
 Do not inherit unrelated conversation or invoke Claude. Do not create a new

@@ -48,9 +48,14 @@ if [ "claude" = claude ]; then
 fi
 GSTACK_STATE_ROOT=$("$GSTACK_BIN/gstack-paths" --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 SOURCE_DIR=""
-if [ "claude" = copilot ]; then
-  SOURCE_DIR="$(cat "$HOME/.copilot/skills/gstack/.source-path" 2>/dev/null || true)"
-fi
+case "claude" in
+  copilot)
+    SOURCE_DIR="$(cat "$HOME/.copilot/skills/gstack/.source-path" 2>/dev/null || true)"
+    ;;
+  agy)
+    SOURCE_DIR="$(cat "$HOME/.gemini/antigravity-cli/skills/gstack/.source-path" 2>/dev/null || true)"
+    ;;
+esac
 if [ -z "$SOURCE_DIR" ] && [ -f "$GSTACK_STATE_ROOT/installs.tsv" ]; then
   while IFS=$'\t' read -r _registry_host _registry_scope _registry_project _registry_dest _registry_root _registry_source _registry_version _registry_prefix _registry_render _registry_updated _registry_model _registry_commit; do
     [ "$_registry_host" = "claude" ] && [ "$_registry_source" != "-" ] || continue
@@ -116,6 +121,8 @@ local changes. Run the host's normal setup refresh only after its source update
 succeeds. For GitHub Copilot CLI, run `./setup --host copilot --refresh-registered`
 from the updated source checkout. The ordinary session
 updater continues to route other origins to its preserved legacy implementation.
+For Antigravity CLI, run `./setup --host agy --refresh-registered` from the
+updated source checkout.
 
 For “Always keep me up to date”, set auto_upgrade to true through the
 registered gstack-config, then continue with the approved candidate. For “Not

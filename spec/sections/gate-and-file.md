@@ -432,10 +432,6 @@ git worktree add "$SPAWN_PATH" -b "$SPAWN_BRANCH" "$PIN_SHA" 2>&1
 in-progress changes will be visible to the agent. Cancel with Ctrl+C if not
 desired." Then fall back to current dir (still spawn).
 
-If A and worktree created: spawn `claude -p` with the spec piped via stdin,
-followed by the coordinator contract every lane inherits word for word
-(`gstack-autoplan contract` prints exactly this block):
-
 ## Coordinator contract (inherited by every lane)
 
 Merge conditions. A lane's PR merges only when: the required gate lanes are green on the stamped tree or the tree receipt says `gate-reuse: eligible`; `gstack-lane-check` reports `clear` for its planned files against every other open lane; the PR body opens with the `gstack-ship-receipt` block; and the coordinator, not the lane, says merge. A lane never merges, rebases another lane, or force-pushes.
@@ -448,10 +444,12 @@ Before done. A lane pushes a WIP commit to its branch after each step and gates 
 
 Handoff format. A lane reports in this order, identifiers first: PR URL (or `no PR` with branch and SHA), `GSTACK_RESULT` line, the `gstack: ok|fail <rev>` line, the `PREGATE:` line, gate summary (lanes passed/failed/skipped), behavior changes (or `none`), spend (spent/reserved/unknown), then what it could not verify. Full thread ids (`jam_…`), never short codes, in every cross-thread message. Prose after the identifiers may be truncated; nothing before them may be.
 
+If A and worktree created: spawn `claude -p` with the spec piped via stdin:
+
 ```bash
 [ -r "${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was spawned." >&2; exit 1; }
 cd -- "${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
-{ _p=$(git rev-parse --show-prefix 2>/dev/null) && [ -z "$_p" ] && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; } || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was spawned." >&2; exit 1; }
+[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was spawned." >&2; exit 1; }
 SPAWN_PATH=$(pwd -P)
 CONTRACT=$(~/.claude/skills/gstack/bin/gstack-autoplan contract) || { echo "ERROR: gstack-autoplan contract failed; nothing was spawned." >&2; exit 1; }
 { cat "$ARCHIVE_PATH"; printf '\n\n%s\n' "$CONTRACT"; } | (cd "$SPAWN_PATH" && GSTACK_SESSION_KIND=spawned claude -p 2>&1) &

@@ -2921,7 +2921,7 @@ describe('Codex generation (--host codex)', () => {
       expect(fmEnd).toBeGreaterThan(0);
       const frontmatter = content.slice(4, fmEnd);
       // Must have name and description
-      expect(frontmatter).toContain('name:');
+      expect(frontmatter).toContain(`name: ${skill.codexName}`);
       expect(frontmatter).toContain('description:');
       // Must NOT have allowed-tools, version, or hooks
       expect(frontmatter).not.toContain('allowed-tools:');
@@ -2965,7 +2965,7 @@ describe('Codex generation (--host codex)', () => {
 
   test('Codex output includes the renamed Claude Code skill and restricted runner', () => {
     const content = readExternalSkillUnion(EXTERNAL_OUT, '.agents', 'claude-code');
-    expect(content).toContain('name: claude-code');
+    expect(content).toContain('name: gstack-claude-code');
     expect(content).toContain('gstack-claude-code');
     expect(content).toContain('--access none');
     expect(content).toContain('--access read-only');

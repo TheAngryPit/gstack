@@ -55,11 +55,19 @@ describe('/spec carries the rules inside the archived spec body', () => {
   });
 
   test('the --execute spawn sets GSTACK_SESSION_KIND=spawned on the claude -p line', () => {
-    for (const file of ['spec/sections/gate-and-file.md.tmpl', 'spec/sections/gate-and-file.md']) {
-      const spawn = read(file).split('\n').filter(line => line.includes('claude -p 2>&1'));
-      expect(spawn, `${file} spawn line`).toHaveLength(1);
-      expect(spawn[0]).toMatch(/GSTACK_SESSION_KIND=spawned claude -p/);
-    }
+    const template = read('spec/sections/gate-and-file.md.tmpl');
+    expect(template).toContain('{{SPEC_HOST_DISPATCH}}');
+    const dispatch = RESOLVERS.SPEC_HOST_DISPATCH({
+      skillName: 'spec',
+      tmplPath: 'spec/sections/gate-and-file.md.tmpl',
+      host: 'claude',
+      paths: { skillRoot: '~/.claude/skills/gstack' },
+    } as any);
+    const spawn = dispatch.split('\n').filter(line => line.includes('claude -p 2>&1'));
+    expect(spawn, 'resolved Claude dispatch spawn line').toHaveLength(1);
+    expect(spawn[0]).toMatch(/GSTACK_SESSION_KIND=spawned claude -p/);
+    expect(dispatch).toContain('gstack-autoplan contract) || {');
+    expect(read('spec/sections/gate-and-file.md')).toContain(spawn[0]);
   });
 });
 

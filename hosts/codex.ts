@@ -16,6 +16,10 @@ const codex = defineHost({
     keepFields: ['name', 'description'],
     descriptionLimit: 1024,
     descriptionLimitBehavior: 'error',
+    // Codex uses frontmatter name/description for skill discovery and `$name`
+    // invocation. Keep names aligned with the already-prefixed gstack-* paths
+    // so universal Agent Skills roots do not shadow these native adapters.
+    nameMatchesDirectory: true,
   },
 
   // generateMetadata emits agents/openai.yaml (the format is hardcoded in
