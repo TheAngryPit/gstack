@@ -54,8 +54,11 @@ test('minimal Codex runtime includes native lifecycle assets without Claude asse
   const linkDistsStart = setup.indexOf('_link_runtime_dists() {');
   const linkDistsEnd = setup.indexOf('\n}', linkDistsStart) + 2;
   const linkDists = setup.slice(linkDistsStart, linkDistsEnd);
+  const copyRuntimeSkillRefsStart = setup.indexOf('_copy_runtime_skill_refs() {');
+  const copyRuntimeSkillRefsEnd = setup.indexOf('\n}', copyRuntimeSkillRefsStart) + 2;
+  const copyRuntimeSkillRefs = setup.slice(copyRuntimeSkillRefsStart, copyRuntimeSkillRefsEnd);
   try {
-    const result = spawnSync(bash, ['-eu', '-c', `_link_or_copy() { ln -s "$1" "$2"; }\n${linkDists}\n${setup.slice(start, end)}\ncreate_codex_runtime_root "$1" "$2"`, 'fixture', source, target], {
+    const result = spawnSync(bash, ['-eu', '-c', `_link_or_copy() { ln -s "$1" "$2"; }\n${linkDists}\n${copyRuntimeSkillRefs}\n${setup.slice(start, end)}\ncreate_codex_runtime_root "$1" "$2"`, 'fixture', source, target], {
       encoding: 'utf8', env: { PATH: '/usr/bin:/bin', IS_WINDOWS: '0' }, timeout: 5000,
     });
     expect(result.status).toBe(0);

@@ -31,14 +31,21 @@ function tuning(document:string){
  return document.split('## Question Tuning (skip entirely if')[1]!.split('\n## ')[0]!;
 }
 function renderedCheck(host:string,id:string){
- const match=tuning(rendered.get(host)!).match(/`(printf '%s' "<question summary>" \| ([^`]+)\/gstack-question-preference --check "<id>" --summary-stdin)`/)!;
+ // Claude keeps the registered-ID command; native Codex passes the displayed
+ // summary on stdin so the one-way keyword check can also protect known IDs.
+ const pattern=host==='codex'
+  ? /`(printf '%s' "<question summary>" \| (\$GSTACK_BIN)\/gstack-question-preference --check "<id>" --summary-stdin)`/
+  : /`((~\/\.claude\/skills\/gstack\/bin)\/gstack-question-preference --check "<id>")`/;
+ const match=tuning(rendered.get(host)!).match(pattern);
  expect(match).not.toBeNull();
+ if(!match) throw new Error(`rendered ${host} preference command is missing`);
  expect(match[2]).toBe(host==='claude'?'~/.claude/skills/gstack/bin':'$GSTACK_BIN');
+ if(host==='claude') expect(tuning(rendered.get(host)!)).toContain('append `--summary-file .gstack/tmp/qt.txt`');
+ else expect(tuning(rendered.get(host)!)).toContain('--summary-stdin');
  const quote=(value:string)=>"'"+value.replace(/'/g,"'\\''")+"'";
  // Run the rendered command, substituting its documented fields and mapping
  // the host's installed executable location to this isolated checkout.
- return match[1]!.replace('<question summary>','Select the CEO review mode for the current plan.')
-  .replace('"<id>"',quote(id))
+ return match[1]!.replace('"<question summary>"','"Select CEO review mode."').replace('"<id>"',quote(id))
   .replace(match[2]!+'/gstack-question-preference',quote(path.join(root,'bin/gstack-question-preference')));
 }
 function checkWithPreference(host:string,preference?:string,writeId?:string){

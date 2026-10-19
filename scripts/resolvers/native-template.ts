@@ -52,28 +52,20 @@ export function adaptNativeTemplate(text: string, ctx: TemplateContext, source: 
   if (ctx.skillName === 'autoplan') return adaptAutoplan(text, ctx, source);
   if (ctx.skillName === 'cso' && source.endsWith('/SKILL.md.tmpl')) {
     const latestReviewerContract = 'For each candidate, use an already-authorized independent reviewer when available. Give it the relevant locations, invariant, and rubric without the producer\'s conclusion; have it inspect callers, middleware, configuration, validation, legitimate behavior, and mitigations. Use at most three; await them. Do not request broader tool access solely to obtain an independent reviewer. Otherwise perform a separate skeptical pass labeled **sequential challenge; independent agent unavailable**. Record dissent and assumptions. Agreement and scanner warnings do not prove runtime behavior.';
-    return replaceBlock(text, latestReviewerContract, '\n\nSearch for root-cause variants', `${latestReviewerContract}
-
-${nativeWorker}
+    const sweepMarker = '{{SIDEWAYS_SWEEP:cso}}';
+    const markerIndex = text.indexOf(sweepMarker);
+    if (!text.includes(latestReviewerContract) || markerIndex < 0 || markerIndex !== text.lastIndexOf(sweepMarker)) {
+      throw new Error('Codex CSO native reviewer anchor drift');
+    }
+    return text.replace(sweepMarker, `${nativeWorker}
 
 Use one fresh native reviewer per bounded finding packet when the advertised API and
 task authority allow it. Provide the exact authorised source/test paths and rubric;
 collect actual final results before report. Failed, unavailable or timed-out review is
 unverified, not clean. Preserve the latest static/runtime evidence gates and never let
-reviewer agreement upgrade self-reported execution or test assurance.`);
-  }
-  if (ctx.skillName === 'design-shotgun' && source.endsWith('/SKILL.md.tmpl')) {
-    const generationContract = '**Generate every variant with one `$D variants --briefs-file` call.**';
-    if (!text.includes(generationContract)) throw new Error('Codex design-shotgun generation contract anchor drift');
-    const stagingExplanation = 'directory: in sandboxed sessions `$D` output under `~/.gstack/` can abort ("The operation\nwas aborted"), while the temp dir works.';
-    if (text.split(stagingExplanation).length !== 2) throw new Error('Codex design-shotgun staging contract anchor drift');
-    text = text.replace(stagingExplanation, `${stagingExplanation}
+reviewer agreement upgrade self-reported execution or test assurance.
 
-Codex permission boundary: the documented temporary directory is the normal staging
-path. If staging or the final \`gstack-design-claim\` write is denied, preserve the
-refusal and stop; do not retry through another path, tool, host or provider, or move
-the files manually. Continue only after the exact access is granted.`);
-    return text;
+${sweepMarker}`);
   }
   if (ctx.skillName === 'ship' && /\/(?:test-coverage|plan-completion|greptile)\.md\.tmpl$/.test(source)) {
     if (source.endsWith('/test-coverage.md.tmpl')) {
@@ -160,7 +152,7 @@ smallest pending decision; never auto-approve, stage or publish.`);
       .replaceAll('Codex flagged:', 'The native reviewer flagged:')
       .replaceAll('Codex still flags:', 'The native reviewer still flags:');
 
-    const preflight = '{{OUTSIDE_PREFLIGHT:opt-in}}';
+    const preflight = '{{OUTSIDE_PREFLIGHT:opt-in:plan-review}}';
     if (text.indexOf(preflight) < 0 || text.indexOf(preflight) !== text.lastIndexOf(preflight)) {
       throw new Error('spec native preflight anchor drift');
     }
@@ -287,43 +279,45 @@ redaction always runs, no flag disables it.
         '`test/codex-spec-quality-gate.test.ts` checks native workflow ordering and actual scanner HIGH rejection; model compliance at downstream sinks remains unproven.')
       .replaceAll('The\n`spec-quality-gate-secret-sink.test.ts` enforces this.',
         '`test/codex-spec-quality-gate.test.ts` checks the contract and scanner, not model compliance.');
-    text = replaceBlock(text, 'If `gh` is available and authenticated, file from the scanned file.', '**Capture `$ISSUE_NUMBER`**', `If gh is available and authenticated AND filing is authorised, use the exact
-allocated scanned body path from the preceding scan; do not rely on an unset or
-stale shell variable. Prepare the title as literal bytes in a separate private
-input and apply the same redaction/permission branches to it. Use a single-line
-title with no trailing newline; obtain an approved normalized title if the input
-is multiline. Record/check each
-hash immediately before the call. The title is read as quoted command output,
-not inserted as shell source; its dollar signs/backticks/quotes remain DATA:
+    const issueStart = text.indexOf('#### File the issue (always)');
+    const issueEnd = text.indexOf('**Capture `$ISSUE_NUMBER`**');
+    const issueSection = issueStart >= 0 && issueEnd > issueStart ? text.slice(issueStart, issueEnd) : '';
+    if (!issueSection.includes('gstack-post issue-create --title-file') ||
+        !issueSection.includes('Exit 1 (HIGH)') || !issueSection.includes('Exit 2 (MEDIUM)') ||
+        issueSection.includes('gh issue create --title') ||
+        !issueSection.includes('passes both to `gh` as arguments')) {
+      throw new Error('spec native issue-sink contract drift');
+    }
+    const manualStart = 'If `gh` is not available, print:';
+    const manualEnd = 'Then emit the rendered title + body.';
+    const manualStartIndex = text.indexOf(manualStart);
+    const manualEndIndex = text.indexOf(manualEnd, manualStartIndex);
+    if (manualStartIndex < issueStart || manualEndIndex < manualStartIndex ||
+        text.indexOf(manualStart, manualStartIndex + 1) !== -1) {
+      throw new Error('spec native manual-fallback anchor drift');
+    }
+    text = text.slice(0, manualStartIndex) + `If \`gh\` is not available, keep the exact title and body inputs private and
+report \`issue_not_filed\`. Do not switch providers or display these bytes immediately.
+If manual filing is selected, repeat the full scan-at-sink procedure above for the
+exact title and body inputs, resolve every HIGH/MEDIUM branch, and rescan after any
+edit. HIGH or unresolved MEDIUM blocks disclosure. After the same approved bytes
+pass, display only those bytes verbatim for manual filing; otherwise retain the
+private files and report their allocated paths.
 
-\`\`\`bash
-gh issue create --title "$(cat -- "<allocated scanned title path>")" --body-file "<allocated scanned body path>"
-\`\`\`
-
-Replace only the trusted allocated path placeholders, shell-quoted safely; never
-paste title or body into command text. Preserve the actual exit status and URL.
-Only a successful confirmed create yields ISSUE_URL and its numeric ISSUE_NUMBER;
-an uncertain result is pending, not permission to retry and duplicate an issue.
-Keep these as explicit task values for archive metadata, not assumed environment
-state across separate tool calls. Recheck input hashes after consumption and
-report any mutation as unverified rather than claiming same-byte proof.
-
-Only after actual filing, record the original durable issue-scoped decision with
-gstack-decision-log: decision = Spec filed #ISSUE_NUMBER: TITLE, rationale = the
-core APPROACH, scope = issue, issue = ISSUE_NUMBER, source = skill, confidence = 7.
-This remains non-interactive/best-effort and is not the issue result. Prepare
-literal JSON in a fresh owned private input, then invoke the existing single-JSON
-argument API as \`bun "$GSTACK_BIN/gstack-decision-log" "$(cat -- "<owned decision JSON path>")"\`.
-The quoted substitution reads data, never evaluates its contents; no invented
-stdin/file flag or untrusted shell source. Keep real ID/approach for
-future sessions and /ship; never invent a successful log result.
-
-If gh is unavailable/not authenticated, provide the already approved scanned
-title/body for manual filing at https://github.com/{owner}/{repo}/issues/new,
-with zero reformatting. HIGH or an unresolved privacy/authority decision blocks
-this fallback too: never print a blocked body. Do not invent an issue number.
-
-`);
+` + text.slice(manualEndIndex + manualEnd.length);
+    const approachCleanup = 'rm -f "$APPROACH_FILE"';
+    if (text.indexOf(approachCleanup) < 0 || text.indexOf(approachCleanup) !== text.lastIndexOf(approachCleanup)) {
+      throw new Error('spec native approach-input cleanup anchor drift');
+    }
+    text = text.replace(approachCleanup,
+      '# Retain APPROACH_FILE in the private .gstack/tmp directory for recoverable operator cleanup; do not remove it here.');
+    // Keep the upstream gstack-post sink: it scans the exact title/body bytes at
+    // send time and binds MEDIUM confirmation to those bytes and destination.
+    // Only resolve its host-specific install path for the Codex runtime.
+    text = text.replaceAll('~/.claude/skills/gstack/bin/gstack-post', '"$GSTACK_BIN/gstack-post"')
+      .replaceAll('~/.claude/skills/gstack/bin/gstack-decision-log', '"$GSTACK_BIN/gstack-decision-log"')
+      .replaceAll('~/.claude/skills/gstack/bin/gstack-paths', '"$GSTACK_BIN/gstack-paths"')
+      .replaceAll('~/.claude/skills/gstack/bin/gstack-slug', '"$GSTACK_BIN/gstack-slug"');
     text = replaceBlock(text, '**Sanitized body to the archive.**', '**Sync default:**', `**Sanitized body to the archive.** Use the SAME approved scanned body used
 for the issue, not the original draft; an edited/autoredacted body always requires
 a fresh scan and operator decisions. The user's on-disk source draft stays intact.

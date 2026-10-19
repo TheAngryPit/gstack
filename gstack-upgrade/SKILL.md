@@ -48,15 +48,27 @@ if [ "claude" = claude ]; then
 fi
 GSTACK_STATE_ROOT=$("$GSTACK_BIN/gstack-paths" --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 SOURCE_DIR=""
-if [ "claude" = copilot ]; then
-  SOURCE_DIR="$(cat "$HOME/.copilot/skills/gstack/.source-path" 2>/dev/null || true)"
-fi
-if [ -z "$SOURCE_DIR" ] && [ -f "$GSTACK_STATE_ROOT/installs.tsv" ]; then
+ACTIVE_ROOT="${GSTACK_ROOT:-}"
+[ -n "$ACTIVE_ROOT" ] || ACTIVE_ROOT="${GSTACK_BIN%/bin}"
+_REGISTRY_AMBIGUOUS=0
+if [ -f "$GSTACK_STATE_ROOT/installs.tsv" ]; then
   while IFS=$'\t' read -r _registry_host _registry_scope _registry_project _registry_dest _registry_root _registry_source _registry_version _registry_prefix _registry_render _registry_updated _registry_model _registry_commit; do
-    [ "$_registry_host" = "claude" ] && [ "$_registry_source" != "-" ] || continue
+    [ "$_registry_host" = "claude" ] && [ "$_registry_root" = "$ACTIVE_ROOT" ] && [ "$_registry_source" != "-" ] || continue
+    if [ -n "$SOURCE_DIR" ] && [ "$SOURCE_DIR" != "$_registry_source" ]; then
+      _REGISTRY_AMBIGUOUS=1
+      break
+    fi
     SOURCE_DIR="$_registry_source"
-    break
   done < "$GSTACK_STATE_ROOT/installs.tsv"
+fi
+[ "$_REGISTRY_AMBIGUOUS" -eq 0 ] || {
+  echo "ERROR: the active GStack runtime root matches registry rows with different sources; no update was attempted." >&2
+  exit 1
+}
+if [ -z "$SOURCE_DIR" ]; then
+  case "claude" in
+    copilot|agy) SOURCE_DIR="$(cat "$ACTIVE_ROOT/.source-path" 2>/dev/null || true)" ;;
+  esac
 fi
 [ -z "$SOURCE_DIR" ] || [ -d "$SOURCE_DIR/.git" ] || {
   if [ -x "$GSTACK_STATE_ROOT/session-update-recovery/recover" ]; then
@@ -116,6 +128,8 @@ local changes. Run the host's normal setup refresh only after its source update
 succeeds. For GitHub Copilot CLI, run `./setup --host copilot --refresh-registered`
 from the updated source checkout. The ordinary session
 updater continues to route other origins to its preserved legacy implementation.
+For Antigravity CLI, run `./setup --host agy --refresh-registered` from the
+updated source checkout.
 
 For “Always keep me up to date”, set auto_upgrade to true through the
 registered gstack-config, then continue with the approved candidate. For “Not
@@ -139,10 +153,26 @@ LEVEL=$((LEVEL + 1))
 printf '%s %s %s\n' "$CANDIDATE_SHA" "$LEVEL" "$(date +%s)" > "$SNOOZE_FILE"
 ```
 
-After the operator approved this exact candidate, run only:
+Before applying a trusted candidate, check its exact commit's Bun floor through
+bash (the skill may be running under a shell that does not split variables):
 
 ```bash
-GSTACK_DIR="$SOURCE_DIR" "$SOURCE_DIR/bin/gstack-session-update" --apply-candidate "<sha from UPGRADE_AVAILABLE>"
+CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"
+HOLD=$(GSTACK_HOLD_SOURCE="$SOURCE_DIR" GSTACK_HOLD_SHA="$CANDIDATE_SHA" bash -c '. "$GSTACK_HOLD_SOURCE/bin/gstack-bun-version.sh" && gstack_bun_incoming_hold "$GSTACK_HOLD_SOURCE" "$GSTACK_HOLD_SHA"' 2>/dev/null || true)
+if [ -n "$HOLD" ]; then
+  case "$HOLD" in
+    bun-version-unreadable*) echo "Cannot verify the candidate Bun floor: $HOLD (BUN_VERSION_UNREADABLE)" ;;
+    *) echo "Cannot apply this candidate yet: $HOLD" ;;
+  esac
+  exit 1
+fi
+```
+
+The transactional updater repeats this check immediately before activation.
+After the operator approved this exact candidate and the check passed, run only:
+
+```bash
+GSTACK_DIR="$SOURCE_DIR" "$SOURCE_DIR/bin/gstack-session-update" --apply-candidate "$CANDIDATE_SHA"
 ```
 
 The command revalidates that candidate's workflow identities, latest attempts,

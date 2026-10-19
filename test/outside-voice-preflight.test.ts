@@ -54,17 +54,17 @@ test('adversarial outside failures retain the required native pass without dupli
   }
 });
 
-test('ship design availability is an existing automatic choice, not a new opt-in', () => {
+test('ship design-lite honors codex_reviews like every other opt-in caller (#3102)', () => {
   for (const host of ALL_HOST_CONFIGS) {
     const ctx: TemplateContext = { host: host.name, skillName: 'ship', tmplPath: 'ship/SKILL.md.tmpl', paths: HOST_PATHS[host.name] };
     const output = outsideVoicePreflight(ctx, { disabledBehavior: 'opt-in' });
-    expect(output).toContain('No additional opt-in is needed');
-    expect(output).toContain('`CODEX_MODE` reports provider availability, not user consent');
+    expect(output).not.toContain('No additional opt-in is needed');
+    expect(output).not.toContain('_OUTSIDE_CFG=enabled');
+    expect(output).toContain('get --stored codex_reviews');
+    expect(output).toContain("`CODEX_MODE: disabled` or a send's `consent_missing` line: `codex_reviews` is off or unreadable; do not ask; record `outside_status: disabled`.");
     const other = outsideVoicePreflight({ ...ctx, skillName: 'review' }, { disabledBehavior: 'opt-in' });
-    expect(other).not.toContain('No additional opt-in is needed');
-    expect(other).toContain('_OUTSIDE_CFG=enabled # This caller has its own opt-in/skip control.');
-    expect(output.match(/```bash\n([\s\S]*?)\n```/)![1]).toBe(other.match(/```bash\n([\s\S]*?)\n```/)![1].replace(
-      '_OUTSIDE_CFG=enabled # This caller has its own opt-in/skip control.', '_OUTSIDE_CFG=enabled'));
+    expect(other).not.toContain('_OUTSIDE_CFG=enabled');
+    expect(output.match(/```bash\n([\s\S]*?)\n```/)![1]).toBe(other.match(/```bash\n([\s\S]*?)\n```/)![1]);
   }
 });
 
@@ -145,7 +145,7 @@ describe('own-harness review fallback instructions', () => {
           expect(text).not.toMatch(/under_codex|under_current_harness/);
           expect(text).not.toContain('gstack-claude-code');
         } else {
-          const mode = 'under_codex';
+          const mode = name === 'plan' ? 'under_current_harness' : 'under_codex';
           const preflight = text.match(/```bash\n([\s\S]*?)\n```/)![1];
           expect(preflight).toContain(mode);
           expect([...new Set(text.match(/under_codex|under_current_harness/g))]).toEqual([mode]);
@@ -177,7 +177,7 @@ function fixture() {
   if (git.status !== 0) throw new Error(git.stderr);
   const capture = path.join(dir, 'capture.json');
   const fake = path.join(dir, 'fake-claude.ts');
-  fs.writeFileSync(fake, `const prompt=await Bun.stdin.text(); await Bun.write(process.env.FIXTURE_CAPTURE!,JSON.stringify({prompt,args:process.argv.slice(2)})); console.log(JSON.stringify({result:'Recommendation: ship because the isolated fixture completed its review.'}));`);
+  fs.writeFileSync(fake, `const prompt=await Bun.stdin.text(); await Bun.write(process.env.FIXTURE_CAPTURE!,JSON.stringify({prompt,args:process.argv.slice(2)})); console.log(JSON.stringify({result:'No issues found.\\nRecommendation: ship because the isolated fixture completed its review.'}));`);
   const env = { ...process.env, HOME: home, CODEX_HOME: '', GSTACK_HOME: path.join(home, '.gstack'),
     GSTACK_ROOT: '', GSTACK_BIN: '', GSTACK_ACTIVE_HOST: 'codex', CODEX_THREAD_ID: 'fixture', CODEX_SANDBOX: '', CLAUDECODE: '',
     GSTACK_CLAUDE_BIN: process.execPath, GSTACK_CLAUDE_BIN_ARGS: JSON.stringify([fake]), FIXTURE_CAPTURE: capture };

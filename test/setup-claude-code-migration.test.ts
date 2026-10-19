@@ -30,7 +30,7 @@ function fixture(copy: boolean) {
   put(path.join(root, 'VERSION'), '2.0.0.0\n');
   put(path.join(root, 'ETHOS.md'), 'Fixture ethos\n');
   put(path.join(root, 'package.json'), JSON.stringify({ type: 'module', scripts: { 'gen:skill-docs': 'bun run scripts/gen-skill-docs.ts' } }));
-  for (const bin of ['gstack-config', 'gstack-patch-names', 'gstack-relink', 'gstack-migrate-claude-code', 'gstack-claude-code', 'gstack-state-root.sh', 'gstack-bun-version.sh', 'gstack-install-registry.sh', 'gstack-render-claude.sh']) {
+  for (const bin of ['gstack-config', 'gstack-patch-names', 'gstack-relink', 'gstack-migrate-claude-code', 'gstack-claude-code', 'gstack-models', 'gstack-state-root.sh', 'gstack-bun-version.sh', 'gstack-path-spelling.sh', 'gstack-claude-root.sh', 'gstack-install-registry.sh', 'gstack-render-claude.sh', 'gstack-host-renders.sh']) {
     const target = path.join(root, 'bin', bin);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(ROOT, 'bin', bin), target);
@@ -121,7 +121,7 @@ describe.skipIf(process.platform === 'win32')('full setup repairs the installed 
         expect(result.stdout).toContain('gstack ready (claude)');
         expect(result.stderr).toContain('/claude is now /claude-code');
         const next = path.join(f.skills, 'gstack-claude-code/SKILL.md');
-        expect(fs.readFileSync(next, 'utf8')).toContain('name: claude-code');
+        expect(fs.readFileSync(next, 'utf8')).toContain('name: gstack-claude-code');
         expect(fs.existsSync(path.join(f.skills, 'gstack-claude/SKILL.md'))).toBe(false);
         expect(fs.existsSync(f.oldRender)).toBe(false);
         const codexReview = fs.readFileSync(path.join(f.skills, 'gstack-review/SKILL.md'), 'utf8');
@@ -146,7 +146,7 @@ describe.skipIf(process.platform === 'win32')('full setup repairs the installed 
         const repeated = f.run();
         expect(repeated.status).toBe(0);
         expect(repeated.stderr).not.toContain('/claude is now');
-        expect(fs.readFileSync(next, 'utf8')).toContain('name: claude-code');
+        expect(fs.readFileSync(next, 'utf8')).toContain('name: gstack-claude-code');
       } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
     }, 60_000);
   }
@@ -163,7 +163,7 @@ describe.skipIf(process.platform === 'win32')('full setup repairs the installed 
       const retry = f.run();
       expect(retry.status).toBe(0);
       expect(fs.existsSync(path.join(f.skills, 'gstack-claude/SKILL.md'))).toBe(false);
-      expect(fs.readFileSync(path.join(f.skills, 'gstack-claude-code/SKILL.md'), 'utf8')).toContain('name: claude-code');
+      expect(fs.readFileSync(path.join(f.skills, 'gstack-claude-code/SKILL.md'), 'utf8')).toContain('name: gstack-claude-code');
     } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
   }, 60_000);
 });

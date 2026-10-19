@@ -164,24 +164,80 @@ describe.skipIf(process.platform === 'win32')('disabled_skills (#1206)', () => {
     expect(typo.stderr).toContain("Did you mean 'make-pdf'?");
     expect(config('gstack-upgrade').status).toBe(1);
 
-    const set = config('make-pdf, gstack-pair-agent');
+    const set = config('make-pdf, gstack-pair-agent, eval-plan');
     expect(set.status, set.stderr).toBe(0);
-    expect(set.stdout).toContain('Disabled (gstack-config disabled_skills, not registered): make-pdf pair-agent');
+    expect(set.stdout).toContain('Disabled (gstack-config disabled_skills, not registered): make-pdf pair-agent eval-plan');
     expect(set.stdout).toContain(`apply to codex (${join(f.home, '.codex/skills')}): cd ${realpathSync(src)} && ./setup --host codex`);
     expect(existsSync(join(f.home, '.claude/skills/make-pdf'))).toBe(false);
     expect(existsSync(join(f.home, '.claude/skills/pair-agent'))).toBe(false);
+    expect(existsSync(join(f.home, '.claude/skills/eval-plan'))).toBe(false);
     expect(existsSync(join(f.home, '.claude/skills/review/SKILL.md'))).toBe(true);
     expect(existsSync(join(src, 'make-pdf/SKILL.md'))).toBe(true);
+    expect(existsSync(join(src, 'eval-plan/SKILL.md'))).toBe(true);
 
     const refresh = runSetup(f, join(src, 'setup'), ['--refresh-registered']);
     expect(refresh.status, refresh.stdout + refresh.stderr).toBe(0);
     expect(existsSync(join(f.home, '.codex/skills/gstack-make-pdf'))).toBe(false);
+    expect(existsSync(join(f.home, '.codex/skills/gstack-eval-plan'))).toBe(false);
     expect(existsSync(join(f.home, '.codex/skills/gstack-review/SKILL.md'))).toBe(true);
     expect(existsSync(join(f.home, '.claude/skills/make-pdf'))).toBe(false);
-    expect(refresh.stdout).toContain('disabled skills (not registered on any host): make-pdf pair-agent');
+    expect(refresh.stdout).toContain('disabled skills (not registered on any host): make-pdf pair-agent eval-plan');
 
     expect(config('').status).toBe(0);
     expect(existsSync(join(f.home, '.claude/skills/make-pdf/SKILL.md'))).toBe(true);
+  }, 120_000);
+});
+
+describe.skipIf(process.platform === 'win32')('Antigravity CLI shares ~/.gemini with Gemini CLI', () => {
+  const geminiCliFiles = (home: string) => ({
+    settings: readFileSync(join(home, '.gemini/settings.json'), 'utf8'),
+    skill: readFileSync(join(home, '.gemini/skills/my-skill/SKILL.md'), 'utf8'),
+  });
+
+  test.skipIf(Bun.which('agy') !== null)('auto-detect ignores a Gemini-CLI-only ~/.gemini and selects agy by its own config dir', () => {
+    const f = makeFixture();
+    const src = makeSource(f, join(f.home, 'gstack'));
+    put(join(f.home, '.gemini/settings.json'), '{"theme":"mine"}\n');
+    put(join(f.home, '.gemini/skills/my-skill/SKILL.md'), '---\nname: my-skill\ndescription: mine\n---\n');
+    const before = geminiCliFiles(f.home);
+
+    const geminiOnly = runSetup(f, join(src, 'setup'), ['--host', 'auto']);
+    expect(geminiOnly.status, geminiOnly.stdout + geminiOnly.stderr).toBe(0);
+    expect(existsSync(join(f.home, '.gemini/antigravity-cli'))).toBe(false);
+    expect(registryRows(f).map(row => row[0])).not.toContain('agy');
+
+    mkdirSync(join(f.home, '.gemini/antigravity-cli'), { recursive: true });
+    const withAgy = runSetup(f, join(src, 'setup'), ['--host', 'auto']);
+    expect(withAgy.status, withAgy.stdout + withAgy.stderr).toBe(0);
+    expect(existsSync(join(f.home, '.gemini/antigravity-cli/skills/gstack-review/SKILL.md'))).toBe(true);
+    expect(registryRows(f).map(row => row[0])).toContain('agy');
+    expect(geminiCliFiles(f.home)).toEqual(before);
+    expect(readdirSync(join(f.home, '.gemini/skills'))).toEqual(['my-skill']);
+  }, 120_000);
+
+  test('--host antigravity (alias) installs under antigravity-cli/skills only; uninstall removes only gstack entries', () => {
+    const f = makeFixture();
+    const src = makeSource(f, join(f.home, 'gstack'));
+    put(join(f.home, '.gemini/settings.json'), '{"theme":"mine"}\n');
+    put(join(f.home, '.gemini/skills/my-skill/SKILL.md'), '---\nname: my-skill\ndescription: mine\n---\n');
+    put(join(f.home, '.gemini/antigravity-cli/settings.json'), '{"agentMode":"plan"}\n');
+    put(join(f.home, '.gemini/antigravity-cli/skills/gstack-notes/SKILL.md'), '---\nname: gstack-notes\ndescription: my notes\n---\n');
+    const before = geminiCliFiles(f.home);
+
+    const r = runSetup(f, join(src, 'setup'), ['--host', 'antigravity']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(registryRows(f).map(row => [row[0], row[3]])).toEqual([['agy', join(f.home, '.gemini/antigravity-cli/skills')]]);
+    expect(readFileSync(join(f.home, '.gemini/antigravity-cli/skills/gstack/.source-path'), 'utf8').trim()).toBe(src);
+    expect(readFileSync(join(src, '.gstack-installed-hosts'), 'utf8').split('\n')).toContain('agy');
+    expect(existsSync(join(src, '.agy/skills/gstack-review/SKILL.md'))).toBe(true);
+    expect(geminiCliFiles(f.home)).toEqual(before);
+
+    const un = spawnSync('bash', [join(src, 'bin/gstack-uninstall'), '--force', '--keep-state'], { cwd: f.home, env: f.env, encoding: 'utf8', timeout: 30_000 });
+    expect(un.status, un.stderr).toBe(0);
+    expect(readdirSync(join(f.home, '.gemini/antigravity-cli/skills'))).toEqual(['gstack-notes']);
+    expect(readFileSync(join(f.home, '.gemini/antigravity-cli/settings.json'), 'utf8')).toBe('{"agentMode":"plan"}\n');
+    expect(geminiCliFiles(f.home)).toEqual(before);
+    expect(registryRows(f)).toEqual([]);
   }, 120_000);
 });
 

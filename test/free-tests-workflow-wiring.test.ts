@@ -45,12 +45,14 @@ describe('free-tests workflow wiring', () => {
     const workflow = Bun.YAML.parse(source) as any;
     const planner = workflow.jobs['free-plan'];
     const suite = workflow.jobs['free-suite'];
+    const quick = workflow.jobs['quick-bun-default'];
     const aggregate = workflow.jobs['free-tests'];
     const macosRegressions = workflow.jobs['macos-named-regressions'];
     expect(macosRegressions.steps.some((step: any) => step.run?.includes('test/ios-qa-regen.test.ts'))).toBe(true);
     expect(planner.steps.find((step: any) => step.id === 'plan').run).toContain('--ci-plan');
     expect(suite.needs).toBe('free-plan');
     expect(suite['runs-on']).toBe("${{ github.repository == 'garrytan/gstack' && 'ubicloud-standard-8' || 'ubuntu-24.04' }}");
+    expect(quick['runs-on']).toBe("${{ github.repository == 'garrytan/gstack' && 'ubicloud-standard-8' || 'ubuntu-24.04' }}");
     const checkout = suite.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
     expect(checkout.with['fetch-depth']).toBe("${{ github.repository == 'garrytan/gstack' && 1 || 0 }}");
     const windows = Bun.YAML.parse(fs.readFileSync(path.resolve(import.meta.dir, '..', '.github/workflows/windows-free-tests.yml'), 'utf8')) as any;

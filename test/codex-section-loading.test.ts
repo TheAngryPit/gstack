@@ -46,6 +46,7 @@ test('generated Codex setup and execution preserve native capabilities without C
   expect(transcript).toContain('A skill-start call alone does not automatically ingest');
   const spec=readFileSync(join(skills,'gstack-spec','sections','gate-and-file.md'),'utf8');
   expect(spec).toContain('native Codex worker');
+  expect(spec).toContain('Include the full coordinator contract above verbatim in the worker prompt');
   expect(spec).not.toContain('Then fall back to current dir');
   const review=readFileSync(join(skills,'gstack-review','sections','adversarial.md'),'utf8');
   expect(review).toContain('fork_turns: "none"');

@@ -20,6 +20,9 @@ run-name: ${{ inputs.nonce && format('Periodic Evals [eval-bg {0}]', inputs.nonc
 on:
   schedule:
     - cron: '0 6 * * 1'  # Monday 6 AM UTC; build-image below builds or reuses the CI image
+    # Daily, for autoplan-schema-canary alone (latest Claude Code vs the /autoplan
+    # guard's payload assumptions); every census job below skips this schedule.
+    - cron: '30 7 * * *'
   workflow_dispatch:
     inputs:
       redispatch_of:
@@ -38,13 +41,17 @@ on:
         description: 'eval-bg: dispatch nonce carried in the run name'
         type: string
         default: ''
+      schema_canary_only:
+        description: 'Run only autoplan-schema-canary (the daily latest-Claude-Code canary), not the census'
+        type: boolean
+        default: false
 
 # One group per ref AND event: a branch dispatch never cancels main's census,
 # and a manual main dispatch never cancels the scheduled one. A re-dispatch
 # runs in its own group so it never cancels the run that dispatched it; both
 # runs are reported.
 concurrency:
-  group: evals-periodic-${{ github.ref }}-${{ github.event_name }}${{ inputs.redispatch_of && format('-redispatch-{0}', inputs.redispatch_of) || '' }}
+  group: evals-periodic-${{ github.ref }}-${{ github.event_name }}${{ inputs.redispatch_of && format('-redispatch-{0}', inputs.redispatch_of) || '' }}${{ (github.event.schedule == '30 7 * * *' || inputs.schema_canary_only) && '-schema-canary' || '' }}
   cancel-in-progress: true
 
 env:
@@ -55,6 +62,7 @@ env:
 
 jobs:
   build-image:
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubicloud-standard-8
     timeout-minutes: 15
     permissions:
@@ -92,10 +100,10 @@ jobs:
       # Registry cache export needs a docker-container builder — the default
       # `docker` driver hard-errors on cache-to.
       - if: steps.check.outputs.exists == 'false'
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - if: steps.check.outputs.exists == 'false'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .github/docker
           file: .github/docker/Dockerfile.ci
@@ -110,6 +118,9 @@ jobs:
   plan-slices:
     runs-on: ubicloud-standard-8
     timeout-minutes: 10
+    # The daily schedule and a canary-only dispatch run schema-canary alone;
+    # every census job needs this one, so they all skip with it.
+    if: ${{ github.repository == 'garrytan/gstack' && github.event.schedule != '30 7 * * *' && !inputs.schema_canary_only }}
     permissions:
       contents: read
     outputs:
@@ -140,7 +151,7 @@ jobs:
       - name: Emit run manifest (ALL periodic tests minus reasoned excludes)
         env:
           EVALS_ALL: "1"
-        run: EVALS_TIER=periodic bun --no-install run scripts/test-paid-shards.ts --tier periodic --emit-plan /tmp/paid-plan/manifest.json --slice-budget 420 --jobs 2 --max-parallel 36
+        run: EVALS_TIER=periodic bun --no-install run scripts/test-paid-shards.ts --tier periodic --emit-plan /tmp/paid-plan/manifest.json --slice-budget 420 --jobs 2 --max-parallel 38
 
       # Codex-only slices run on the host-run eval-codex-slices job; the
       # container executor runs every other slice.
@@ -153,7 +164,7 @@ jobs:
             echo "slice_timeouts=$(jq -ec '[0] + .plan.sliceCiTimeoutMinutes' /tmp/paid-plan/manifest.json)"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: paid-plan
           path: /tmp/paid-plan/manifest.json
@@ -170,13 +181,62 @@ jobs:
           echo "slices=$(jq -c '[range(1; .sliceCount + 1)]' /tmp/gate-census-plan/manifest.json)" >> "$GITHUB_OUTPUT"
           echo "slice_timeouts=$(jq -ec '[0] + .plan.sliceCiTimeoutMinutes' /tmp/gate-census-plan/manifest.json)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: gate-census-plan
           path: /tmp/gate-census-plan/manifest.json
           retention-days: 30
 
+  # autoplan-schema-canary: installs the latest published Claude Code with
+  # install scripts off, audits registry signatures, and checks the Agent and
+  # Read hook payloads against the journal with the /autoplan guard's own
+  # comparison. Daily, so a schema strip reds within a day of a release; the
+  # weekly census also runs it. Read-only token; the key's spend is capped by
+  # the case (one haiku session, about $0.02).
+  schema-canary:
+    runs-on: ubicloud-standard-2
+    needs: build-image
+    if: ${{ github.repository == 'garrytan/gstack' && (github.event.schedule == '30 7 * * *' || inputs.schema_canary_only) }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.build-image.outputs.image-tag }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user runner
+    env:
+      EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-schema-canary
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Fix bun temp
+        uses: ./.github/actions/fix-bun-temp
+
+      - name: Restore deps
+        uses: ./.github/actions/restore-deps
+
+      - name: Run autoplan-schema-canary on the latest Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GSTACK_EVAL_DIR: /tmp/schema-canary-results
+        run: EVALS_TIER=periodic bun run scripts/test-paid-shards.ts --tier periodic --case autoplan-schema-canary --trials 1
+
+      - name: Upload canary results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: schema-canary-a${{ github.run_attempt }}
+          path: /tmp/schema-canary-results
+          if-no-files-found: ignore
+          retention-days: 90
+
   eval-slices:
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubicloud-standard-8
     needs: [build-image, plan-slices]
     env:
@@ -200,7 +260,7 @@ jobs:
       fail-fast: false
       # Every planned slice starts at once; test/evals-workflow-wiring.test.ts
       # fails when the live plan outgrows this cap.
-      max-parallel: 36
+      max-parallel: 38
       matrix:
         slice: ${{ fromJSON(needs.plan-slices.outputs.periodic_slices) }}
     steps:
@@ -238,7 +298,7 @@ jobs:
       - name: Register gstack skills for PTY tests
         uses: ./.github/actions/register-gstack-skills
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: paid-plan
           path: /tmp/paid-plan
@@ -280,7 +340,7 @@ jobs:
 
       - name: Upload slice results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: paid-slice-${{ matrix.slice }}-a${{ github.run_attempt }}
           path: /tmp/paid-slice-results
@@ -288,7 +348,7 @@ jobs:
 
       - name: Upload native capture evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-captures-${{ env.EVALS_RUN_ID }}
           include-hidden-files: true
@@ -304,7 +364,7 @@ jobs:
       # longer reds its runner, but its full log is the diagnosis evidence.
       - name: Upload shard logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}
           include-hidden-files: true
@@ -330,7 +390,7 @@ jobs:
   eval-codex-slices:
     runs-on: ubicloud-standard-8
     needs: [build-image, plan-slices]
-    if: ${{ needs.plan-slices.outputs.periodic_codex_slices != '[]' }}
+    if: ${{ github.repository == 'garrytan/gstack' && needs.plan-slices.outputs.periodic_codex_slices != '[]' }}
     env:
       EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-eval-slices-${{ matrix.slice }}
     timeout-minutes: ${{ fromJSON(needs.plan-slices.outputs.periodic_slice_timeouts)[matrix.slice] }}
@@ -339,7 +399,7 @@ jobs:
       packages: read
     strategy:
       fail-fast: false
-      max-parallel: 36
+      max-parallel: 38
       matrix:
         slice: ${{ fromJSON(needs.plan-slices.outputs.periodic_codex_slices) }}
     steps:
@@ -351,7 +411,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: paid-plan
           path: ${{ runner.temp }}/paid-plan
@@ -419,7 +479,7 @@ jobs:
 
       - name: Upload slice results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: paid-slice-${{ matrix.slice }}-a${{ github.run_attempt }}
           path: ${{ runner.temp }}/paid-slice-results
@@ -427,7 +487,7 @@ jobs:
 
       - name: Upload native capture evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-captures-${{ env.EVALS_RUN_ID }}
           include-hidden-files: true
@@ -441,7 +501,7 @@ jobs:
 
       - name: Upload shard logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}
           include-hidden-files: true
@@ -459,7 +519,7 @@ jobs:
     # A branch dispatch validates the periodic lane only; gate cases on a
     # branch go through an evals.yml dispatch with evals_all. Main (schedule
     # or dispatch) always runs the census; a branch opts in explicitly.
-    if: ${{ github.ref == 'refs/heads/main' || inputs.include_gate_census }}
+    if: ${{ github.repository == 'garrytan/gstack' && (github.ref == 'refs/heads/main' || inputs.include_gate_census) }}
     env:
       EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-gate-census-${{ matrix.slice }}
     # Per-slice job ceiling from the packed plan (W2c/ENG-2), as for eval-slices.
@@ -501,7 +561,7 @@ jobs:
 
       - run: bun run build
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: gate-census-plan
           path: /tmp/gate-census-plan
@@ -543,7 +603,7 @@ jobs:
 
       - name: Upload census results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: gate-census-${{ matrix.slice }}-a${{ github.run_attempt }}
           path: /tmp/gate-census-results
@@ -551,7 +611,7 @@ jobs:
 
       - name: Upload native capture evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-captures-${{ env.EVALS_RUN_ID }}
           include-hidden-files: true
@@ -569,7 +629,7 @@ jobs:
     # !cancelled(): the report must run (and FAIL) when an executor died — a
     # missing slice artifact reading as green is the class this lane kills —
     # but a cancelled run stops here.
-    if: ${{ !cancelled() && needs.plan-slices.result == 'success' }}
+    if: ${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.plan-slices.result == 'success' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -589,24 +649,24 @@ jobs:
         with:
           bun-version: 1.4.2
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: paid-plan
           path: /tmp/paid-report
 
       # One directory per attempt-scoped slice artifact (no merge): shard
       # records never overwrite each other and the first attempt decides.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: paid-slice-*
           path: /tmp/paid-report
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: gate-census-plan
           path: /tmp/gate-census-report
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: gate-census-[0-9]*
           path: /tmp/gate-census-report
@@ -647,7 +707,7 @@ jobs:
 
       - name: Upload trial outcomes for pass-rate history
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: trial-outcomes-periodic-a${{ github.run_attempt }}
           path: |
@@ -657,11 +717,39 @@ jobs:
 
       - name: Upload gate census trial outcomes for pass-rate history
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: trial-outcomes-gate-census-a${{ github.run_attempt }}
           path: |
             /tmp/gate-census-report/trial-outcomes.jsonl
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # Exercised-path map (shadow, non-blocking; docs/TESTING_INTERNALS.md#exercised-path-map):
+      # union this census's own recorded commands into the map, report MAP_GAP lines and
+      # cases that recorded no commands, and print the refresh command. Never fails the run.
+      - name: Refresh the exercised-path map from this census
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/exercised-map
+          dirs=()
+          for dir in /tmp/gate-census-report /tmp/paid-report; do [ -d "$dir" ] && dirs+=(--from-dir "$dir"); done
+          status=0
+          bun --no-install run scripts/exercised-map.ts "${dirs[@]}" \
+            --run-id "$GITHUB_RUN_ID" --out /tmp/exercised-map/exercised-commands.json --report /tmp/exercised-map/report.md || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "exercised-path map refresh failed with exit $status (non-blocking; no map uploaded)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f /tmp/exercised-map/report.md ]; then cat /tmp/exercised-map/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload the refreshed exercised-path map
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: exercised-map-a${{ github.run_attempt }}
+          path: /tmp/exercised-map
           if-no-files-found: ignore
           retention-days: 90
 
@@ -766,7 +854,7 @@ jobs:
 
       - name: Upload the census report
         if: always() && (steps.reconcile.outputs.exit != '0' || steps.gate-reconcile.outputs.exit != '0' || steps.pass-rates.outputs.exit != '0' || needs.eval-slices.result != 'success' || !contains(fromJSON('["success","skipped"]'), needs.eval-codex-slices.result) || needs.gate-census.result != 'success')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: census-report-a${{ github.run_attempt }}
           path: /tmp/census-report.md
@@ -815,7 +903,7 @@ jobs:
   redispatch:
     runs-on: ubicloud-standard-2
     needs: report
-    if: ${{ !cancelled() && needs.report.outputs.redispatch == 'true' }}
+    if: ${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.report.outputs.redispatch == 'true' }}
     timeout-minutes: 5
     permissions:
       actions: write

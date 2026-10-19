@@ -71,10 +71,31 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
     expect(section).toContain('listBrowserTabs()` output is private user data');
   });
 
+  test('signed-in tabs (#3063): offer only target-origin tabs, attach after one confirmation, no second sign-in loop', () => {
+    const rules = setup.slice(setup.indexOf('### Rules for driving a real browser'));
+    const rule = (n: number) => rules.match(new RegExp(`\\n${n}\\. \\*\\*[\\s\\S]*?(?=\\n\\d+\\. \\*\\*|\\n\\n)`))![0];
+    expect(rule(1)).toContain("Before the first `openTab`, offer that list's tabs on the target origin (title and origin only)");
+    expect(rule(1)).toContain('attach only after the user confirms one');
+    expect(rule(4)).toContain('a second wall means the session is tab- or URL-bound: offer their tab (rule 1), never another sign-in');
+    expect(rule(4)).not.toContain('the browser\'s cookies now apply');
+    // Rule 6 no longer suggests an early `return`; rule 7 names the fast-[ok abort.
+    expect(rule(6)).not.toContain('`return`');
+    expect(rule(7)).toContain('a fast `[ok` without it is an abort');
+  });
+
   test('consent boundary: look freely, act on non-local targets only after one AskUserQuestion', () => {
     expect(section).toContain('Invocation is consent to LOOK, not to ACT');
     expect(section).toContain(ASIDE_LOCAL_HOST_RULE);
     expect(section).toContain('AskUserQuestion ONCE per run');
+  });
+
+  test('consent boundary covers the writes a label hides: wizard steps and saves after a silent no-op set (#3216)', () => {
+    const rule3 = setup.match(/\n3\. \*\*Invocation is consent[^\n]*/)![0];
+    expect(rule3).toContain('before the first one. There, a wizard or dialog step');
+    expectMentions(rule3, [['wizard', 'step', 'mutating', 'until its handler', 'cancel proves nothing']], 'rule 3');
+    expectMentions(rule3, [['before any save', 'read back', '`setvalue`', 'stop on a mismatch', '`throw`']], 'rule 3');
+    expect(fallback).toContain('Rule 3 (mutating actions on a NON-LOCAL target need one AskUserQuestion per run) applies unchanged');
+    expectMentions(cookbook, [['skip path'], ['probe', 'precondition']], 'cookbook');
   });
 
   test('credential boundary: the user signs in, the agent never handles secrets', () => {
@@ -98,6 +119,20 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
     expect(section).toContain('ASIDE_DIR=');
     expect(section).toContain('never print image data');
     expect(section).toContain('use the Read tool on the copied file');
+  });
+
+  test('cookbook names the silent failure modes of aside repl scripts (#3064)', () => {
+    expect(cookbook).toContain('`evaluate` returns only JSON-serializable values');
+    expect(cookbook).toContain('End such calls with `; return true` or return `JSON.stringify(...)`');
+    expect(cookbook).toContain('No top-level `return`');
+    expect(cookbook).toContain('Write abort paths as `if`/`else`');
+    expect(cookbook).toContain('`pg.locator(sel).press("Enter")`');
+    expect(cookbook).toContain('An empty DOM read after an action says something about the selector, not the app');
+    expect(cookbook).toContain('read the state before clicking');
+    // The attach recipe keeps the tab list private and never closes the user's tab.
+    expect(cookbook).toContain('print only those tabs\' title and origin, never the rest');
+    expect(cookbook).toContain('never `closeTab` it');
+    expect(setup).not.toContain('Silent failures');
   });
 
   test('cookbook uses only the verified Aside APIs', () => {
@@ -193,10 +228,13 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
       const shells = ['sh', 'bash', 'zsh'].map(executable).filter((shell): shell is string => !!shell);
       expect(shells.length).toBeGreaterThan(0);
       const base = shellPath(path.join(dir, 'base'));
+      // zsh reads ~/.zshenv even for noninteractive commands. Keep both its
+      // PATH and Aside's ~/.local/bin fallback inside this fixture.
+      const isolatedEnv = (PATH: string, HOME = dir) => ({ PATH, HOME, ZDOTDIR: HOME });
       for (const arm of arms) {
         const PATH = arm === 'none' ? base : `${shellPath(path.join(dir, arm))}:${base}`;
         for (const shell of shells) {
-          const r = spawnSync(shell, ['-c', setupProbe], { env: { PATH }, encoding: 'utf8', timeout: 30_000 });
+          const r = spawnSync(shell, ['-c', setupProbe], { env: isolatedEnv(PATH), encoding: 'utf8', timeout: 30_000 });
           const status = arm === 'none' ? 'ASIDE_UNAVAILABLE: bounded probe unavailable' : 'READY: aside';
           const name = path.basename(shell).replace(/\.exe$/i, '');
           expect(`${name}/${arm}: ${r.stdout.trim()}`).toBe(`${name}/${arm}: ${status}`);
@@ -205,7 +243,7 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
       const reasons = { window: 'No browser window is open for account u0', preload: "Error: Cannot find module '/x/preload.cjs'" };
       for (const [name, reason] of Object.entries(reasons)) {
         for (const shell of shells) {
-          const r = spawnSync(shell, ['-c', setupProbe], { env: { PATH: `${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, name))}` }, encoding: 'utf8', timeout: 30_000 });
+          const r = spawnSync(shell, ['-c', setupProbe], { env: isolatedEnv(`${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, name))}`), encoding: 'utf8', timeout: 30_000 });
           const executableName = path.basename(shell).replace(/\.exe$/i, '');
           expect(`${executableName}/${name}: ${r.stdout.trim()}`).toBe(`${executableName}/${name}: ASIDE_CLI_ERROR: exit 1; inspect aside --help locally`);
           expect(r.stdout).not.toContain(reason);
@@ -213,16 +251,16 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
       }
       // Both ways out stay reachable: opted out, and Aside not installed (empty PATH dir).
       const sh = shells[0];
-      const optOut = spawnSync(sh, ['-c', setupProbe], { env: { PATH: base, GSTACK_SKIP_ASIDE: '1', GSTACK_PLATFORM: 'Darwin' }, encoding: 'utf8', timeout: 30_000 });
+      const optOut = spawnSync(sh, ['-c', setupProbe], { env: { ...isolatedEnv(base), GSTACK_SKIP_ASIDE: '1', GSTACK_PLATFORM: 'Darwin' }, encoding: 'utf8', timeout: 30_000 });
       expect(optOut.stdout.trim()).toBe('NEEDS_ASIDE: Darwin');
-      const noAside = spawnSync(sh, ['-c', setupProbe], { env: { PATH: shellPath(path.join(dir, 'gt')), GSTACK_PLATFORM: 'Linux' }, encoding: 'utf8', timeout: 30_000 });
+      const noAside = spawnSync(sh, ['-c', setupProbe], { env: { ...isolatedEnv(shellPath(path.join(dir, 'gt'))), GSTACK_PLATFORM: 'Linux' }, encoding: 'utf8', timeout: 30_000 });
       expect(noAside.stdout.trim()).toBe('NEEDS_ASIDE: Linux');
       // E7 (#2902): installed only at ~/.local/bin (not on the macOS login PATH) is still found, and named.
       const home = path.join(dir, 'home');
       write(path.join(home, '.local', 'bin', 'aside'), '#!/bin/sh\necho "ASIDE_READY /tmp/x"\n');
       wrap(lookup('grep')!, path.join(dir, 'grep-only', 'grep'));
       for (const shell of shells) {
-        const offPath = spawnSync(shell, ['-c', setupProbe], { env: { HOME: home, PATH: `${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, 'grep-only'))}` }, encoding: 'utf8', timeout: 30_000 });
+        const offPath = spawnSync(shell, ['-c', setupProbe], { env: isolatedEnv(`${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, 'grep-only'))}`, home), encoding: 'utf8', timeout: 30_000 });
         expect(offPath.stdout.trim()).toBe(`READY: ${path.join(home, '.local', 'bin', 'aside')}`);
       }
     } finally {

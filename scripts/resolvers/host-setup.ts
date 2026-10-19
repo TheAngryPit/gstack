@@ -8,9 +8,10 @@ export function generateSpecHostDispatch(ctx: TemplateContext): string {
 \`\`\`bash
 [ -r "\${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was spawned." >&2; exit 1; }
 cd -- "\${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
-[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was spawned." >&2; exit 1; }
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "ERROR: not at worktree root." >&2; exit 1; }
 SPAWN_PATH=$(pwd -P)
-cat "$ARCHIVE_PATH" | (cd "$SPAWN_PATH" && claude -p 2>&1) &
+CONTRACT=$(~/.claude/skills/gstack/bin/gstack-autoplan contract) || { echo "ERROR: gstack-autoplan contract failed; nothing was spawned." >&2; exit 1; }
+{ cat "$ARCHIVE_PATH"; printf '\\n\\n%s\\n' "$CONTRACT"; } | (cd "$SPAWN_PATH" && GSTACK_SESSION_KIND=spawned claude -p 2>&1) &
 SPAWN_PID=$!
 echo "Spawned: PID $SPAWN_PID in $SPAWN_PATH (branch $SPAWN_BRANCH)"
 echo "Follow with: cd $SPAWN_PATH && claude --resume"
@@ -23,7 +24,7 @@ Update archive frontmatter with \`spec_worktree_path: $SPAWN_PATH\` and
 \`\`\`bash
 [ -r "\${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was dispatched." >&2; exit 1; }
 cd -- "\${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
-[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was dispatched." >&2; exit 1; }
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "ERROR: not at worktree root." >&2; exit 1; }
 echo "Native dispatch preflight ready"
 \`\`\`
 
@@ -31,6 +32,8 @@ If the worktree was created, dispatch an authorised native Codex worker
 using the tools actually advertised in this session. Use a fresh context
 (\`fork_turns: "none"\` where the native API supports it), the approved spec,
 exact worktree path/branch, bounded file ownership and verification criteria.
+Include the full coordinator contract above verbatim in the worker prompt as
+inherited lane data, after the approved spec.
 Preserve the selected model and effort. Tell the worker other agents may be
 editing the repository: preserve their changes and remain in its assigned worktree.
 Do not inherit unrelated conversation or invoke Claude. Do not create a new
@@ -137,8 +140,13 @@ event before claiming live automation. Importing a recorded Codex session is
 retrospective; it does not prove a live hook fired. No Claude settings or hooks
 are involved. A skill-start call alone does not automatically ingest transcripts.
 
-Set \`transcript_ingest_mode\` only to the authorised value: \`off\`,
-\`incremental\`, or \`bulk\`. \`off\` means never ingest, not incremental.
+Set \`transcript_ingest_mode\` only to an authorised value accepted by the
+config validator: \`off\`, \`recent\`, \`all\`, or \`new@<YYYY-MM-DDTHH:MM:SSZ>\`.
+Use \`recent+repos\`, \`all+repos\`, or \`new@<YYYY-MM-DDTHH:MM:SSZ>+repos\` only
+when the user also authorises and configures the \`transcript_repos\` allowlist.
+\`off\` means never ingest; \`recent\` covers sessions from the last 90 days,
+\`all\` covers all history, and \`new@…\` applies a session start-time cutoff.
+\`--incremental\` and \`--bulk\` are collector execution flags, not config values.
 Historical ingestion, future capture and sync remain independently reportable.
 Verify a resulting authorised page through the canonical GBrain path and record
 parser proof, hook/runtime proof, ingestion proof and Git push proof separately.
