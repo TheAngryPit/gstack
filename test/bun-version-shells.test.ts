@@ -105,10 +105,11 @@ describe.skipIf(process.platform === 'win32')('Bun floor check in every shell (#
     });
   }
 
-  test('/gstack-upgrade Step 4 runs the floor check through bash, whatever the tool shell is', () => {
+  test('/gstack-upgrade checks the exact trusted candidate floor through bash, whatever the tool shell is', () => {
     const tmpl = fs.readFileSync(path.join(ROOT, 'gstack-upgrade', 'SKILL.md.tmpl'), 'utf8');
-    expect(tmpl).toContain(`HOLD=$(bash -c '. bin/gstack-bun-version.sh && gstack_bun_incoming_hold . origin/main' 2>/dev/null)`);
-    expect(tmpl).not.toMatch(/HOLD=\$\(\. bin\/gstack-bun-version\.sh/);
+    expect(tmpl).toContain(`HOLD=$(bash -c '. "$1/bin/gstack-bun-version.sh" && gstack_bun_incoming_hold "$1" "$2"' _ "$SOURCE_DIR" "$CANDIDATE_SHA" 2>/dev/null || true)`);
+    expect(tmpl).toContain('The transactional updater repeats this check immediately before activation.');
+    expect(tmpl).not.toContain('gstack_bun_incoming_hold . origin/main');
     expect(tmpl).toContain('BUN_VERSION_UNREADABLE');
   });
 });

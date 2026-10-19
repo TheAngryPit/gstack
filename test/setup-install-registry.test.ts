@@ -164,21 +164,24 @@ describe.skipIf(process.platform === 'win32')('disabled_skills (#1206)', () => {
     expect(typo.stderr).toContain("Did you mean 'make-pdf'?");
     expect(config('gstack-upgrade').status).toBe(1);
 
-    const set = config('make-pdf, gstack-pair-agent');
+    const set = config('make-pdf, gstack-pair-agent, eval-plan');
     expect(set.status, set.stderr).toBe(0);
-    expect(set.stdout).toContain('Disabled (gstack-config disabled_skills, not registered): make-pdf pair-agent');
+    expect(set.stdout).toContain('Disabled (gstack-config disabled_skills, not registered): make-pdf pair-agent eval-plan');
     expect(set.stdout).toContain(`apply to codex (${join(f.home, '.codex/skills')}): cd ${realpathSync(src)} && ./setup --host codex`);
     expect(existsSync(join(f.home, '.claude/skills/make-pdf'))).toBe(false);
     expect(existsSync(join(f.home, '.claude/skills/pair-agent'))).toBe(false);
+    expect(existsSync(join(f.home, '.claude/skills/eval-plan'))).toBe(false);
     expect(existsSync(join(f.home, '.claude/skills/review/SKILL.md'))).toBe(true);
     expect(existsSync(join(src, 'make-pdf/SKILL.md'))).toBe(true);
+    expect(existsSync(join(src, 'eval-plan/SKILL.md'))).toBe(true);
 
     const refresh = runSetup(f, join(src, 'setup'), ['--refresh-registered']);
     expect(refresh.status, refresh.stdout + refresh.stderr).toBe(0);
     expect(existsSync(join(f.home, '.codex/skills/gstack-make-pdf'))).toBe(false);
+    expect(existsSync(join(f.home, '.codex/skills/gstack-eval-plan'))).toBe(false);
     expect(existsSync(join(f.home, '.codex/skills/gstack-review/SKILL.md'))).toBe(true);
     expect(existsSync(join(f.home, '.claude/skills/make-pdf'))).toBe(false);
-    expect(refresh.stdout).toContain('disabled skills (not registered on any host): make-pdf pair-agent');
+    expect(refresh.stdout).toContain('disabled skills (not registered on any host): make-pdf pair-agent eval-plan');
 
     expect(config('').status).toBe(0);
     expect(existsSync(join(f.home, '.claude/skills/make-pdf/SKILL.md'))).toBe(true);

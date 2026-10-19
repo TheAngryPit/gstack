@@ -26,6 +26,7 @@ env:
 
 jobs:
   build-image:
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubicloud-standard-8
     timeout-minutes: 15
     permissions:
@@ -80,6 +81,7 @@ jobs:
 
 
   plan-slices:
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubicloud-standard-8
     timeout-minutes: 10
     permissions:
@@ -116,6 +118,7 @@ jobs:
           retention-days: 30
 
   eval-slices:
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubicloud-standard-8
     needs: [build-image, plan-slices]
     env:
@@ -256,7 +259,7 @@ jobs:
     # !cancelled(): the report must run (and FAIL) when an executor died — a
     # missing slice artifact reading as green is the class this lane kills —
     # but a cancelled run stops here.
-    if: ${{ !cancelled() && needs.plan-slices.result == 'success' }}
+    if: ${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.plan-slices.result == 'success' }}
     timeout-minutes: 10
     permissions:
       contents: read

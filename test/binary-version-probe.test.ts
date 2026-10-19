@@ -46,7 +46,13 @@ describe('compiled-binary entries answer --version early (#2595)', () => {
       expect(fs.existsSync(path.join(r.tmp, 'state'))).toBe(false);
       expect(fs.existsSync(path.join(r.tmp, 'gstack-state'))).toBe(false);
       // `bun run` itself may create its runtime cache under the home; the entry writes nothing.
-      expect(fs.readdirSync(r.home).filter(name => name !== '.bun' && name !== 'AppData')).toEqual([]);
+      const homeEntries = fs.readdirSync(r.home);
+      if (process.platform === 'darwin' && homeEntries.includes('Library')) {
+        // macOS Bun stores the same runtime cache at Library/Caches/bun.
+        expect(fs.readdirSync(path.join(r.home, 'Library'))).toEqual(['Caches']);
+        expect(fs.readdirSync(path.join(r.home, 'Library', 'Caches'))).toEqual(['bun']);
+      }
+      expect(homeEntries.filter(name => name !== '.bun' && name !== 'AppData' && !(process.platform === 'darwin' && name === 'Library'))).toEqual([]);
     });
   }
 

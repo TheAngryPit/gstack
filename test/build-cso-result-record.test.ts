@@ -98,14 +98,16 @@ describe.skipIf(process.platform === 'win32')('build-cso.sh build-result record 
     expect(existsSync(join(dir, 'bin', 'gstack-cso-launcher'))).toBe(false);
   });
 
-  test('a missing publisher at exec time cleans the stage and keeps the old generation', () => {
+  test('a publisher removed at exec time reports Bash exec failure and keeps the old generation', () => {
     const dir = fixture(); seedOld(dir);
     const r = build(dir, 'GSTACK_CSO_BUILD_TESTING=1 GSTACK_CSO_BUILD_TEST_REMOVE_LOCKER_AFTER=before-exec');
-    expect(r.status).toBe(127);
+    // Bash's `exec` builtin reports 126 when the named executable disappears
+    // between validation and the exec attempt (plain command lookup uses 127).
+    expect(r.status).toBe(126);
     expect(r.stderr).toContain('CSO publication could not start');
     expect(stages(dir)).toEqual([]);
     expect(launcherOutput(dir)).toContain('OLD');
-    expect(record(dir)).toMatchObject({ result: 'failed', stage: 'publish', reason: 'exit 127', installed: '9.9.9.8 (0123456789ab)', launcher: 'yes' });
+    expect(record(dir)).toMatchObject({ result: 'failed', stage: 'publish', reason: 'exit 126', installed: '9.9.9.8 (0123456789ab)', launcher: 'yes' });
   });
 });
 

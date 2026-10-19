@@ -422,7 +422,7 @@ resolve_candidate() {
   esac
 }
 update_worker() {
-  local lock_rc output target from version old_version dirty stash_before stash_after txn candidate_result setup_out setup_rc row host scope project dest root source row_version prefix render updated model commit installed_scope installed_project installed_root installed_source installed_prefix installed_render installed_model installed_commit rc hook_hold
+  local lock_rc output target from version old_version dirty stash_before stash_after txn candidate_result setup_out setup_rc row host scope project dest root source row_version prefix render updated model commit installed_scope installed_project installed_root installed_source installed_prefix installed_render installed_model installed_commit rc hook_hold bun_hold
   if [ "$RECOVERY_ONLY" = 1 ]; then
     local attempt=0 recovery_owner
     while :; do
@@ -487,6 +487,12 @@ update_worker() {
     return 0
   fi
   git -C "$GSTACK_DIR" merge-base --is-ancestor "$from" "$target" 2>/dev/null || { log_entry "UPDATE_DEFERRED target_not_fast_forward"; defer_update target_not_fast_forward; return 0; }
+  bun_hold="$(. "$GSTACK_DIR/bin/gstack-bun-version.sh" 2>/dev/null && gstack_bun_incoming_hold "$GSTACK_DIR" "$target")" || bun_hold=""
+  if [ -n "$bun_hold" ]; then
+    log_entry "UPDATE_DEFERRED $bun_hold sha=$target"
+    defer_update "$bun_hold"
+    return 0
+  fi
   hook_hold="$(hook_incoming_hold "$target")" || hook_hold=""
   if [ -n "$hook_hold" ]; then
     log_entry "UPDATE_DEFERRED $hook_hold sha=$target"

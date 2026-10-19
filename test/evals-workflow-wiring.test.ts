@@ -30,6 +30,7 @@ const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf-8');
 const evalsYml = read('.github/workflows/evals.yml');
 const periodicYml = read('.github/workflows/evals-periodic.yml');
 const marathonYml = read('.github/workflows/evals-marathon.yml');
+const sweepYml = read('.github/workflows/eval-sweep.yml');
 const registerAction = read('.github/actions/register-gstack-skills/action.yml');
 
 /** Every planner site: its manifest path and budget (`--slice-budget S --jobs J`). */
@@ -37,6 +38,19 @@ function plannerSites(source: string): Array<{ manifest: string; budgetSeconds: 
   return [...source.matchAll(/--emit-plan\s+(\S+)\s+--slice-budget\s+(\d+)\s+--jobs\s+(\d+)/g)]
     .map((m) => ({ manifest: m[1]!, budgetSeconds: Number(m[2]), jobs: Number(m[3]) }));
 }
+
+test('scheduled paid workflows stay confined to garrytan/gstack', () => {
+  for (const [name, source] of [
+    ['evals-periodic.yml', periodicYml],
+    ['evals-marathon.yml', marathonYml],
+    ['eval-sweep.yml', sweepYml],
+  ] as const) {
+    const jobs = (Bun.YAML.parse(source) as { jobs: Record<string, { if?: string }> }).jobs;
+    for (const [jobName, job] of Object.entries(jobs)) {
+      expect(job.if, `${name}:${jobName} must guard paid execution`).toContain("github.repository == 'garrytan/gstack'");
+    }
+  }
+});
 
 type Step = { id?: string; name?: string; run?: string; uses?: string; env?: Record<string, string>; with?: Record<string, string> };
 type Job = { needs?: string[]; env?: Record<string, string>; outputs?: Record<string, string>; 'timeout-minutes': string | number;
@@ -228,7 +242,7 @@ describe('evals-periodic.yml host-run Codex slices', () => {
     expect(matrixStep.run).toContain('} >> "$GITHUB_OUTPUT"');
     expect(planner.outputs!.periodic_codex_slices).toBe('${{ steps.periodic-matrix.outputs.codex_slices }}');
     expect(codex.needs).toEqual(['build-image', 'plan-slices']);
-    expect(codex.if).toBe("${{ needs.plan-slices.outputs.periodic_codex_slices != '[]' }}");
+    expect(codex.if).toBe("${{ github.repository == 'garrytan/gstack' && needs.plan-slices.outputs.periodic_codex_slices != '[]' }}");
     expect(codex.strategy!.matrix.slice).toBe('${{ fromJSON(needs.plan-slices.outputs.periodic_codex_slices) }}');
     expect(codex['timeout-minutes']).toBe('${{ fromJSON(needs.plan-slices.outputs.periodic_slice_timeouts)[matrix.slice] }}');
     expect(codex.steps[0]!.run).toBe('echo "GSTACK_SLICE_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"');
@@ -399,7 +413,7 @@ describe('panel verdict surfaces (eval reliability policy)', () => {
     const redispatch = jobs.redispatch!;
     expect([redispatch.needs].flat()).toEqual(['report']);
     expect(redispatch.permissions).toEqual({ actions: 'write' });
-    expect(redispatch.if).toBe("${{ !cancelled() && needs.report.outputs.redispatch == 'true' }}");
+    expect(redispatch.if).toBe("${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.report.outputs.redispatch == 'true' }}");
     expect(redispatch.steps[0]!.run).toContain('-f redispatch_of="$GITHUB_RUN_ID"');
     const classify = report.steps.find(step => step.id === 'verdict')!;
     expect(classify.run).toContain('.verdict.redispatchEligible == true');
@@ -426,7 +440,7 @@ describe('scheduled paid lanes: concurrency and branch dispatch scope', () => {
   test('a branch dispatch of evals-periodic runs the periodic lane only unless it opts into the gate census', () => {
     const wf = parse(periodicYml);
     expect(wf.on.workflow_dispatch!.inputs!.include_gate_census).toMatchObject({ type: 'boolean', default: false });
-    expect(wf.jobs['gate-census']!.if).toBe("${{ github.ref == 'refs/heads/main' || inputs.include_gate_census }}");
+    expect(wf.jobs['gate-census']!.if).toBe("${{ github.repository == 'garrytan/gstack' && (github.ref == 'refs/heads/main' || inputs.include_gate_census) }}");
     const report = wf.jobs.report!.steps;
     const reconcile = report.find(step => step.name === 'Reconcile gate census against the manifest (fail-closed)')!;
     expect(reconcile.env?.GATE_CENSUS).toBe('${{ needs.gate-census.result }}');

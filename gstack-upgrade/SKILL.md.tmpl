@@ -149,10 +149,26 @@ LEVEL=$((LEVEL + 1))
 printf '%s %s %s\n' "$CANDIDATE_SHA" "$LEVEL" "$(date +%s)" > "$SNOOZE_FILE"
 ```
 
-After the operator approved this exact candidate, run only:
+Before applying a trusted candidate, check its exact commit's Bun floor through
+bash (the skill may be running under a shell that does not split variables):
 
 ```bash
-GSTACK_DIR="$SOURCE_DIR" "$SOURCE_DIR/bin/gstack-session-update" --apply-candidate "<sha from UPGRADE_AVAILABLE>"
+CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"
+HOLD=$(bash -c '. "$1/bin/gstack-bun-version.sh" && gstack_bun_incoming_hold "$1" "$2"' _ "$SOURCE_DIR" "$CANDIDATE_SHA" 2>/dev/null || true)
+if [ -n "$HOLD" ]; then
+  case "$HOLD" in
+    bun-version-unreadable*) echo "Cannot verify the candidate Bun floor: $HOLD (BUN_VERSION_UNREADABLE)" ;;
+    *) echo "Cannot apply this candidate yet: $HOLD" ;;
+  esac
+  exit 1
+fi
+```
+
+The transactional updater repeats this check immediately before activation.
+After the operator approved this exact candidate and the check passed, run only:
+
+```bash
+GSTACK_DIR="$SOURCE_DIR" "$SOURCE_DIR/bin/gstack-session-update" --apply-candidate "$CANDIDATE_SHA"
 ```
 
 The command revalidates that candidate's workflow identities, latest attempts,

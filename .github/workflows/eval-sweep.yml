@@ -41,6 +41,7 @@ env:
 
 jobs:
   image:
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -80,6 +81,7 @@ jobs:
           echo "ref=${IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
 
   sweep:
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubicloud-standard-16
     needs: image
     timeout-minutes: 240

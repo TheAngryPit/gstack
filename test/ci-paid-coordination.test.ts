@@ -113,7 +113,7 @@ describe('paid CI coordination stays off the eval image', () => {
         // A confirmed verdict reuse (R2a/R2) is the one PR run that executes no slice.
         expect(executor.if).toBe("${{ !cancelled() && needs.build-image.result == 'success' && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true' }}");
       } else {
-        expect(executor.if).toBeUndefined();
+        expect(executor.if).toBe("github.repository == 'garrytan/gstack'");
       }
       expect(executor.steps.some(step => step.run === 'bun run build')).toBe(true);
       expect(executor.steps.some(step => step.uses === './.github/actions/restore-deps')).toBe(true);
@@ -124,7 +124,9 @@ describe('paid CI coordination stays off the eval image', () => {
       expect(report.container).toBeUndefined();
       expect(report.needs).toContain('plan-slices');
       expect(report.needs).toContain('eval-slices');
-      expect(report.if).toBe("${{ !cancelled() && needs.plan-slices.result == 'success' }}");
+      expect(report.if).toBe(name === 'evals.yml'
+        ? "${{ !cancelled() && needs.plan-slices.result == 'success' }}"
+        : "${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.plan-slices.result == 'success' }}");
       expect(JSON.stringify(report.steps)).not.toMatch(/restore-deps|bun install/);
       expect(report.steps.find(step => step.run?.includes('--report'))?.run).toContain('bun --no-install run');
       if (name === 'evals.yml') expect(report.permissions).toEqual({ contents: 'read' });

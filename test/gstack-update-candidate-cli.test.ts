@@ -420,6 +420,7 @@ describe('gstack update candidate CLI', () => {
       registerCodex(fx);
       const before = git(fx.install, 'rev-parse', 'HEAD');
       const resolved = await run(fx, api.url, resolver(fx), ['resolve']);
+      if (resolved.status !== 0) throw new Error(`candidate resolver failed (${resolved.status}): ${resolved.stdout}\n${resolved.stderr}`);
       expect(resolved.status, resolved.stderr).toBe(0);
       const applied = await run(fx, api.url, updater(fx), ['--apply-candidate', target]);
       expect(applied.status, applied.stderr).toBe(0);
@@ -427,6 +428,33 @@ describe('gstack update candidate CLI', () => {
       expect(git(fx.install, 'rev-parse', 'HEAD')).toBe(before);
       expect(git(fx.install, 'status', '--porcelain', '--untracked-files=all')).toBe('');
       expect(fs.readFileSync(path.join(fx.stateDir, 'session-update-pending'), 'utf8')).toContain('reason=hook-does-not-parse:');
+      expect(fs.existsSync(path.join(fx.stateDir, 'session-update-transaction'))).toBe(false);
+      expect(fs.existsSync(path.join(fx.stateDir, 'just-upgraded-from'))).toBe(false);
+    } finally { api.stop(); }
+  }, 120_000);
+
+  test('trusted candidate holds before the source transaction when its Bun floor exceeds the current runtime', async () => {
+    const fx = makeFixture('full');
+    const realBun = process.execPath.replace(/'/g, "'\\''");
+    fs.writeFileSync(path.join(fx.bin, 'bun'), [
+      '#!/bin/sh',
+      'if [ "${1:-}" = --version ]; then printf "1.2.0\\n"; exit 0; fi',
+      `exec '${realBun}' "$@"`,
+    ].join('\n') + '\n', { mode: 0o755 });
+    const target = publish(fx);
+    const api = await githubFixture(initialApiState(target));
+    try {
+      registerCodex(fx);
+      const before = git(fx.install, 'rev-parse', 'HEAD');
+      const resolved = await run(fx, api.url, resolver(fx), ['resolve']);
+      if (resolved.status !== 0) throw new Error(`candidate resolver failed (${resolved.status}): ${resolved.stdout}\n${resolved.stderr}`);
+      expect(resolved.status, resolved.stderr).toBe(0);
+      const applied = await run(fx, api.url, updater(fx), ['--apply-candidate', target]);
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(applied.stdout).toContain('UPDATE_DEFERRED bun-too-old: found Bun 1.2.0');
+      expect(git(fx.install, 'rev-parse', 'HEAD')).toBe(before);
+      expect(git(fx.install, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+      expect(fs.readFileSync(path.join(fx.stateDir, 'session-update-pending'), 'utf8')).toContain('reason=bun-too-old:');
       expect(fs.existsSync(path.join(fx.stateDir, 'session-update-transaction'))).toBe(false);
       expect(fs.existsSync(path.join(fx.stateDir, 'just-upgraded-from'))).toBe(false);
     } finally { api.stop(); }

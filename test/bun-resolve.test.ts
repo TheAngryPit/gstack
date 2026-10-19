@@ -77,7 +77,11 @@ describe('one Bun resolution contract, two twins', () => {
   test('GBRA-60: 1.4.3 in the store, 1.4.2 in $BUN_INSTALL, a CI-lane pin of 1.4.3 — both twins pick the store 1.4.3 for the project and for an unpinned or outside directory', () => {
     const l = layout({ storeVersions: ['1.4.3'] });
     const store143 = path.join(bunStore(l.state), '1.4.3/bun');
-    for (const [project, want] of [[l.pinned, `${store143} 1.4.3 pin`], [l.unpinned, `${store143} 1.4.3 default`], [null, `${store143} 1.4.3 default`]] as const) {
+    // The fixture's workflow pin is ubuntu-latest, so it applies only when
+    // this host evaluates the project for Linux. Other platforms keep the
+    // range pin and select the default installed Bun.
+    const projectWant = `${store143} 1.4.3 ${process.platform === 'linux' ? 'pin' : 'default'}`;
+    for (const [project, want] of [[l.pinned, projectWant], [l.unpinned, `${store143} 1.4.3 default`], [null, `${store143} 1.4.3 default`]] as const) {
       expect(bashResolve(l, project)).toBe(want);
       expect(tsResolve(l, project)).toBe(want);
     }
@@ -91,7 +95,8 @@ describe('one Bun resolution contract, two twins', () => {
     const l = layout({ homeVersion: '1.4.3' });
     const home143 = path.join(l.home, '.bun/bin/bun');
     const bi142 = path.join(l.bunInstall, 'bin/bun');
-    for (const [project, want] of [[l.pinned, `${home143} 1.4.3 home`], [l.unpinned, `${bi142} 1.4.2 BUN_INSTALL`], [null, `${bi142} 1.4.2 BUN_INSTALL`]] as const) {
+    const projectWant = process.platform === 'linux' ? `${home143} 1.4.3 home` : `${bi142} 1.4.2 BUN_INSTALL`;
+    for (const [project, want] of [[l.pinned, projectWant], [l.unpinned, `${bi142} 1.4.2 BUN_INSTALL`], [null, `${bi142} 1.4.2 BUN_INSTALL`]] as const) {
       expect(bashResolve(l, project)).toBe(want);
       expect(tsResolve(l, project)).toBe(want);
     }

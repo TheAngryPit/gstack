@@ -228,10 +228,13 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
       const shells = ['sh', 'bash', 'zsh'].map(executable).filter((shell): shell is string => !!shell);
       expect(shells.length).toBeGreaterThan(0);
       const base = shellPath(path.join(dir, 'base'));
+      // zsh reads ~/.zshenv even for noninteractive commands. Keep both its
+      // PATH and Aside's ~/.local/bin fallback inside this fixture.
+      const isolatedEnv = (PATH: string, HOME = dir) => ({ PATH, HOME, ZDOTDIR: HOME });
       for (const arm of arms) {
         const PATH = arm === 'none' ? base : `${shellPath(path.join(dir, arm))}:${base}`;
         for (const shell of shells) {
-          const r = spawnSync(shell, ['-c', setupProbe], { env: { PATH }, encoding: 'utf8', timeout: 30_000 });
+          const r = spawnSync(shell, ['-c', setupProbe], { env: isolatedEnv(PATH), encoding: 'utf8', timeout: 30_000 });
           const status = arm === 'none' ? 'ASIDE_UNAVAILABLE: bounded probe unavailable' : 'READY: aside';
           const name = path.basename(shell).replace(/\.exe$/i, '');
           expect(`${name}/${arm}: ${r.stdout.trim()}`).toBe(`${name}/${arm}: ${status}`);
@@ -240,7 +243,7 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
       const reasons = { window: 'No browser window is open for account u0', preload: "Error: Cannot find module '/x/preload.cjs'" };
       for (const [name, reason] of Object.entries(reasons)) {
         for (const shell of shells) {
-          const r = spawnSync(shell, ['-c', setupProbe], { env: { PATH: `${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, name))}` }, encoding: 'utf8', timeout: 30_000 });
+          const r = spawnSync(shell, ['-c', setupProbe], { env: isolatedEnv(`${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, name))}`), encoding: 'utf8', timeout: 30_000 });
           const executableName = path.basename(shell).replace(/\.exe$/i, '');
           expect(`${executableName}/${name}: ${r.stdout.trim()}`).toBe(`${executableName}/${name}: ASIDE_CLI_ERROR: exit 1; inspect aside --help locally`);
           expect(r.stdout).not.toContain(reason);
@@ -248,16 +251,16 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
       }
       // Both ways out stay reachable: opted out, and Aside not installed (empty PATH dir).
       const sh = shells[0];
-      const optOut = spawnSync(sh, ['-c', setupProbe], { env: { PATH: base, GSTACK_SKIP_ASIDE: '1', GSTACK_PLATFORM: 'Darwin' }, encoding: 'utf8', timeout: 30_000 });
+      const optOut = spawnSync(sh, ['-c', setupProbe], { env: { ...isolatedEnv(base), GSTACK_SKIP_ASIDE: '1', GSTACK_PLATFORM: 'Darwin' }, encoding: 'utf8', timeout: 30_000 });
       expect(optOut.stdout.trim()).toBe('NEEDS_ASIDE: Darwin');
-      const noAside = spawnSync(sh, ['-c', setupProbe], { env: { PATH: shellPath(path.join(dir, 'gt')), GSTACK_PLATFORM: 'Linux' }, encoding: 'utf8', timeout: 30_000 });
+      const noAside = spawnSync(sh, ['-c', setupProbe], { env: { ...isolatedEnv(shellPath(path.join(dir, 'gt'))), GSTACK_PLATFORM: 'Linux' }, encoding: 'utf8', timeout: 30_000 });
       expect(noAside.stdout.trim()).toBe('NEEDS_ASIDE: Linux');
       // E7 (#2902): installed only at ~/.local/bin (not on the macOS login PATH) is still found, and named.
       const home = path.join(dir, 'home');
       write(path.join(home, '.local', 'bin', 'aside'), '#!/bin/sh\necho "ASIDE_READY /tmp/x"\n');
       wrap(lookup('grep')!, path.join(dir, 'grep-only', 'grep'));
       for (const shell of shells) {
-        const offPath = spawnSync(shell, ['-c', setupProbe], { env: { HOME: home, PATH: `${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, 'grep-only'))}` }, encoding: 'utf8', timeout: 30_000 });
+        const offPath = spawnSync(shell, ['-c', setupProbe], { env: isolatedEnv(`${shellPath(path.join(dir, 'gt'))}:${shellPath(path.join(dir, 'grep-only'))}`, home), encoding: 'utf8', timeout: 30_000 });
         expect(offPath.stdout.trim()).toBe(`READY: ${path.join(home, '.local', 'bin', 'aside')}`);
       }
     } finally {
