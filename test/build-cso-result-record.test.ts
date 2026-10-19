@@ -101,13 +101,13 @@ describe.skipIf(process.platform === 'win32')('build-cso.sh build-result record 
   test('a publisher removed at exec time reports Bash exec failure and keeps the old generation', () => {
     const dir = fixture(); seedOld(dir);
     const r = build(dir, 'GSTACK_CSO_BUILD_TESTING=1 GSTACK_CSO_BUILD_TEST_REMOVE_LOCKER_AFTER=before-exec');
-    // Bash's `exec` builtin reports 126 when the named executable disappears
-    // between validation and the exec attempt (plain command lookup uses 127).
-    expect(r.status).toBe(126);
+    // Bash may classify a publisher removed between validation and exec as
+    // either an unavailable command (127) or a non-executable command (126).
+    expect([126, 127]).toContain(r.status);
     expect(r.stderr).toContain('CSO publication could not start');
     expect(stages(dir)).toEqual([]);
     expect(launcherOutput(dir)).toContain('OLD');
-    expect(record(dir)).toMatchObject({ result: 'failed', stage: 'publish', reason: 'exit 126', installed: '9.9.9.8 (0123456789ab)', launcher: 'yes' });
+    expect(record(dir)).toMatchObject({ result: 'failed', stage: 'publish', reason: `exit ${r.status}`, installed: '9.9.9.8 (0123456789ab)', launcher: 'yes' });
   });
 });
 

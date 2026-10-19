@@ -9,7 +9,7 @@ import { execFile, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { dirname, join } from 'path';
+import { dirname, join, resolve, sep } from 'path';
 import { createHash } from 'crypto';
 import { runGeneration } from '../scripts/gen-skill-docs';
 import { ALL_HOST_CONFIGS } from '../hosts/index';
@@ -141,6 +141,17 @@ function world(host: HostRender) {
   writeFileSync(join(plainRepo, 'VERSION'), '0.1.0\n');
   writeFileSync(join(plainRepo, 'setup'), '#!/bin/sh\n');
   mustSh(plainRepo, 'git init -q -b main && git add -A && git commit -q -m init');
+  const contractPath = host.spec.join('\n').match(/CONTRACT=\$\(~\/([^\s)]+)\/bin\/gstack-autoplan contract\)/)?.[1];
+  if (contractPath) {
+    const fixtureHome = resolve(root, 'home');
+    const hostRuntimeRoot = resolve(fixtureHome, contractPath);
+    if (!hostRuntimeRoot.startsWith(fixtureHome + sep)) {
+      throw new Error(`Rendered host runtime escaped fixture HOME: ${contractPath}`);
+    }
+    const hostRuntimeBin = join(hostRuntimeRoot, 'bin');
+    mkdirSync(hostRuntimeBin, { recursive: true });
+    writeFileSync(join(hostRuntimeBin, 'gstack-autoplan'), '#!/bin/sh\necho "## Coordinator contract (fixture)"\n', { mode: 0o755 });
+  }
   return { w, project, stub, gitLog, gstack, plainRepo };
 }
 

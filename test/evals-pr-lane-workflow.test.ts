@@ -83,7 +83,7 @@ describe('evals.yml readiness-gated dispatch (R1, GSTA-48)', () => {
 
   test('a tiny PR-only job waits for a quiet PR and green Free Tests before recovery and planning', () => {
     expect(readiness['runs-on']).toBe('ubuntu-24.04');
-    expect(readiness.if).toBe("github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository");
+    expect(readiness.if).toBe("github.repository == 'garrytan/gstack' && github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository");
     expect(readiness.permissions).toEqual({ contents: 'read', actions: 'read', 'pull-requests': 'read' });
     expect(Number(readiness['timeout-minutes'])).toBeGreaterThan(80);
     const wait = step('readiness', 'Wait for a quiet PR and green Free Tests on this head')!;

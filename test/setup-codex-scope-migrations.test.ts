@@ -144,7 +144,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     }
     install(f);
     expect(lstatSync(old, { throwIfNoEntry: false })).toBeUndefined();
-    expect(readFileSync(join(f.global, 'gstack-claude-code/SKILL.md'), 'utf8')).toContain('name: claude-code');
+    expect(readFileSync(join(f.global, 'gstack-claude-code/SKILL.md'), 'utf8')).toContain('name: gstack-claude-code');
     expect(readFileSync(join(f.global, 'custom/SKILL.md'), 'utf8')).toBe('User-owned skill.\n');
   }, 90_000);
 

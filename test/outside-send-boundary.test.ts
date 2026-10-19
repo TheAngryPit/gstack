@@ -60,7 +60,14 @@ describe('generated skills start outside CLIs only through the consent-enforcing
       const bad = files.flatMap(f => directLaunches(fs.readFileSync(f, 'utf8')).map(l => `${path.relative(TMP, f)}: ${l}`));
       expect(bad).toEqual([]);
       const wrapped = files.filter(f => /run-with-timeout (?:--user-invoked )?(?:--effort \w+ (?:--request-effort '[^']*' )?)?\d+ codex|gstack-claude-code/.test(fs.readFileSync(f, 'utf8')));
-      expect(wrapped.length).toBeGreaterThan(5);
+      if (host === 'claude') {
+        expect(wrapped.length).toBeGreaterThan(5);
+      } else {
+        expect(wrapped.map(f => path.relative(path.join(TMP, host), f)).sort()).toEqual([
+          '.agents/skills/gstack-claude-code/SKILL.md',
+          '.agents/skills/gstack/SKILL.md',
+        ]);
+      }
     });
   }
 

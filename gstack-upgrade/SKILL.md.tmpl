@@ -161,7 +161,7 @@ bash (the skill may be running under a shell that does not split variables):
 
 ```bash
 CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"
-HOLD=$(bash -c '. "$1/bin/gstack-bun-version.sh" && gstack_bun_incoming_hold "$1" "$2"' _ "$SOURCE_DIR" "$CANDIDATE_SHA" 2>/dev/null || true)
+HOLD=$(GSTACK_HOLD_SOURCE="$SOURCE_DIR" GSTACK_HOLD_SHA="$CANDIDATE_SHA" bash -c '. "$GSTACK_HOLD_SOURCE/bin/gstack-bun-version.sh" && gstack_bun_incoming_hold "$GSTACK_HOLD_SOURCE" "$GSTACK_HOLD_SHA"' 2>/dev/null || true)
 if [ -n "$HOLD" ]; then
   case "$HOLD" in
     bun-version-unreadable*) echo "Cannot verify the candidate Bun floor: $HOLD (BUN_VERSION_UNREADABLE)" ;;

@@ -28,7 +28,7 @@ function form(name: string): string {
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8', timeout: 60_000 }).trim();
 }
-const EDITED = 'bin/gstack-session-update';
+const EDITED = 'bin/gstack-session-update-legacy';
 const CONFLICT_LINE = 'THROTTLE_SECONDS=3600  # 1 hour';
 
 /**

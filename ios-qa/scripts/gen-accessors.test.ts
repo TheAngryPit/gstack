@@ -753,9 +753,11 @@ public final class StateServer {
       '-module-name', 'DebugBridgeCore',
       coreSource,
       '-emit-module-path', coreModule,
-    ], { encoding: 'utf8', timeout: 120_000 });
-    if (emitModule.status !== 0) {
-      throw new Error(`failed to build DebugBridgeCore test stub:\n${emitModule.stderr}`);
+    ], { encoding: 'utf8', timeout: 120_000, killSignal: 'SIGKILL' });
+    if (emitModule.error || emitModule.status !== 0) {
+      const exit = `status=${emitModule.status ?? 'null'}, signal=${emitModule.signal ?? 'none'}`;
+      const timeout = emitModule.error ? `, error=${emitModule.error.message}` : '';
+      throw new Error(`failed to build DebugBridgeCore test stub (${exit}${timeout}):\n${emitModule.stderr}`);
     }
 
     const appSource = join(workDir, 'AppState.swift');
@@ -776,11 +778,13 @@ ${render([{
       '-D', 'DEBUG',
       '-I', workDir,
       appSource,
-    ], { encoding: 'utf8', timeout: 120_000 });
-    if (typecheck.status !== 0) {
-      throw new Error(`generated accessor failed Swift type checking:\n${typecheck.stderr}`);
+    ], { encoding: 'utf8', timeout: 120_000, killSignal: 'SIGKILL' });
+    if (typecheck.error || typecheck.status !== 0) {
+      const exit = `status=${typecheck.status ?? 'null'}, signal=${typecheck.signal ?? 'none'}`;
+      const timeout = typecheck.error ? `, error=${typecheck.error.message}` : '';
+      throw new Error(`generated accessor failed Swift type checking (${exit}${timeout}):\n${typecheck.stderr}`);
     }
-  });
+  }, 270_000);
 
   test('strict JSON typing and cross-model validate-before-apply restore run correctly', () => {
     if (process.platform !== 'darwin') return;

@@ -234,7 +234,7 @@ for (const host of ['claude', 'codex'] as const) {
       expect(text).toContain('On --no-gate record skipped after redaction succeeds.');
       if (host === 'claude') {
         const scan = text.indexOf('#### Redaction scan — pre-codex');
-        const preflight = text.indexOf('_OUTSIDE_CFG=enabled', scan);
+        const preflight = text.indexOf('_OUTSIDE_CFG=$(', scan);
         expect(scan).toBeGreaterThan(-1);
         expect(preflight).toBeGreaterThan(scan);
       } else {

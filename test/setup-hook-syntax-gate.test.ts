@@ -26,6 +26,7 @@ const ROOT = path.resolve(import.meta.dir, '..');
 const CHECK = path.join(ROOT, 'bin', 'gstack-hook-check');
 const SETUP = fs.readFileSync(path.join(ROOT, 'setup'), 'utf8');
 const posix = (value: string) => value.replace(/\\/g, '/');
+const diagnosticPath = (file: string) => shellPath(fs.realpathSync(file));
 
 function slice(from: string, to: string | null): string {
   const start = SETUP.indexOf(from);
@@ -76,6 +77,8 @@ function fixtureTree(root: string) {
     fs.mkdirSync(path.dirname(path.join(root, helper)), { recursive: true });
     fs.copyFileSync(path.join(ROOT, helper), path.join(root, helper));
   }
+  fs.mkdirSync(path.join(root, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'bin/gstack-global-discover.ts'), 'export const fixture = true;\n');
   fs.copyFileSync(path.join(ROOT, 'setup'), path.join(root, 'setup'));
 }
 
@@ -130,7 +133,7 @@ describe('gstack-hook-check: what fails', () => {
     fs.writeFileSync(path.join(root, 'hosts/claude/hooks/question-log-hook.ts'), 'export const broken = ;\n');
     const broken = check(root);
     expect(broken.code).toBe(1);
-    expect(broken.out).toContain(`fail hosts/claude/hooks/question-log-hook ${shellPath(path.join(root, 'hosts/claude/hooks/question-log-hook.ts'))}:1: `);
+    expect(broken.out).toContain(`fail hosts/claude/hooks/question-log-hook ${diagnosticPath(path.join(root, 'hosts/claude/hooks/question-log-hook.ts'))}:1: `);
     expect(broken.out).not.toContain('bun could not bundle the TypeScript entry');
   }, 90_000); // Git Bash process startup makes two checks slow on Windows.
 
@@ -158,7 +161,7 @@ describe('gstack-hook-check: what fails', () => {
     fs.writeFileSync(ts, 'export const ok = 1;\nexport const x = {;\n');
     const r = check(root);
     expect(r.code).toBe(1);
-    expect(r.out).toContain(`fail hosts/claude/hooks/timeline-stop-hook ${shellPath(ts)}:2: Expected identifier`);
+    expect(r.out).toContain(`fail hosts/claude/hooks/timeline-stop-hook ${diagnosticPath(ts)}:2: Expected identifier`);
   });
 
   test('a broken module the entry imports fails at the imported file', () => {
@@ -169,7 +172,7 @@ describe('gstack-hook-check: what fails', () => {
     fs.writeFileSync(path.join(dir, 'hook-log.ts'), 'export function log(x: unknown) {\n  return x +;\n}\n');
     const r = check(root);
     expect(r.code).toBe(1);
-    expect(r.out).toContain(`fail hosts/claude/hooks/question-log-hook ${shellPath(path.join(dir, 'hook-log.ts'))}:2:`);
+    expect(r.out).toContain(`fail hosts/claude/hooks/question-log-hook ${diagnosticPath(path.join(dir, 'hook-log.ts'))}:2:`);
     expect(r.out).not.toContain('playwright');
   });
 
@@ -180,7 +183,7 @@ describe('gstack-hook-check: what fails', () => {
     fs.writeFileSync(entry, "import { x } from '../../lib/gone';\nconsole.log(x);\n");
     const r = check(root);
     expect(r.code).toBe(1);
-    expect(r.out).toContain(`fail autoplan/bin/phase-publication-hook ${shellPath(entry)}:1: Could not resolve: "../../lib/gone"`);
+    expect(r.out).toContain(`fail autoplan/bin/phase-publication-hook ${diagnosticPath(entry)}:1: Could not resolve: "../../lib/gone"`);
   });
 
   test('a missing entry fails instead of being skipped', () => {

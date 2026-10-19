@@ -1,6 +1,6 @@
 /**
- * bin/gstack-ff-update moves a gstack install's tree: the session-start
- * updater, /gstack-upgrade Step 4 and the held-install recovery commands call
+ * bin/gstack-ff-update moves a gstack install's tree: the legacy session-start
+ * updater and held-install recovery commands call
  * it. Edits that ride over the update stay in place; an edit that conflicts,
  * a staged change or an unmerged file is shelved in refs/gstack/rescue/<oid>
  * (first parent the pre-update HEAD, second the staged state) and the install
@@ -15,7 +15,7 @@ import * as path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const FF = path.join(ROOT, 'bin', 'gstack-ff-update');
-const UPDATER = path.join(ROOT, 'bin', 'gstack-session-update');
+const UPDATER = path.join(ROOT, 'bin', 'gstack-session-update-legacy');
 const bases: string[] = [];
 afterEach(() => { for (const b of bases.splice(0)) fs.rmSync(b, { recursive: true, force: true }); });
 
@@ -374,29 +374,6 @@ describe.skipIf(process.platform === 'win32')('gstack-ff-update: callers', () =>
     expect(refs).toHaveLength(1);
     expect(git(fx.install, 'show', `${refs[0]}:notes.txt`)).toBe('top LOCAL\nmiddle\nbottom');
   }, 60_000);
-
-  test('/gstack-upgrade Step 4\'s git block leaves no conflict markers: FF_OK with the edit in a rescue ref', () => {
-    const fx = makeFixture();
-    for (const f of ['setup', 'bin/gstack-config']) {
-      fs.mkdirSync(path.join(fx.seed, path.dirname(f)), { recursive: true });
-      fs.writeFileSync(path.join(fx.seed, f), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    }
-    fs.copyFileSync(FF, path.join(fx.seed, 'bin', 'gstack-ff-update'));
-    const base = release(fx, {}, '1.0.1');
-    git(fx.install, 'merge', '-q', '--ff-only', base);
-    write(fx, 'notes.txt', 'top LOCAL\nmiddle\nbottom\n');
-    const target = release(fx, { 'notes.txt': 'top UPSTREAM\nmiddle\nbottom\n' });
-    const tmpl = fs.readFileSync(path.join(ROOT, 'gstack-upgrade', 'SKILL.md.tmpl'), 'utf8');
-    const block = tmpl.slice(tmpl.indexOf('**For git installs**')).match(/```bash\n([\s\S]*?)\n```/)![1]!.replaceAll('{{SETUP_COMMAND}}', './setup');
-    const r = spawnSync('bash', ['-c', block], { cwd: fx.base, encoding: 'utf8', env: { ...isolatedEnv(fx.base), INSTALL_DIR: fx.install }, timeout: 60_000 });
-    expect(r.status, r.stdout + r.stderr).toBe(0);
-    expect(r.stdout).toContain('FF_OK');
-    expect(git(fx.install, 'rev-parse', 'HEAD')).toBe(target);
-    expect(git(fx.install, 'ls-files', '-u')).toBe('');
-    expect(read(fx, 'notes.txt')).toBe('top UPSTREAM\nmiddle\nbottom\n');
-    const ref = rescueRef(r.stdout)![1];
-    expect(git(fx.install, 'show', `${ref}:notes.txt`)).toBe('top LOCAL\nmiddle\nbottom');
-  });
 
   test('the bin copied outside any checkout recovers an install that has no gstack-ff-update', () => {
     const fx = makeFixture();

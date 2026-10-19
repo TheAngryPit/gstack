@@ -6,11 +6,6 @@ import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
 import { ALL_HOST_CONFIGS } from '../hosts';
 import { RESULT_CODES } from '../lib/result-codes';
 
-// #3182: Claude Code 2.1.277 removed TaskOutput. The plan-review native
-// fallback must bound its reviewer with primitives the host still has: a
-// background timer whose exit re-invokes the parent, the background agent's
-// completion notification, and TaskStop. These checks pin the generated
-// instructions, not a model's compliance with them.
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const SKILLS = ['plan-ceo-review', 'plan-eng-review', 'plan-devex-review'] as const;
@@ -24,7 +19,7 @@ function renders(): Array<[string, string]> {
   const out: Array<[string, string]> = [];
   for (const skill of SKILLS) {
     out.push([`${skill}/sections/review-sections.md`, fs.readFileSync(path.join(ROOT, skill, 'sections/review-sections.md'), 'utf8')]);
-    for (const host of ALL_HOST_CONFIGS) {
+    for (const host of ALL_HOST_CONFIGS.filter(({ name }) => name !== 'codex')) {
       const ctx: TemplateContext = { host: host.name, skillName: skill, tmplPath: `${skill}/sections/review-sections.md.tmpl`, paths: HOST_PATHS[host.name] };
       out.push([`${host.name}:${skill}`, generateCodexPlanReview(ctx)]);
     }

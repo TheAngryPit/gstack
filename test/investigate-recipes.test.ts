@@ -3,8 +3,8 @@
  * ids, STOP pointers, the Arguments table routing `--backlog`), the tokens each
  * recipe must carry (commands, the `## Flake evidence` section, the four backlog
  * classes, the never-retry rule), the Phase 1 additions, the benchmark
- * `git update-index --refresh` line, and that an external host gets the recipes
- * inlined. Prose is not pinned.
+ * `git update-index --refresh` line, and that Codex routes to its lazily loaded
+ * recipe sections while other external hosts inline them. Prose is not pinned.
  */
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -14,9 +14,9 @@ import { CARVE_GUARDS } from './helpers/carve-guards';
 const ROOT = path.resolve(import.meta.dir, '..');
 const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const RECIPES = ['flake', 'polluter', 'race', 'eval-bisect', 'backlog'] as const;
+const manifest = JSON.parse(read('investigate/sections/manifest.json')) as { skill: string; sections: Array<{ id: string; file: string; trigger: string }> };
 
 describe('investigate carve', () => {
-  const manifest = JSON.parse(read('investigate/sections/manifest.json')) as { skill: string; sections: Array<{ id: string; file: string; trigger: string }> };
   const skeleton = read('investigate/SKILL.md');
   test('manifest lists the five recipes and the registry guards them', () => {
     expect(manifest.skill).toBe('investigate');
@@ -97,11 +97,16 @@ describe('recipe tokens', () => {
   });
 });
 
-describe('external hosts inline the recipes', () => {
+describe('installed Codex recipe sections', () => {
   const codex = path.join(ROOT, '.agents', 'skills', 'gstack-investigate', 'SKILL.md');
-  test.skipIf(!fs.existsSync(codex))('the codex render carries every recipe heading and no section pointer', () => {
+  const codexSections = path.join(ROOT, '.agents', 'skills', 'gstack-investigate', 'sections');
+  test.skipIf(!fs.existsSync(codex))('the Codex render routes to complete installed recipe sections', () => {
     const text = fs.readFileSync(codex, 'utf8');
-    for (const heading of ['## Flake recipe', '## Polluter recipe', '## Race recipe', '## Eval bisect recipe', '## Backlog mode']) expect(text).toContain(heading);
-    expect(text).not.toContain('sections/flake.md');
+    for (const { id, file } of manifest.sections) {
+      expect(text).toContain(`Read \`sections/${file}\` relative to the installed \`gstack-investigate\` SKILL.md directory`);
+      const section = fs.readFileSync(path.join(codexSections, file), 'utf8');
+      const title = id === 'backlog' ? 'Backlog mode' : `${id === 'eval-bisect' ? 'Eval bisect' : id[0].toUpperCase() + id.slice(1)} recipe`;
+      expect(section).toContain(`## ${title}`);
+    }
   });
 });

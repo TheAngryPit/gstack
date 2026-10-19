@@ -6,7 +6,7 @@ import * as path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 // Test-only base control; neither source is run as an account updater.
-const SCRIPT = process.env.GSTACK_HEARTBEAT_TEST_SCRIPT ?? path.join(ROOT, 'bin/gstack-session-update');
+const SCRIPT = process.env.GSTACK_HEARTBEAT_TEST_SCRIPT ?? path.join(ROOT, 'bin/gstack-session-update-legacy');
 const FIXTURE = path.join(ROOT, 'test/fixtures/session-update-heartbeat.sh');
 
 describe.skipIf(process.platform === 'win32')('session updater heartbeat lifecycle', () => {

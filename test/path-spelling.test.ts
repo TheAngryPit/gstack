@@ -18,7 +18,7 @@ import { nativePath, samePath, shellPath } from '../lib/path-spelling';
 const ROOT = path.resolve(import.meta.dir, '..');
 const posix = (value: string) => value.replace(/\\/g, '/');
 const HELPER = posix(path.join(ROOT, 'bin', 'gstack-path-spelling.sh'));
-const ROOT_CHECK = '_p=$(git rev-parse --show-prefix 2>/dev/null) && [ -z "$_p" ] && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]';
+const ROOT_CHECK = '[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d \'\\n\')" = true ]';
 
 const bases: string[] = [];
 afterEach(() => { for (const b of bases.splice(0)) fs.rmSync(b, { recursive: true, force: true }); });
@@ -155,10 +155,9 @@ describe('bin/gstack-hook-check keeps its own copy of the mapping (it must run w
   });
 });
 
-/** The guard each template block runs, with the commands before it on the same line. */
 function templateGuards(): Array<{ file: string; line: string }> {
   const guards: Array<{ file: string; line: string }> = [];
-  for (const file of ['gstack-upgrade/SKILL.md.tmpl', 'spec/sections/gate-and-file.md.tmpl']) {
+  for (const file of ['spec/sections/gate-and-file.md.tmpl']) {
     for (const line of fs.readFileSync(path.join(ROOT, file), 'utf8').split('\n')) {
       if (line.includes('--show-prefix')) guards.push({ file, line });
     }
@@ -166,13 +165,18 @@ function templateGuards(): Array<{ file: string; line: string }> {
   return guards;
 }
 
-describe('checkout-root guards in skill bash (/gstack-upgrade, /spec)', () => {
-  test('all four guards use the --show-prefix root check', () => {
+describe('checkout-root guards in /spec and native host dispatch', () => {
+  test('all four /spec guards use the --show-prefix root check', () => {
     const guards = templateGuards();
-    expect(guards.map(g => g.file)).toEqual([
-      'gstack-upgrade/SKILL.md.tmpl', 'gstack-upgrade/SKILL.md.tmpl', 'gstack-upgrade/SKILL.md.tmpl', 'spec/sections/gate-and-file.md.tmpl',
-    ]);
+    expect(guards.map(g => g.file)).toEqual(Array(4).fill('spec/sections/gate-and-file.md.tmpl'));
     for (const g of guards) expect(g.line).toContain(ROOT_CHECK);
+  });
+
+  test('native dispatch validates the worktree root without comparing path spellings', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'scripts/resolvers/host-setup.ts'), 'utf8');
+    const guards = source.split('\n').filter(line => line.includes('--show-prefix'));
+    expect(guards).toHaveLength(2);
+    for (const guard of guards) expect(guard).toContain(ROOT_CHECK);
   });
 
   test('the root check passes at the root and through a symlink, and refuses below it, outside a repo and inside .git', () => {

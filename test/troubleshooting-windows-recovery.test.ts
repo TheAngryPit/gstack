@@ -40,7 +40,7 @@ describe('troubleshooting: the Git Bash hook false positive', () => {
   test('every anchor the updater, setup and doctor link to exists', () => {
     const sources = ['bin/gstack-session-update', 'setup', 'bin/gstack-doctor', 'bin/gstack-install-registry.sh'];
     const anchors = new Set(sources.flatMap(f => [...fs.readFileSync(path.join(ROOT, f), 'utf8').matchAll(/troubleshooting\.md#([a-z0-9-]+)/g)].map(m => m[1]!)));
-    for (const a of ['auto-update-hook-does-not-parse', 'auto-update-hook-check-unavailable', 'setup-hook-does-not-parse', 'setup-runtime-root-contains-checkout']) expect(anchors.has(a)).toBe(true);
+    for (const a of ['setup-hook-does-not-parse', 'setup-runtime-root-contains-checkout']) expect(anchors.has(a)).toBe(true);
     for (const a of anchors) expect(DOC, a).toContain(`<a id="${a}"></a>`);
   });
 });

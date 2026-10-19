@@ -121,8 +121,6 @@ export const IDENTIFIER_PLACEHOLDERS: Record<string, IdentifierGrammar> = {
   '<ASIDE_DIR or $_TMP>': { grammar: QUOTED, what: 'Aside output directory printed by an earlier block', quoted: true },
   '<REPORT_DIR from Setup>': { grammar: QUOTED, what: 'report directory printed by Setup', quoted: true },
   '<the FILE path printed above>': { grammar: QUOTED, what: 'file path printed by the previous block', quoted: true },
-  '<allocated scanned title path>': { grammar: QUOTED, what: 'exact private input path emitted by the title allocator', quoted: true },
-  '<allocated scanned body path>': { grammar: QUOTED, what: 'exact private input path emitted by the body allocator', quoted: true },
   '<scanned complete archive input path>': { grammar: QUOTED, what: 'exact private input path emitted by the archive allocator', quoted: true },
   '<owned archive staging path>': { grammar: QUOTED, what: 'exact staging path allocated inside the authorised archive directory', quoted: true },
   '<new archive path>': { grammar: QUOTED, what: 'new non-existing archive destination resolved for this operation', quoted: true },

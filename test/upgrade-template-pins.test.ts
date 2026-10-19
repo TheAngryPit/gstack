@@ -17,12 +17,14 @@ describe('gstack-upgrade template: exact-SHA transactional activation', () => {
     expect(tmpl).toContain('UPGRADE_AVAILABLE <old> <new> <sha>');
     expect(tmpl).toContain('required latest Actions attempts');
     expect(tmpl).toContain('exact SHA from UPGRADE_AVAILABLE');
-    expect(tmpl).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
+    expect(tmpl).toContain('CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"');
+    expect(tmpl).toContain('--apply-candidate "$CANDIDATE_SHA"');
   });
 
   test('the skill leaves source activation and rollback to the transactional updater', () => {
     expect(tmpl).toContain('gstack-session-update owns trusted-fork activation, rollback, and verification');
     expect(tmpl).toContain('On failure after activation began, the updater restores the retained source');
+    expect(tmpl).not.toContain('gstack-ff-update');
     expect(tmpl).toContain('never call it current');
   });
 

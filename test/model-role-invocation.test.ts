@@ -164,7 +164,15 @@ describe('plan-review role membership in shared generators', () => {
     for (const [skill, render] of roleBearing) {
       test(`${host}: ${skill} invokes with the plan-review role only`, () => {
         const text = render(ctxFor(skill, host, HOST_PATHS.claude));
-        expect(text).toContain(roleMarker);
+        if (host === 'codex' && ['plan-ceo-review', 'plan-eng-review', 'plan-devex-review', 'plan-design-review'].includes(skill)) {
+          expect(text).toContain(skill === 'plan-design-review'
+            ? 'Design Outside Voices (native Codex contexts)'
+            : 'Native Codex independent plan challenge (default-on)');
+          expect(text).toContain('Use a fresh native reviewer');
+          expect(text).not.toContain('--role plan-review');
+        } else {
+          expect(text).toContain(roleMarker);
+        }
         expect(text).not.toMatch(/select-model (exec|review)|probe-model|_gstack_codex_/);
         expect(text).not.toContain('without overriding either');
       });

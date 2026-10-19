@@ -50,8 +50,13 @@ describe('defensive-security framing reaches every adversarial dispatch', () => 
     });
   }
 
-  test('codex host still strips Review Army (specialists and Red Team)', () => {
-    expect(generateReviewArmy({ skillName: 'review', tmplPath: '', host: 'codex', paths: HOST_PATHS.codex })).toBe('');
-    expect(generateReviewArmy({ skillName: 'ship', tmplPath: '', host: 'codex', paths: HOST_PATHS.codex })).toBe('');
+  test('Codex keeps Review Army through its native specialist dispatch', () => {
+    for (const skillName of ['review', 'ship']) {
+      const section = generateReviewArmy({ skillName, tmplPath: '', host: 'codex', paths: HOST_PATHS.codex });
+      expect(section).toContain(`## Codex independent review: specialist review army`);
+      expect(section).toContain('Use a fresh native reviewer');
+      expect(section).toContain('### Red Team dispatch (conditional)');
+      expect(section).not.toContain('launch an independent subagent via the Agent tool');
+    }
   });
 });

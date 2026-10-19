@@ -45,7 +45,8 @@ categories that fired plus a sha256 of the body. Substitute the printed name for
 `<redact-file-name>`:
 
 ```bash
-REDACT_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<redact-file-name>"
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "Not at repo root." >&2; exit 1; }
+REDACT_FILE="$(pwd -P)/.gstack/tmp/<redact-file-name>"
 [ -s "$REDACT_FILE" ] || { echo "No audit record: $REDACT_FILE is missing or empty; write the draft into it first." >&2; exit 1; }
 bun ~/.claude/skills/gstack/lib/redact-audit-log.ts \
   "{\"repo_visibility\":\"$REDACT_VIS\",\"outcome\":\"<clean|flagged>\",\"categories_flagged\":[<...>],\"spec_archive_path\":\"\"}" \
@@ -267,9 +268,10 @@ and body it sends (Phase 4 edits can introduce content the 4.5b scan never saw, 
 issue is world-readable) and passes both to `gh` as arguments:
 
 ```bash
-REDACT_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<redact-file-name>"
-TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"
-APPROACH_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<approach-file-name>"
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "Not at repo root." >&2; exit 1; }
+REDACT_FILE="$(pwd -P)/.gstack/tmp/<redact-file-name>"
+TITLE_FILE="$(pwd -P)/.gstack/tmp/<title-file-name>"
+APPROACH_FILE="$(pwd -P)/.gstack/tmp/<approach-file-name>"
 [ -s "$REDACT_FILE" ] && [ -s "$TITLE_FILE" ] || { echo "Not filed: $REDACT_FILE or $TITLE_FILE is missing or empty. Write them, then file by hand: ~/.claude/skills/gstack/bin/gstack-post issue-create --title-file $TITLE_FILE --body-file $REDACT_FILE" >&2; exit 1; }
 POST_OUT=$(~/.claude/skills/gstack/bin/gstack-post issue-create --title-file "$TITLE_FILE" --body-file "$REDACT_FILE"); POST_CODE=$?
 printf '%s\n' "$POST_OUT"
@@ -321,8 +323,9 @@ names and the filed issue number for `<issue-number>` (digits, or empty when no
 issue was filed):
 
 ```bash
-REDACT_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<redact-file-name>"
-TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "Not at repo root." >&2; exit 1; }
+REDACT_FILE="$(pwd -P)/.gstack/tmp/<redact-file-name>"
+TITLE_FILE="$(pwd -P)/.gstack/tmp/<title-file-name>"
 [ -s "$REDACT_FILE" ] && [ -s "$TITLE_FILE" ] || { echo "Not archived: $REDACT_FILE or $TITLE_FILE is missing or empty." >&2; exit 1; }
 ISSUE_NUMBER=<issue-number>
 ISSUE_URL=$([ -n "$ISSUE_NUMBER" ] && gh issue view "$ISSUE_NUMBER" --json url -q .url 2>/dev/null)
@@ -409,6 +412,7 @@ collisions:
 SPAWN_BRANCH="spec/${SLUG_TITLE}-$$"
 SPAWN_PATH="${WORKTREE_PARENT:-../worktrees}/${SLUG_TITLE}-$$"
 mkdir -p "$(dirname "$SPAWN_PATH")" && SPAWN_PATH="$(cd -- "$(dirname "$SPAWN_PATH")" && pwd -P)/$(basename "$SPAWN_PATH")" || exit 1
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "Not at repo root." >&2; exit 1; }
 echo "SPAWN_BRANCH=$SPAWN_BRANCH SPAWN_PATH=$SPAWN_PATH PIN_SHA=${PIN_SHA:-}"
 ```
 
@@ -449,7 +453,8 @@ If A and worktree created: spawn `claude -p` with the spec piped via stdin:
 ```bash
 [ -r "${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was spawned." >&2; exit 1; }
 cd -- "${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
-[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was spawned." >&2; exit 1; }
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '
+')" = true ] || { echo "ERROR: not at worktree root." >&2; exit 1; }
 SPAWN_PATH=$(pwd -P)
 CONTRACT=$(~/.claude/skills/gstack/bin/gstack-autoplan contract) || { echo "ERROR: gstack-autoplan contract failed; nothing was spawned." >&2; exit 1; }
 { cat "$ARCHIVE_PATH"; printf '\n\n%s\n' "$CONTRACT"; } | (cd "$SPAWN_PATH" && GSTACK_SESSION_KIND=spawned claude -p 2>&1) &

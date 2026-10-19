@@ -12,8 +12,8 @@ import { checkInstallAdmission } from '../lib/install-verdict';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const VERSIONS = path.join(ROOT, 'bin', 'gstack-bun-version.sh');
-const hasZsh = spawnSync('zsh', ['-c', 'true'], { timeout: 10_000 }).status === 0;
-const SHELLS: Array<[string, string[]]> = [['bash', ['bash']], ['bash --posix', ['bash', '--posix']], ['zsh', ['zsh']]];
+const hasZsh = spawnSync('zsh', ['-f', '-c', 'true'], { timeout: 10_000 }).status === 0;
+const SHELLS: Array<[string, string[]]> = [['bash', ['bash']], ['bash --posix', ['bash', '--posix']], ['zsh', ['zsh', '-f']]];
 const bases: string[] = [];
 afterEach(() => { for (const b of bases.splice(0)) fs.rmSync(b, { recursive: true, force: true }); });
 
@@ -61,7 +61,7 @@ describe.skipIf(process.platform === 'win32')('Bun floor check in every shell (#
   }
 
   test.skipIf(!hasZsh)('zsh: Bun 1.3.2 is too old (the issue repro)', () => {
-    const r = run(['zsh'], '. "$1"; gstack_bun_status 1.3.2');
+    const r = run(['zsh', '-f'], '. "$1"; gstack_bun_status 1.3.2');
     expect(r.stdout.trim()).toBe('too-old');
     expect(r.stderr).not.toContain('integer expression expected');
   });
@@ -107,7 +107,8 @@ describe.skipIf(process.platform === 'win32')('Bun floor check in every shell (#
 
   test('/gstack-upgrade checks the exact trusted candidate floor through bash, whatever the tool shell is', () => {
     const tmpl = fs.readFileSync(path.join(ROOT, 'gstack-upgrade', 'SKILL.md.tmpl'), 'utf8');
-    expect(tmpl).toContain(`HOLD=$(bash -c '. "$1/bin/gstack-bun-version.sh" && gstack_bun_incoming_hold "$1" "$2"' _ "$SOURCE_DIR" "$CANDIDATE_SHA" 2>/dev/null || true)`);
+    expect(tmpl).toContain(`HOLD=$(GSTACK_HOLD_SOURCE="$SOURCE_DIR" GSTACK_HOLD_SHA="$CANDIDATE_SHA" bash -c '. "$GSTACK_HOLD_SOURCE/bin/gstack-bun-version.sh" && gstack_bun_incoming_hold "$GSTACK_HOLD_SOURCE" "$GSTACK_HOLD_SHA"' 2>/dev/null || true)`);
+    expect(tmpl).not.toMatch(/HOLD=\$\(bash -c '[^\n]*\$[0-9]/);
     expect(tmpl).toContain('The transactional updater repeats this check immediately before activation.');
     expect(tmpl).not.toContain('gstack_bun_incoming_hold . origin/main');
     expect(tmpl).toContain('BUN_VERSION_UNREADABLE');

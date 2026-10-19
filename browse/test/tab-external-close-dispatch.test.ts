@@ -90,7 +90,7 @@ describe('external close of the last tab, through command dispatch (#3167)', () 
   });
 
   test('stop answers without opening a tab', () => {
-    expect(steps.stop).toMatchObject({ status: 200, result: 'Server stopped', tabs: 0 });
+    expect(steps.stop).toMatchObject({ status: 200, result: 'Stopping server...', tabs: 0 });
   });
 
   test('a closed context fails with the named error and restart command; status and stop still answer', () => {
@@ -102,6 +102,6 @@ describe('external close of the last tab, through command dispatch (#3167)', () 
     expect(error).not.toContain('\n[');
     expect(steps['closed-status']).toMatchObject({ status: 200, tabs: 0 });
     expect(steps['closed-status'].result).toContain('Status: healthy');
-    expect(steps['closed-stop']).toMatchObject({ status: 200, result: 'Server stopped' });
+    expect(steps['closed-stop']).toMatchObject({ status: 200, result: 'Stopping server...', tabs: 0 });
   });
 });

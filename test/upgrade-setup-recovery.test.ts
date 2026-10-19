@@ -9,7 +9,8 @@ const updater = readFileSync(join(root, 'bin/gstack-session-update'), 'utf8');
 describe('upgrade setup recovery ownership', () => {
   test('the skill passes the exact accepted SHA to the transactional updater', () => {
     expect(template).toContain('UPGRADE_AVAILABLE <old> <new> <sha>');
-    expect(template).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
+    expect(template).toContain('CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"');
+    expect(template).toContain('--apply-candidate "$CANDIDATE_SHA"');
     expect(template).toMatch(/rollback\/recovery\s+failure/);
     expect(template).toContain('preserve the transaction snapshot path');
 

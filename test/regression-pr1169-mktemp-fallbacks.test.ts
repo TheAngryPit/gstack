@@ -85,7 +85,8 @@ describe("#2679: skill-content mktemp guards", () => {
 
   test("gstack-upgrade delegates exact-SHA source activation without an inline clone path", () => {
     const body = readScript("gstack-upgrade/SKILL.md.tmpl");
-    expect(body).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
+    expect(body).toContain('CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"');
+    expect(body).toContain('--apply-candidate "$CANDIDATE_SHA"');
     expect(body).not.toMatch(/\b(git\s+clone|mktemp|rm\s+-rf)\b/);
   });
 

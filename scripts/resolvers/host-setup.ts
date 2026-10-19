@@ -8,7 +8,7 @@ export function generateSpecHostDispatch(ctx: TemplateContext): string {
 \`\`\`bash
 [ -r "\${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was spawned." >&2; exit 1; }
 cd -- "\${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
-[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was spawned." >&2; exit 1; }
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "ERROR: not at worktree root." >&2; exit 1; }
 SPAWN_PATH=$(pwd -P)
 CONTRACT=$(~/.claude/skills/gstack/bin/gstack-autoplan contract) || { echo "ERROR: gstack-autoplan contract failed; nothing was spawned." >&2; exit 1; }
 { cat "$ARCHIVE_PATH"; printf '\\n\\n%s\\n' "$CONTRACT"; } | (cd "$SPAWN_PATH" && GSTACK_SESSION_KIND=spawned claude -p 2>&1) &
@@ -24,7 +24,7 @@ Update archive frontmatter with \`spec_worktree_path: $SPAWN_PATH\` and
 \`\`\`bash
 [ -r "\${ARCHIVE_PATH:?ARCHIVE_PATH is not set: substitute the archived spec path}" ] || { echo "ERROR: cannot read $ARCHIVE_PATH; nothing was dispatched." >&2; exit 1; }
 cd -- "\${SPAWN_PATH:?SPAWN_PATH is not set: substitute the printed worktree path}" || exit 1
-[ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || { echo "ERROR: $SPAWN_PATH is not a git worktree root; nothing was dispatched." >&2; exit 1; }
+[ "$(git rev-parse --show-prefix --is-inside-work-tree 2>/dev/null | tr -d '\n')" = true ] || { echo "ERROR: not at worktree root." >&2; exit 1; }
 echo "Native dispatch preflight ready"
 \`\`\`
 
