@@ -93,12 +93,13 @@ describe('complete native Codex output', () => {
 
   test('plan mode preserves developer authority and real user approval gates', () => {
     const output = read('office-hours');
-    expect(output).toContain('System and developer instructions determine the active mode');
+    expect(output).toContain('In plan mode follow the actual developer-controlled plan contract');
+    expect(output).toContain('prose does not change collaboration mode');
+    expect(output).toContain('This skill produces design docs, not code.');
     expect(output).toContain('plain-text question');
-    expect(output).toContain('takes precedence over generic plan mode behavior');
-    expect(output).toContain('only within those constraints');
-    expect(output).toContain('PLAN MODE EXCEPTION — ALWAYS RUN');
-    expect(output).toContain('Call ExitPlanMode only after the skill workflow completes');
+    expect(output).toContain('still needs explicit user approval before it lands in the design doc');
+    expect(output).toContain('Do NOT proceed to Phase 4.5');
+    expect(output).toContain('DONE — design doc APPROVED');
     expect(read('plan-eng-review')).toContain('NO UNRESOLVED DECISIONS');
   });
 

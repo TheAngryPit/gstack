@@ -7,9 +7,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { execFile, spawnSync } from 'child_process';
 import { promisify } from 'util';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { createHash } from 'crypto';
 import { runGeneration } from '../scripts/gen-skill-docs';
 import { ALL_HOST_CONFIGS } from '../hosts/index';
@@ -39,9 +39,12 @@ function mustSh(cwd: string, cmd: string) {
 /** A directory that looks like a gstack checkout (VERSION, setup, bin/gstack-config). */
 function makeGstackLike(dir: string, git: boolean) {
   mkdirSync(join(dir, 'bin'), { recursive: true });
+  mkdirSync(join(dir, 'lib'), { recursive: true });
   writeFileSync(join(dir, 'VERSION'), '1.0.0.0\n');
   writeFileSync(join(dir, 'setup'), '#!/bin/sh\necho SETUP_RAN "$@"\n', { mode: 0o755 });
   writeFileSync(join(dir, 'bin', 'gstack-config'), '#!/bin/sh\necho false\n', { mode: 0o755 });
+  writeFileSync(join(dir, 'bin', 'gstack-autoplan'), '#!/bin/sh\necho "## Coordinator contract (fixture)"\n', { mode: 0o755 });
+  writeFileSync(join(dir, 'bin', 'gstack-ff-update'), readFileSync(join(import.meta.dir, '..', 'bin', 'gstack-ff-update')), { mode: 0o755 });
   if (git) mustSh(dir, 'git init -q -b main && git add -A && git commit -q -m init');
 }
 

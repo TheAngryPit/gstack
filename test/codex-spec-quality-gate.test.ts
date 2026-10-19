@@ -22,11 +22,13 @@ test('native spec gate preserves the full scoring prompt and all upstream orderi
   expect(native).toContain('<<<END_USER_SPEC>>>');
   expect(native).not.toContain('{{OUTSIDE_INVOCATION:spec}}');
   expect(native).not.toContain('{{OUTSIDE_PREFLIGHT:opt-in}}');
+  expect(native).not.toContain('{{OUTSIDE_PREFLIGHT:opt-in:plan-review}}');
   expect(native).not.toContain('{{OUTSIDE_PROVENANCE:spec-quality-gate}}');
   expect(native).not.toContain('undefined');
   const phases = ['Phase 4.5a:', 'Phase 4.5b:', '**Dispatch', '**Scoring outcomes:**', 'Phase 5:'];
   for (let i=1; i<phases.length; i++) expect(native.indexOf(phases[i])).toBeGreaterThan(native.indexOf(phases[i-1]));
-  for(const item of ['--no-gate', 'redaction always runs', 'Score ≥7', 'Score <7, iteration 1', 'Score <7, iteration 2', 'Max 3 dispatches total', '2-minute', 'PUBLIC repo', 'option B is disabled', 'Audit-sink invariant', '{{REDACT_INVOCATION_BLOCK:pre-issue:brief}}', '{{REDACT_INVOCATION_BLOCK:pre-archive:brief}}']) expect(native).toContain(item);
+  for(const item of ['--no-gate', 'redaction always runs', 'Score ≥7', 'Score <7, iteration 1', 'Score <7, iteration 2', 'Max 3 dispatches total', '2-minute', 'PUBLIC repo', 'option B is disabled', 'Audit-sink invariant', '`gstack-post` scans the exact title', 'Exit 1 (HIGH)', 'Exit 2 (MEDIUM)', 'Re-scan the COMPLETE archive file']) expect(native).toContain(item);
+  expect(native).toContain('{{REDACT_INVOCATION_BLOCK:pre-codex}}');
 });
 
 test('native spec gate dispatch is fresh and actual states cannot become model or timeout fiction', () => {
@@ -54,12 +56,15 @@ test('actual redaction scanner blocks a synthetic credential and does not echo r
 
 test('source-anchor drift fails explicitly rather than retaining CLI dispatch', () => {
   expect(() => adaptNativeTemplate(source.replace('{{OUTSIDE_INVOCATION:spec}}', '{{CHANGED_INVOCATION}}'), ctx, path)).toThrow('spec native prompt anchor drift');
+  expect(() => adaptNativeTemplate(source.replace('Then emit the rendered title + body.', 'Emit this without a fresh sink scan.'), ctx, path)).toThrow('spec native manual-fallback anchor drift');
 });
 
 test('native privacy instructions keep untrusted body out of shell and retain scanned bytes until final consumption', () => {
   const native = output();
-  expect(native).not.toContain('printf');
+  expect(native).not.toMatch(/printf[^\n]*(?:REDACT_FILE|TITLE_FILE|APPROACH_FILE)/);
   expect(native).not.toMatch(/(?<!<)<<(?!<)-?\s*['"]?\w|rm -f/);
+  expect(native).toContain('printf \'%s\\n\' "$POST_OUT"');
+  expect(native).toContain('recoverably retire only owned unchanged');
   expect(native).toContain('gstack-private-input');
   for (const sink of ['pre-codex', 'pre-issue', 'pre-archive', 'pre-pr-body', 'pre-pr-title', 'pre-commit']) {
     for (const brief of [false, true]) {
@@ -72,10 +77,14 @@ test('native privacy instructions keep untrusted body out of shell and retain sc
 
 test('native issue and archive consumers use explicit scanned input paths and preserve complete metadata', () => {
   const native = output();
-  expect(native).not.toContain('$REDACT_FILE');
+  expect(native).toContain('"$GSTACK_BIN/gstack-post" issue-create --title-file "$TITLE_FILE" --body-file "$REDACT_FILE"');
+  expect(native).not.toContain('gh issue create --title');
   expect(native).not.toContain('--title "<title>"');
-  expect(native).toContain('--body-file "<allocated scanned body path>"');
-  expect(native).toContain('cat -- "<allocated scanned title path>"');
+  expect(native).not.toMatch(/gstack-post[^\n]*--title=/);
+  expect(native).toContain('`gstack-post` scans the exact title');
+  expect(native).toContain('HIGH or unresolved MEDIUM blocks disclosure');
+  expect(native).toContain('display only those bytes verbatim for manual filing');
+  expect(native).not.toContain('title and body below');
   expect(native).toContain('"<scanned complete archive input path>" "<owned archive staging path>"');
   expect(native).not.toMatch(/(?<!<)<<(?!<)-?\s*['"]?\w/);
   for (const key of ['spec_issue_number','spec_issue_url','spec_filed_at','spec_branch','spec_plan_mode','spec_executed','spec_worktree_path','ttfc_ms','tthw_ms']) expect(native).toContain(key + ':');
@@ -91,8 +100,13 @@ test('the rendered issue/archive commands preserve actual scanned bytes with hos
     fs.writeFileSync(gh, `#!/usr/bin/env bun
 import fs from 'node:fs';
 const args=process.argv.slice(2);
-fs.writeFileSync(process.env.PROBE_LOG, JSON.stringify({args,body:fs.readFileSync(args[args.indexOf('--body-file')+1]).toString('base64')}));
-console.log('https://example.invalid/issues/123');
+if (args[0] === 'repo' && args[1] === 'view') { console.log(args.includes('visibility') ? 'PRIVATE' : 'https://github.com/example/repo'); process.exit(0); }
+if (args[0] === 'issue' && args[1] === 'create') {
+  let body=''; for await (const chunk of process.stdin) body += chunk;
+  fs.writeFileSync(process.env.PROBE_LOG, JSON.stringify({args,body:Buffer.from(body).toString('base64')}));
+  console.log('https://example.invalid/issues/123'); process.exit(0);
+}
+process.exit(64);
 `, {mode:0o700});
     const marker=join(fixture,'must-not-execute');
     const title='Literal $(touch ' + marker + ') `false` "quotes"';
@@ -102,12 +116,17 @@ console.log('https://example.invalid/issues/123');
     const scan=(path:string)=>Bun.spawnSync([process.execPath,resolve(root,'bin/gstack-redact'),'--from-file',path,'--repo-visibility','private','--json'],{timeout:5_000});
     for(const path of [titlePath,bodyPath]) expect(scan(path).exitCode).toBe(0);
     const native=output();
-    const issueLine=native.split('\n').find(line=>line.startsWith('gh issue create '))!;
+    const issueLine=native.split('\n').find(line=>line.startsWith('POST_OUT=$('))!;
     expect(issueLine).toBeDefined();
-    const issue=Bun.spawnSync(['/bin/bash','-c',issueLine.replace('<allocated scanned title path>',titlePath).replace('<allocated scanned body path>',bodyPath)],{env,timeout:5_000});
+    const repo=join(fixture,'repo'); fs.mkdirSync(repo);
+    expect(Bun.spawnSync(['git','init','-q'],{cwd:repo}).exitCode).toBe(0);
+    expect(Bun.spawnSync(['git','remote','add','origin','https://github.com/example/repo.git'],{cwd:repo}).exitCode).toBe(0);
+    expect(Bun.spawnSync(['git','config','user.email','native-spec-test@example.invalid'],{cwd:repo}).exitCode).toBe(0);
+    const issue=Bun.spawnSync(['/bin/bash','-c',issueLine],{cwd:repo,env:{...env,GSTACK_BIN:resolve(root,'bin'),GSTACK_HOME:join(fixture,'state'),TITLE_FILE:titlePath,REDACT_FILE:bodyPath},timeout:10_000});
     expect(issue.exitCode).toBe(0);
     const sent=JSON.parse(fs.readFileSync(env.PROBE_LOG,'utf8'));
-    expect(sent.args[sent.args.indexOf('--title')+1]).toBe(title);
+    expect(sent.args).toContain(`--title=${title}`);
+    expect(sent.args).toContain('--body-file=-');
     expect(Buffer.from(sent.body,'base64')).toEqual(fs.readFileSync(bodyPath));
     expect(fs.existsSync(marker)).toBe(false);
 

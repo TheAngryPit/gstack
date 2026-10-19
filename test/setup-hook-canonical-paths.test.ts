@@ -28,79 +28,95 @@ import * as path from 'path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const setupSrc = fs.readFileSync(path.join(ROOT, 'setup'), 'utf-8');
+const ROOT_HELPER = path.join(ROOT, 'bin', 'gstack-claude-root.sh');
+const rootHelperSrc = fs.readFileSync(ROOT_HELPER, 'utf-8');
+const memorableSrc = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-memorable'), 'utf-8');
 const hookBinSrc = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-settings-hook'), 'utf-8');
 const uninstallSrc = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-uninstall'), 'utf-8');
 
 describe('setup: canonical-only hook paths', () => {
-  test('an explicit GSTACK_ROOT selects the stable Claude hook install', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-hook-root-'));
-    try {
-      const explicit = path.join(tmp, 'explicit');
-      const configured = path.join(tmp, 'claude-config', 'skills', 'gstack');
-      const standard = path.join(tmp, '.claude', 'skills', 'gstack');
-      for (const root of [explicit, configured, standard]) {
-        const hook = path.join(root, 'bin', 'gstack-session-update');
-        fs.mkdirSync(path.dirname(hook), { recursive: true });
-        fs.writeFileSync(hook, '#!/bin/sh\nexit 0\n');
-        fs.chmodSync(hook, 0o755);
-      }
+  test('CANONICAL_GSTACK_ROOT honors CLAUDE_CONFIG_DIR with ~/.claude fallback', () => {
+    expect(rootHelperSrc).toContain('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/gstack"');
+  });
 
-      const start = setupSrc.indexOf('CANONICAL_GSTACK_ROOT=');
-      const end = setupSrc.indexOf('\n# Echo the canonical path', start);
-      expect(start).toBeGreaterThan(-1);
-      expect(end).toBeGreaterThan(start);
-      const selection = setupSrc.slice(start, end);
-      const result = spawnSync('/bin/bash', ['-c', `${selection}\nprintf '%s\\n' "$CANONICAL_GSTACK_ROOT"`], {
-        encoding: 'utf-8',
-        timeout: 10_000,
-        env: {
-          HOME: tmp,
-          GSTACK_ROOT: explicit,
-          CLAUDE_CONFIG_DIR: path.join(tmp, 'claude-config'),
-        },
-      });
-      expect(result.status).toBe(0);
-      expect(result.stdout.trim()).toBe(explicit);
-    } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
+  test('setup and gstack-memorable take the root from the one sourced helper', () => {
+    for (const [src, sourceLine] of [
+      [setupSrc, '. "$SOURCE_GSTACK_DIR/bin/gstack-claude-root.sh" ||'],
+      [memorableSrc, '. "$(dirname "$0")/gstack-claude-root.sh" ||'],
+    ]) {
+      expect(src).toContain(sourceLine);
+      expect(src).toContain('CANONICAL_GSTACK_ROOT="$(gstack_canonical_claude_root)"');
+      expect(src).not.toContain('CANONICAL_GSTACK_ROOT="${CLAUDE_CONFIG_DIR');
     }
   });
 
-  test('CLAUDE_CONFIG_DIR is used when GSTACK_ROOT is unset, with the standard Claude install as fallback', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-hook-root-'));
-    try {
-      const configured = path.join(tmp, 'claude-config', 'skills', 'gstack');
-      const standard = path.join(tmp, '.claude', 'skills', 'gstack');
-      for (const root of [configured, standard]) {
-        const hook = path.join(root, 'bin', 'gstack-session-update');
-        fs.mkdirSync(path.dirname(hook), { recursive: true });
-        fs.writeFileSync(hook, '#!/bin/sh\nexit 0\n');
-        fs.chmodSync(hook, 0o755);
-      }
-
-      const start = setupSrc.indexOf('CANONICAL_GSTACK_ROOT=');
-      const end = setupSrc.indexOf('\n# Echo the canonical path', start);
-      const selection = setupSrc.slice(start, end);
-      const run = (claudeConfigDir: string) => spawnSync(
-        '/bin/bash',
-        ['-c', `${selection}\nprintf '%s\\n' "$CANONICAL_GSTACK_ROOT"`],
-        {
-          encoding: 'utf-8',
-          timeout: 10_000,
-          env: { HOME: tmp, CLAUDE_CONFIG_DIR: claudeConfigDir },
-        },
-      );
-
-      const configuredResult = run(path.join(tmp, 'claude-config'));
-      expect(configuredResult.status).toBe(0);
-      expect(configuredResult.stdout.trim()).toBe(configured);
-
-      const fallbackResult = run(path.join(tmp, 'missing-config'));
-      expect(fallbackResult.status).toBe(0);
-      expect(fallbackResult.stdout.trim()).toBe(standard);
-    } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
+  describe('gstack_canonical_claude_root', () => {
+    function installAt(root: string) {
+      const bin = path.join(root, 'bin');
+      fs.mkdirSync(bin, { recursive: true });
+      fs.writeFileSync(path.join(bin, 'gstack-session-update'), '#!/bin/sh\n', { mode: 0o755 });
     }
+
+    function resolve(home: string, configDir?: string): string {
+      const env: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home };
+      if (configDir !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
+      const r = spawnSync('bash', ['-c', 'set -u; . "$1" && gstack_canonical_claude_root', '_', ROOT_HELPER.replace(/\\/g, '/')],
+        { env, encoding: 'utf-8', timeout: 10_000 });
+      expect(r.status).toBe(0);
+      return r.stdout.replace(/\n$/, '');
+    }
+
+    function withHome(fn: (home: string) => void) {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-canon-'));
+      try {
+        installAt(path.join(home, '.claude', 'skills', 'gstack'));
+        fn(home);
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    }
+
+    test('no CLAUDE_CONFIG_DIR resolves to the $HOME install', () => {
+      withHome((home) => {
+        expect(resolve(home)).toBe(path.join(home, '.claude', 'skills', 'gstack'));
+      });
+    });
+
+    test('a per-session config dir linking back to the $HOME install resolves to the $HOME spelling', () => {
+      withHome((home) => {
+        const session = path.join(home, 'session-1234');
+        fs.mkdirSync(session);
+        fs.symlinkSync(path.join(home, '.claude', 'skills'), path.join(session, 'skills'));
+        expect(resolve(home, session)).toBe(path.join(home, '.claude', 'skills', 'gstack'));
+      });
+    });
+
+    test('a config dir with its own install keeps that install', () => {
+      withHome((home) => {
+        const other = path.join(home, 'other-config');
+        installAt(path.join(other, 'skills', 'gstack'));
+        expect(resolve(home, other)).toBe(path.join(other, 'skills', 'gstack'));
+      });
+    });
+
+    test('a config dir with no install falls back to the $HOME install', () => {
+      withHome((home) => {
+        const empty = path.join(home, 'empty-config');
+        fs.mkdirSync(empty);
+        expect(resolve(home, empty)).toBe(path.join(home, '.claude', 'skills', 'gstack'));
+      });
+    });
+
+    test('with no $HOME install the config-dir spelling stands, even when it is empty', () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-canon-'));
+      try {
+        const empty = path.join(home, 'empty-config');
+        fs.mkdirSync(empty);
+        expect(resolve(home, empty)).toBe(path.join(empty, 'skills', 'gstack'));
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
   });
 
   test('_hook_command_path body never references the running tree', () => {

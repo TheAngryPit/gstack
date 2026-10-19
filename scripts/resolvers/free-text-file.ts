@@ -57,5 +57,8 @@ export function freeTextFileUse(files: Array<{ variable: string; placeholder: st
 }
 
 export function generateFreeTextFile(_ctx: TemplateContext, args?: string[]): string {
-  return `\`\`\`bash\n${freeTextFileBash(parse(args))}\n\`\`\`\n\n${FREE_TEXT_WRITE_RULE}`;
+  const writeRule = _ctx.host === 'codex'
+    ? FREE_TEXT_WRITE_RULE.replace(" (Claude Code's Write tool needs a Read of the empty file first)", ' (read the allocated file first if the host file-write tool requires it)')
+    : FREE_TEXT_WRITE_RULE;
+  return `\`\`\`bash\n${freeTextFileBash(parse(args))}\n\`\`\`\n\n${writeRule}`;
 }

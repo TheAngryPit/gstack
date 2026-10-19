@@ -71,10 +71,31 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
     expect(section).toContain('listBrowserTabs()` output is private user data');
   });
 
+  test('signed-in tabs (#3063): offer only target-origin tabs, attach after one confirmation, no second sign-in loop', () => {
+    const rules = setup.slice(setup.indexOf('### Rules for driving a real browser'));
+    const rule = (n: number) => rules.match(new RegExp(`\\n${n}\\. \\*\\*[\\s\\S]*?(?=\\n\\d+\\. \\*\\*|\\n\\n)`))![0];
+    expect(rule(1)).toContain("Before the first `openTab`, offer that list's tabs on the target origin (title and origin only)");
+    expect(rule(1)).toContain('attach only after the user confirms one');
+    expect(rule(4)).toContain('a second wall means the session is tab- or URL-bound: offer their tab (rule 1), never another sign-in');
+    expect(rule(4)).not.toContain('the browser\'s cookies now apply');
+    // Rule 6 no longer suggests an early `return`; rule 7 names the fast-[ok abort.
+    expect(rule(6)).not.toContain('`return`');
+    expect(rule(7)).toContain('a fast `[ok` without it is an abort');
+  });
+
   test('consent boundary: look freely, act on non-local targets only after one AskUserQuestion', () => {
     expect(section).toContain('Invocation is consent to LOOK, not to ACT');
     expect(section).toContain(ASIDE_LOCAL_HOST_RULE);
     expect(section).toContain('AskUserQuestion ONCE per run');
+  });
+
+  test('consent boundary covers the writes a label hides: wizard steps and saves after a silent no-op set (#3216)', () => {
+    const rule3 = setup.match(/\n3\. \*\*Invocation is consent[^\n]*/)![0];
+    expect(rule3).toContain('before the first one. There, a wizard or dialog step');
+    expectMentions(rule3, [['wizard', 'step', 'mutating', 'until its handler', 'cancel proves nothing']], 'rule 3');
+    expectMentions(rule3, [['before any save', 'read back', '`setvalue`', 'stop on a mismatch', '`throw`']], 'rule 3');
+    expect(fallback).toContain('Rule 3 (mutating actions on a NON-LOCAL target need one AskUserQuestion per run) applies unchanged');
+    expectMentions(cookbook, [['skip path'], ['probe', 'precondition']], 'cookbook');
   });
 
   test('credential boundary: the user signs in, the agent never handles secrets', () => {
@@ -98,6 +119,20 @@ describe('Aside driver contract ({{ASIDE_SETUP}})', () => {
     expect(section).toContain('ASIDE_DIR=');
     expect(section).toContain('never print image data');
     expect(section).toContain('use the Read tool on the copied file');
+  });
+
+  test('cookbook names the silent failure modes of aside repl scripts (#3064)', () => {
+    expect(cookbook).toContain('`evaluate` returns only JSON-serializable values');
+    expect(cookbook).toContain('End such calls with `; return true` or return `JSON.stringify(...)`');
+    expect(cookbook).toContain('No top-level `return`');
+    expect(cookbook).toContain('Write abort paths as `if`/`else`');
+    expect(cookbook).toContain('`pg.locator(sel).press("Enter")`');
+    expect(cookbook).toContain('An empty DOM read after an action says something about the selector, not the app');
+    expect(cookbook).toContain('read the state before clicking');
+    // The attach recipe keeps the tab list private and never closes the user's tab.
+    expect(cookbook).toContain('print only those tabs\' title and origin, never the rest');
+    expect(cookbook).toContain('never `closeTab` it');
+    expect(setup).not.toContain('Silent failures');
   });
 
   test('cookbook uses only the verified Aside APIs', () => {

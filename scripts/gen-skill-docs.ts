@@ -14,6 +14,8 @@ import { externalSkillName, extractNameAndDescription } from './external-skill-n
 export { extractNameAndDescription } from './external-skill-names';
 import { generateLlmsTxt } from './gen-llms-txt';
 import { generateAgentsDigest, DIGEST_RELPATH, DIGEST_BYTE_BUDGET } from './gen-agents-digest';
+import { DOCTOR_COMPONENTS_RELPATH } from './gen-doctor-components';
+import { renderDoctorComponentsSh } from '../lib/doctor-components';
 import { generateDesignChecklistMd } from './resolvers/design-checklist';
 import { DOM_DUMP_SCRIPT, DOM_DUMP_FILE } from '../lib/dom-dump-script';
 import * as fs from 'fs';
@@ -69,7 +71,7 @@ interface RenderOptions {
 
 export interface GeneratedArtifact {
   relativePath: string;
-  kind: 'skill' | 'section' | 'metadata' | 'openclaw' | 'index' | 'digest' | 'asset';
+  kind: 'skill' | 'section' | 'metadata' | 'openclaw' | 'index' | 'digest' | 'doctor-components' | 'asset';
   host?: Host;
 }
 
@@ -890,6 +892,15 @@ function processTemplate(tmplPath: string, host: Host, options: RenderOptions): 
   return { outputPath, content, symlinkLoop, metadata };
 }
 
+/** autoplan/DRIVER.md (field wave item 13): one host-neutral render of autoplan/DRIVER.md.tmpl through the same resolvers. */
+export const AUTOPLAN_DRIVER_RELPATH = 'autoplan/DRIVER.md';
+export function renderAutoplanDriver(options: RenderOptions): string {
+  const tmplPath = path.join(ROOT, `${AUTOPLAN_DRIVER_RELPATH}.tmpl`);
+  const tmpl = fs.readFileSync(tmplPath, 'utf-8');
+  const ctx = buildContext(tmpl, tmplPath, 'claude', options, 'autoplan');
+  return GENERATED_HEADER.replace('{{SOURCE}}', `${AUTOPLAN_DRIVER_RELPATH}.tmpl`) + resolvePlaceholders(tmpl, ctx, getHostConfig('claude'), `${AUTOPLAN_DRIVER_RELPATH}.tmpl`, options);
+}
+
 /**
  * Generate one on-demand section file (`<skill>/sections/<name>.md.tmpl` →
  * `<name>.md`). Sections are BODY FRAGMENTS — no frontmatter, no catalog trim,
@@ -1077,6 +1088,9 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
           generateDesignChecklistMd(), 'asset', host);
         emit(path.join(options.outputRoot, DOM_DUMP_FILE), DOM_DUMP_SCRIPT + '\n', 'asset', host);
       }
+      if (host === 'claude' && includesSkill(hostConfig, 'autoplan') && templates.some(t => t.tmpl === 'autoplan/SKILL.md.tmpl')) {
+        emit(path.join(options.outputRoot, AUTOPLAN_DRIVER_RELPATH), renderAutoplanDriver(options), 'asset', host);
+      }
 
       if (host === 'openclaw') {
         for (const variant of ['lite', 'full', 'plan'] as const) {
@@ -1148,6 +1162,11 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
     const digest = generateAgentsDigest();
     emit(path.join(options.outputRoot, DIGEST_RELPATH), digest.content, 'digest');
     if (!settings.dryRun) log(`[gen-agents-digest] ${DIGEST_RELPATH}: ${digest.bytes} bytes (budget ${DIGEST_BYTE_BUDGET})`);
+  } catch (error) {
+    failed(error);
+  }
+  try {
+    emit(path.join(options.outputRoot, DOCTOR_COMPONENTS_RELPATH), renderDoctorComponentsSh(), 'doctor-components');
   } catch (error) {
     failed(error);
   }

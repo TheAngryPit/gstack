@@ -119,7 +119,9 @@ Write the product brief to that path; remember its absolute path across fresh Ba
 **Check Codex availability:**
 ```bash
 
-if ( # GSTACK_ACTIVE_HOST names the harness, never the model.
+if ! _OUTSIDE_CFG=$("$HOME/.claude/skills/gstack/bin/gstack-config" get --stored codex_reviews) || [ "$_OUTSIDE_CFG" = disabled ]; then
+  echo 'CODEX_MODE: disabled'
+elif ( # GSTACK_ACTIVE_HOST names the harness, never the model.
 if { [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ] || [ "${GSTACK_ACTIVE_HOST:-}" = codex ]; }; then
   echo 'Codex outside review unavailable: harness mismatch; no outside process started. Missing coverage.' >&2
   if { [ -n "${CLAUDECODE:-}" ] || [ "${GSTACK_ACTIVE_HOST:-}" = claude ]; } && { [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ] || [ "${GSTACK_ACTIVE_HOST:-}" = codex ]; }; then
@@ -136,9 +138,9 @@ else
 fi
 ```
 
-The historical `CODEX_MODE` variable describes **Codex** availability here. Authentication and configured model validity are checked by the actual invocation, without overriding either. Missing/broken CLI: install or repair Codex; authentication failure: run `codex login`. Honor this caller’s existing opt-in/skip choice. Any non-ready outcome is missing outside coverage; follow the caller’s existing fallback. Never substitute another external provider.
+The historical `CODEX_MODE` variable describes **Codex** availability here. `CODEX_MODE: disabled` or a send's `consent_missing` line: `codex_reviews` is off or unreadable; do not ask; record `outside_status: disabled`. Authentication and configured model validity are checked by the actual invocation, without overriding either. Missing/broken CLI: install or repair Codex; authentication failure: run `codex login`. Otherwise honor this caller’s opt-in/skip choice. Any non-ready outcome is missing outside coverage; follow the caller’s existing fallback. Never substitute another external provider.
 
-Non-ready CLI: retain its repair notice and use only the native voice. The invocation deliberately rechecks the harness before spawning; native success never replaces external coverage.
+`CODEX_MODE: disabled` or a non-ready CLI: retain any repair notice and use only the native voice. The invocation deliberately rechecks the harness before spawning; native success never replaces external coverage.
 
 **When ready**, run both voices and await both before synthesis. Overlap calls
 if supported; keep the native call blocking.
@@ -178,16 +180,19 @@ trap 'rm -rf "$_OUTSIDE_TMP"' EXIT
 _OUTSIDE_INPUT="$_OUTSIDE_TMP/prompt"
 cat -- '<prepared-prompt-file>' >"$_OUTSIDE_INPUT" || exit 1
 
-source "$HOME/.claude/skills/gstack/bin/gstack-codex-probe" && _gstack_codex_select_model exec || exit 1
-_gstack_codex_sandbox_preflight >/dev/null || exit 1
-_gstack_codex_first_use_notice
+_CODEX_PROBE="$HOME/.claude/skills/gstack/bin/gstack-codex-probe"
+_CODEX_OUT=$("$_CODEX_PROBE" select-model exec) || exit 1
+_CODEX_SEL=$(echo "$_CODEX_OUT" | sed -n 's/^CODEX_SEL: //p')
+_CODEX_SANDBOX_MODE=$(echo "$_CODEX_OUT" | sed -n 's/^CODEX_SANDBOX: //p')
+"$_CODEX_PROBE" check-sandbox || exit 1
+"$_CODEX_PROBE" show-first-use-notice
 _OUTSIDE_EXIT=0
-_gstack_codex_timeout_wrapper 300 codex exec - -C "$_REPO_ROOT" -s "${_GSTACK_CODEX_SANDBOX:?}" -c "model=\"${_GSTACK_CODEX_SEL:?}\"" -c skills.include_instructions=false -c 'model_reasoning_effort="medium"' -c 'web_search="cached"' --json -o "$_OUTSIDE_TMP/text" <"$_OUTSIDE_INPUT" >"$_OUTSIDE_TMP/events" 2>"$_OUTSIDE_TMP/stderr" || _OUTSIDE_EXIT=$?
+"$_CODEX_PROBE" run-with-timeout --effort medium 300 codex exec - -C "$_REPO_ROOT" -s "${_CODEX_SANDBOX_MODE:?}" -c "model=\"${_CODEX_SEL:?}\"" -c skills.include_instructions=false -c 'web_search="cached"' --json -o "$_OUTSIDE_TMP/text" <"$_OUTSIDE_INPUT" >"$_OUTSIDE_TMP/events" 2>"$_OUTSIDE_TMP/stderr" || _OUTSIDE_EXIT=$?
 cat "$_OUTSIDE_TMP/text" 2>/dev/null || tail -n 20 "$_OUTSIDE_TMP/events"
 
 cat "$_OUTSIDE_TMP/stderr" >&2 || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }
 _OUTSIDE_RC=0
-bun "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
+bun "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" proposal "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
 case "$_OUTSIDE_RC" in
   0|3) ;;
   4) echo 'OUTSIDE_STATUS: unverified provider=codex host=claude'; exit 4 ;;
@@ -198,7 +203,7 @@ echo 'OUTSIDE_STATUS: completed provider=codex host=claude'
 
 Use Bash `timeout: 360000`; show the full response in a `tool-output` fence. Require successful execution and valid markers. Refusal, empty/malformed output, missing Recommendation markers, timeout or CLI failure means `outside_status: unavailable`. P0/P1 findings block like native ones; `OUTSIDE_STATUS: unverified` is missing coverage. Continue completed proposals; native completion does not count as outside coverage. After either outcome, delete only your private prompt; scratch cleanup is automatic.
 
-2. **Claude design subagent** (Agent tool, `run_in_background: false`; await its result):
+2. **Claude design subagent** (Agent tool, `run_in_background: false` when available; await its result. A launch receipt means it went background: await its completion notice.):
 "Read the complete product brief at [the absolute DESIGN_BRIEF path printed above].
 
 Propose a surprising indie-studio direction beyond conventional enterprise UI.

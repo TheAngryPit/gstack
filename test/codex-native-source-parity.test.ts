@@ -59,17 +59,17 @@ describe('original source to native obligations', () => {
     }
   });
 
-  test('every original autoplan reviewer criterion survives in its distinct native lens', () => {
+  test('every current autoplan reviewer criterion survives in its distinct native lens', () => {
     const phases = ['ceo', 'design', 'dx', 'eng'] as const;
     const criteriaByPhase: Record<(typeof phases)[number], string[]> = {
       ceo: ['Challenge the strategic foundations', '10x more impactful', 'What alternatives were dismissed', 'competitive or market risks'],
       design: ['information hierarchy', 'interaction states', 'responsive strategy', 'accessibility requirements'],
-      dx: ['Time to hello world', 'Error messages', 'API/CLI design', 'Upgrade path'],
+      dx: ['Time to hello world', 'Errors, agent-ready (what, fix, recovery, code, context, trace, redaction, channel), capped per Pass 3 (CAP4/CAP6)', 'API/CLI design', 'Upgrade path'],
       eng: ['architectural issues', 'missing edge cases', 'hidden complexity', 'Section 3 (Test Review)'],
     };
     for (const phase of phases) {
       const path = `autoplan/sections/${phase}-phase.md.tmpl`;
-      const source = git('show', `${ORIGINAL}:${path}`);
+      const source = read(path);
       const output = adaptNativeTemplate(read(path), ctx('autoplan'), path);
       for (const criterion of criteriaByPhase[phase]) {
         expect(normalize(source).toLowerCase()).toContain(criterion.toLowerCase());
@@ -98,7 +98,7 @@ describe('original source to native obligations', () => {
     expect(normalize(output).toLowerCase()).toContain('an unavailable required review stays pending');
     for (const phase of ['ceo', 'dx', 'eng']) {
       const path = `autoplan/sections/${phase}-phase.md.tmpl`;
-      const source = git('show', `${ORIGINAL}:${path}`);
+      const source = read(path);
       const rendered = adaptNativeTemplate(read(path), ctx('autoplan'), path);
       for (const line of source.split('\n').filter(line => /^  [1-6]\. .*—/.test(line))) expect(rendered).toContain(line);
     }
@@ -168,9 +168,17 @@ describe('original source to native obligations', () => {
 
       const shotgun = rendered('design-shotgun');
       expect(shotgun).toContain('Use AskUserQuestion to confirm before spending API credits:');
-      expect(shotgun).toContain('Generate every variant with one `$D variants --briefs-file` call.');
-      expect(shotgun).toContain('Codex permission boundary: the documented temporary directory is the normal staging');
+      expect(shotgun).toContain("Generate each variant with Codex's built-in `$imagegen` skill.");
+      expect(normalize(shotgun)).toContain(normalize('Do not run `scripts/image_gen.py`, ask for `OPENAI_API_KEY`, or run any `$D` generation command.'));
+      expect(normalize(shotgun)).toContain(normalize('If Codex explicitly denies the claim write, preserve the refusal and stop;'));
+      expect(shotgun).not.toContain('$D variants --briefs-file');
       expect(shotgun).not.toMatch(/Launch N (?:Agent|native) workers|Native worker task template|fresh-context worker API/);
+
+      const specGate = rendered('spec', 'sections/gate-and-file.md');
+      expect(specGate).toContain('read the allocated file first if the host file-write tool requires it');
+      expect(specGate).not.toContain("Claude Code's Write tool needs a Read");
+      expect(specGate).toContain('"$GSTACK_BIN/gstack-post" issue-create --title-file "$TITLE_FILE" --body-file "$REDACT_FILE"');
+      expect(specGate).toContain('HIGH or unresolved MEDIUM blocks disclosure');
     } finally {
       rmSync(outputRoot, { recursive: true, force: true });
     }
@@ -196,9 +204,11 @@ describe('original source to native obligations', () => {
     for (const clause of ['already-authorized independent reviewer', 'Do not request broader tool access', 'exact authorised source/test paths and rubric', 'latest static/runtime evidence gates']) expect(cso).toContain(clause);
     expect(cso).toContain('For each candidate, use an already-authorized independent reviewer when available.');
     expect(cso).toContain('Use at most three; await them.');
+    expect(cso).toContain('{{SIDEWAYS_SWEEP:cso}}');
+    expect(cso.toLowerCase()).toContain('wait through the advertised native mechanism');
     expect(cso).not.toContain('For each candidate finding, launch an independent verification');
     const changedCsoContract = read('cso/SKILL.md.tmpl').replace('Use at most three; await them.', 'Use at most three workers and await them.');
-    expect(() => adaptNativeTemplate(changedCsoContract, ctx('cso'), 'cso/SKILL.md.tmpl')).toThrow('anchor drift');
+    expect(() => adaptNativeTemplate(changedCsoContract, ctx('cso'), 'cso/SKILL.md.tmpl')).toThrow('Codex CSO native reviewer anchor drift');
   });
 
   test('native preference instructions separate optional choices from permission decisions', () => {
@@ -217,8 +227,8 @@ describe('original source to native obligations', () => {
     expect(() => replaceBlock('start start end', 'start', 'end', 'native')).toThrow('anchor drift');
     const path = 'autoplan/sections/ceo-phase.md.tmpl';
     expect(() => adaptNativeTemplate(read(path).replace('{{OUTSIDE_INVOCATION:autoplan}}', '{{CHANGED_INVOCATION}}'), ctx('autoplan'), path)).toThrow('Autoplan ceo native dispatch anchor drift');
-    const shotgunPath = 'design-shotgun/SKILL.md.tmpl';
-    expect(() => adaptNativeTemplate(read(shotgunPath).replace('Generate every variant with one `$D variants --briefs-file` call.', 'Launch N Agent subagents'), ctx('design-shotgun'), shotgunPath)).toThrow('Codex design-shotgun generation contract anchor drift');
-    expect(() => adaptNativeTemplate(read(shotgunPath).replace('while the temp dir works.', 'while a temp dir works.'), ctx('design-shotgun'), shotgunPath)).toThrow('Codex design-shotgun staging contract anchor drift');
+    const shotgunTemplate = read('design-shotgun/SKILL.md.tmpl');
+    expect(shotgunTemplate.match(/\{\{DESIGN_SHOTGUN_GENERATION\}\}/g)).toHaveLength(1);
+    expect(RESOLVERS.DESIGN_SHOTGUN_GENERATION(ctx('design-shotgun'))).toContain("Codex's built-in `$imagegen` skill");
   });
 });

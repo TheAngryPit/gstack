@@ -479,25 +479,62 @@ documented single-case command (`--command '<command> {case}'`, split on
 whitespace, no shell).
 
 Counts per kind come from gstack config (`bin/gstack-config`), so a measurement
-is pre-registered before it runs:
+is pre-registered before it runs. Each measurement is decided by the
+measurement bar (`scripts/lib/measure-bar.ts`, approved 2026-10-06), applied in
+this order:
 
-| Kind | Trials (config key, default) | Meets target when |
-|---|---|---|
-| `rule` | `ship_measure_rule_trials`, 10 | at least 90% of trials pass (9 of 10) |
-| `behavior` | `ship_measure_behavior_panels`, 4 panels of 3 (12 trials) | every panel passes at its own 2 of 3 with no contract violation, and at least 90% of trials pass (11 of 12) |
-| `judge` | `ship_measure_judge_outputs`, 10 outputs | at least 90% of outputs pass (9 of 10); an output passes when 2 of its 3 judge samples pass |
+| Kind | Trials per batch (config key, default) | MEETS | MEETS-qualified | EXTEND, then the pooled decision |
+|---|---|---|---|---|
+| `rule` | `ship_measure_rule_trials`, 10 | at least 9 of 10 | 8 of 10, every red qualifying | 7 of 10, or 8 that does not qualify: 10 more trials, then 18 of 20 strict or 16 of 20 qualified |
+| `behavior` | `ship_measure_behavior_panels`, 4 panels of 3 (12 trials) | at least 11 of 12 | 10 of 12, every red qualifying | 9 of 12, or 10 that does not qualify: 12 more trials, then 22 of 24 strict or 20 of 24 qualified |
+| `judge` | `ship_measure_judge_outputs`, 10 outputs | at least 9 of 10 outputs | 8 of 10, every red qualifying | 7 of 10, or 8 that does not qualify: 10 more outputs, then 18 of 20 or 16 of 20 qualified |
+
+A judge output passes when the median of its 3 samples passes (EVAL_POLICY v3,
+so at least 2 of 3). Everything below the EXTEND row is **BELOW**: a fix round.
+
+- **Qualifying reds** (the only reds MEETS-qualified accepts): `provider`, which
+  is mechanical: the trial's own `failure_cause` is `api_error`, or
+  `pre_turn_infra` whose evidence names a 429 or 5xx, a rate limit, an overload
+  or a connection reset (`ship-measure classify` refuses `provider` otherwise);
+  `judge-noise`, a judge sample at the threshold; and `model-miss`, which counts
+  only with a `path:line` citation of the deviation. Never qualifying: a timeout
+  or hang (`session_timeout`, `observer_timeout` and `provider_stall` are
+  classified so without review and cannot be reclassified into a qualifying
+  class), a regression, a contract violation (BELOW at any count), or any red
+  with a known fixable cause (`fixable`): each goes to a fix round.
+- **needs-classify.** A batch below the strict bar but at or above the EXTEND
+  floor, with a failed trial nobody classified, returns needs-classify (exit 5)
+  with the trials to classify. `ship-measure classify --trials 2,5 --class <c>
+  --evidence <text>` appends one immutable record per trial to the round's
+  `classifications.jsonl` (a later record supersedes an earlier one) and
+  re-decides. `unclassified` records "reviewed, no route"; it allows EXTEND but
+  never qualifies.
+- **EXTEND** (exit 6). `ship-measure extend` runs N more trials only when the
+  round decided EXTEND and only on identical inputs: the measurement's identity
+  (the working tree's frozen git tree, kind, trials, runner, Claude CLI, model,
+  CI image `GSTACK_CI_IMAGE`, Bun, EVAL_POLICY and HARNESS_VERSION) must match
+  field for field, and the refusal names the field that changed. The pooled 2N
+  is decided once and is never extended again: there is no third batch.
+- **Void batches.** A batch where more than 30% of trials fail with affirmative
+  provider or transport evidence is void (an outage, not a measurement); the
+  runner redispatches it once, both batches are reported, and a second void
+  batch stops with a named red. A crash or module-load failure without provider
+  evidence never voids a batch.
 
 `ship_measure_budget_usd` (default 25) is an estimated admission budget per red
-case across the baseline, every repair round and judge scoring: before each
+case across the baseline, an extension or redispatch, every repair round and
+judge scoring: before each
 batch the runner reserves the estimated cost of every concurrent trial and
 admits only what fits beside what was already spent, then reconciles actual
 costs after the batch. When the next trial no longer fits it stops with a named
 red. A case with no per-trial estimate, or one above
 `ship_measure_ask_per_trial_usd` (default 2), asks once before any trial runs;
 with no estimate it then runs one calibration trial alone. `ship_measure_max_rounds`
-(default 3) limits repair rounds. `ship-measure report` prints the PR-body table:
-each measurement as "observed k/n" (after the named fix for a repair round),
-target, estimated and actual spend. A red the user declares infrastructure is
+(default 3) limits repair rounds; an extension or a redispatch is not a round.
+`ship-measure report` prints the PR-body table: each measurement as "observed
+k/n" (after the named fix for a repair round, with every batch), the bar, the
+decision, estimated and actual spend, and qualified MEETS under their own
+heading. A red the user declares infrastructure is
 recorded with `ship-measure skip` and shows as `unmeasured`, never as a pass. A
 case is called fixed only with a named causal change and every failure in the
 closing measurement explained; the weekly census, not the loop, reports
@@ -512,7 +549,9 @@ free random ports, as in the normal suite. `ship_rerun_backend=ubicloud` runs th
 reruns on one Ubicloud VM through `bun run test:ubicloud --diagnostic`, which
 also sets the flaky retry off. The seeded paid case `ship-measure-seeded-flake`
 (periodic, `behavior`) drives /ship through this loop against a stub eval
-command that fails trial slots 2, 5 and 9 until its list is sorted.
+command that fails trial slots 2, 5 and 9 until its list is sorted. The weekly
+[off-ship sweep](#ship-measure-sweep) measures main's flakiest gate cases with
+the same runner and bar.
 
 <a id="failure-causes"></a>
 **Failure causes and details** (diagnostic only; verdicts unchanged under v1).
@@ -768,7 +807,48 @@ two anchors: every binary and source set flips it, Windows `.exe` suffixes).
 against a temp `GSTACK_INSTALL_DIR` / `GSTACK_SKILLS_DIR`, and
 `test/hook-scripts.test.ts` runs the real `careful/bin/check-careful.sh` and
 `freeze/bin/check-freeze.sh` with JSON payloads on stdin (including the
-`GSTACK_HOME` state-root parity against `bin/gstack-paths`).
+`GSTACK_HOME` state-root parity against `bin/gstack-paths`, PowerShell tool and
+NotebookEdit payloads); it is named Windows coverage in the curated
+`windows-free-tests` lane.
+
+### Ship measure sweep
+
+**Weekly off-ship qualification sweep** (`ship-measure sweep`,
+`scripts/ship-measure-sweep.ts`, `.github/workflows/eval-sweep.yml`; approved
+2026-10-06). With about 130 gate verdicts, an all-green gate is unlikely even
+when every case is healthy (26.8% at 99% per verdict), so flaky cases are
+measured on main before any ship hits them. The sweep reads `eval:pass-rates`
+history (`evals-periodic.yml` on main plus pooled branch census runs), takes the
+latest gate census, and ranks every live, non-quarantined gate case with a
+failed trial or red verdict by its cost to the all-green probability
+Π(1 − p_i) (the shrunk red-verdict rate from `--reds`; ties go to the lower
+per-trial pass rate). It measures the top K (`ship_measure_sweep_cases`,
+default 5; `--k`) at their kind's N on the checked-out head with /ship's runner
+and bar, in rank order. The report (`sweep-report.md` and `.json` under
+`.context/ship-measure/sweep-<time>/`, rewritten after every case) has one row
+per case (history rate, measured count, decision, estimated and actual cost,
+captures path) and the predicted gate all-green probability before (history)
+and after (each measured case's measured failure fraction, shrunk toward the
+pooled rate and converted to panel red risk for behavior cases). Spend is
+capped by `ship_measure_sweep_budget_usd` (default $150 per 7 days, `--cap-usd`)
+through the same admission budget: the cap is shared by the sweep's cases and
+every non-dry-run sweep report of the last 7 days under `--prior` and the local
+sweep root, so a dispatch after the weekly run spends only what is left. When
+the cap is exhausted the sweep stops and lists every skipped case. `--dry-run`
+plans and estimates at $0; `--history-dir` reads local `trial-outcomes`
+directories; `--command '<cmd> {case}'` swaps in another single-case runner.
+History that cannot be read fails closed with nothing measured.
+
+The workflow runs Mondays at 12:00 UTC (after the 06:00 periodic census) and on
+`workflow_dispatch` (inputs `k`, `cap_usd`, `dry_run`), in the CI image with the
+paid-eval secrets setup the census uses. It downloads the last 7 days of sweep
+reports first, uploads the report and captures as the `ship-measure-sweep`
+artifact, and writes the job summary. It holds `contents: read`, never pushes
+or opens a pull request, and runs one sweep at a time repository-wide
+(concurrency group `eval-sweep`, not cancelled) so two runs never spend the
+same weekly cap. Fixing is done by an agent from the report, through /ship's
+measure loop. Sweep trials are diagnostic like every ship-measure trial: they
+never become verdicts and never enter EVAL_POLICY pooling or series history.
 
 ### Pass-rate policy versions
 
@@ -828,12 +908,39 @@ the CSO private-state checks), AppArmor blocks the unprivileged user
 namespaces Chromium's sandbox needs, and `clang` and `python3-venv` are absent
 (required by the Dia readiness and Python runner tests).
 
-VMs are named `ubirun-<epoch>-<hex>`. Every exit path destroys the client's
-own VM, and `down` fails unless the VM is confirmed gone. Nothing sweeps stale
-VMs by default, because the project quota is shared with other agents' runners;
-set `UBI_GC_HOURS` to a positive number (or run `gc HOURS`) to opt in. For other commands, use the runner directly:
-`scripts/ubicloud/ubi-runner.sh run --setup <script> -- '<command>'`, or its
-`up` / `ssh` / `sync` / `pull` / `down` steps (`--help` lists them).
+VMs are named `ubirun-<owner>-<epoch>-<hex>`; `<owner>` is `UBI_OWNER` (set it
+to the thread id on a Capy machine), else a stable per-machine id. Every exit
+path destroys the client's own VM (`trap` on EXIT, INT, TERM, HUP and QUIT), and
+`down` fails loudly (`FAILED to destroy <location>/<name> (HTTP <code>)`) unless
+the VM is confirmed gone. `list --mine` shows this owner's VMs, `usage` the
+project's, and `records` the VM-id scratch file (`UBI_VM_RECORD`, default
+`~/.capy/work/ubi-runner/vms.tsv`, else `<state root>/vms.tsv`): every VM is
+recorded there before the create call and forgotten only after a confirmed
+destroy, so a killed runner leaves a name to clean up. Nothing sweeps stale VMs
+by default, because the project quota is shared with other agents' runners; set
+`UBI_GC_HOURS` to a positive number (or run `gc HOURS`; `gc 0` is a no-op) to
+sweep only this owner's VMs older than that. For other commands, use the runner
+directly: `scripts/ubicloud/ubi-runner.sh run --setup <script> -- '<command>'`,
+or its `up` / `ssh` / `sync` / `pull` / `down` steps (`--help` lists them).
+
+Under 8 cores (`gstack-doctor`'s `cores` row says so), run the full unit and
+E2E tiers on a remote gate: `gstack-config set test_backend ubicloud` records
+the choice and the row names the runner. Resume checklist after a wake or a
+machine swap, in this order:
+
+1. `scripts/ubicloud/ubi-runner.sh records` and `list --mine`: a VM listed in
+   the record but absent from the project is already gone (forget it); a VM
+   in the project but not in the record belongs to another owner, leave it.
+2. Watched background operations: a runner started under `gstack-detach` keeps
+   its `### gstack-detach EXIT=<code> ###` sentinel in its log; a log without
+   the sentinel after the VM is gone is an interrupted run, not a pass.
+3. One before/after pair per machine: the measurement a change claims is taken
+   on the base and on the candidate from the same VM size and location, never
+   one side local and the other remote.
+4. Profiling very large imports (a whole-repo ingest, the full free suite under
+   a profiler) is warned about before it starts: it holds the VM past
+   `UBI_GC_HOURS` and the sentinel arrives hours later; name the expected
+   duration in the thread before launching.
 
 ## Cloud sandboxes (Vercel / Conductor cloud workspaces)
 
@@ -902,17 +1009,44 @@ select nothing: docs, any non-paid `*.test.ts(x)`, `FREE_ONLY_PR_FILES` (the
 free and paid duration seeds, `scripts/ubicloud/**`, every workflow that runs no
 paid evals, and free-only tools), and the fixtures in `FREE_FIXTURES`
 (`test/helpers/free-fixtures-data.ts`, each fixture with its free consumers).
-`PAID_WORKFLOW_FILES` (`evals.yml`, `evals-periodic.yml`, `evals-marathon.yml`)
-and any other unknown file restore the full gate (`prCoverage.mode =
-full-fallback`). The job summary and PR comment list each file that caused a
-fallback with one of three labels:
+Unmapped files under `DERIVABLE_PREFIXES` (bin/, lib/, scripts/, browse/,
+design/, make-pdf/, hosts/, extension/, model-overlays/, agents/, test/helpers/,
+capy/) are not unknown: `scripts/pr-dependencies.ts` derives the cases whose
+reference closure reaches them (`prCoverage.mode = dependents`), or reports that
+no paid case reaches them. The derivation scans the imports of every code file,
+including `#!`-shebang `.ts` files and extensionless Bun or Node scripts; if any
+import scan fails, every unmapped file restores the full gate (label **import
+scan failed**). `PR_FULL_GATE_FILES`, `PAID_WORKFLOW_FILES` (`evals.yml`,
+`evals-periodic.yml`, `evals-marathon.yml`) and any other unknown file restore
+the full gate (`prCoverage.mode = full-fallback`). The job summary and PR comment
+list each unmapped file that caused a fallback with one of these labels:
 
 - **needs touchfile entry**: a paid test, helper or fixture no case maps; add it
   to the owning case in `E2E_TOUCHFILES` (`test/helpers/touchfiles-data.ts`).
 - **add to FREE_ONLY_PR_FILES**: a file only free lanes read; add it to the list
   in `scripts/test-pr-profile.ts` (or a fixture to `FREE_FIXTURES`).
-- **real unknown dependency**: shared code (bin/, lib/, resolvers, hosts, setup)
-  whose dependents are not mapped; the full gate is the correct result.
+- **full-gate input**: a `PR_FULL_GATE_FILES` entry every case consumes; the
+  full gate is intended and no mapping narrows it.
+- **deleted but still referenced** and **import scan failed**: fix the named
+  reference or parse error.
+- **real unknown dependency**: a file outside the derivable directories that no
+  list classifies (for example `ETHOS.md`); map it, exempt it, or derive its
+  directory.
+
+The fallback rate is a label, not the bill: a dependents run whose derived
+closure reaches every gate case costs about what a full-fallback run does.
+`bun run test:health` leads with the cost per merged PR and reports
+`pr-cases-per-run` (mean selected gate cases and judges per PR run, per mode)
+and `pr-known-cost-per-run` (mean known trial cost per PR run, per mode) beside
+`pr-fallback-rate`.
+
+`package.json` (beyond a version-only change) and `bun.lock` stay full-gate
+inputs. Over the 225 PR runs from 2026-10-07 to 2026-10-17, no run fell back on
+them alone, dependabot PRs never reach the paid lane (`evals.yml` skips
+`github.actor == 'dependabot[bot]'`), and every runtime package's importer
+(`test/helpers/agent-sdk-runner.ts`, `test/helpers/llm-judge.ts`, `browse/src/*`,
+`make-pdf/src/*`) reaches every gate case or is in the global set, so narrowing
+them would select the same cases.
 
 `test/free-fixtures.test.ts` holds the inventory: each `test/fixtures/**` path
 belongs to a paid touchfile or `FREE_FIXTURES`, and each workflow to the paid or
@@ -920,7 +1054,79 @@ free-only list. Editing a paid test file runs its own gate cases on the PR when
 their Bun test is named by the case id; the file's other cases stay deferred with
 a reason that says to name the test by its case id.
 
-### PR receipts, recovery and debounce
+### Exercised-path map
+
+The derived closure (above) reaches almost every gate case from most bin/ and
+lib/ files, because it follows prose, string and doc-comment mentions. The
+exercised-path map is a tighter consumer set that runs in **shadow mode**: it
+is computed and reported on every PR plan, and it never changes which cases a
+PR runs. Activating it is a later decision that needs PTY command capture for
+the cases that record no commands, two weeks of shadow data with zero shadow
+misses, and Garry's call on the measured saving.
+
+A case's exercised consumers (`exercisedConsumers` in
+`scripts/pr-dependencies.ts`) are the union of its touchfile matches, the
+closure of its test file and helpers, the executable shell of its loaded skill
+(template and generated SKILL.md) and of every bin, lib and script that shell
+runs, and the bins its recorded trials invoked. Shell edges are command-position
+`gstack-*` names and repo paths, `.`/`source`, `./setup`, quoted path
+literals, `path.join` pairs, data files, `bun run` scripts and compiled outfiles
+(`browse/dist/browse`, `$B`, `design/dist/design`, `$D`, `make-pdf/dist/pdf`).
+Comments, echo/printf/die messages, case patterns, bare `VAR=gstack-x` strings
+and slash-command skill names are not edges; command substitutions are kept, an
+expanding heredoc keeps its substitutions and a heredoc an interpreter reads
+stays whole. The closure stops at `PR_FULL_GATE_FILES` and the global set, which
+stay full. `test/exercised-map.test.ts` pins that this function equals or is a
+reviewed superset of the measured prototype (`test/helpers/exercised-prototype.ts`).
+
+The observed half is `test/helpers/exercised-commands.json` (generated; per case
+the bins and compiled outfiles its recorded trials ran, observation counts, the
+source run ids and a mean known cost per run). Refreshes are union-only: an
+observation never removes a command and a missing or empty artifact never erases
+one; removing a command is a reviewed edit. While the map is in shadow mode it
+changes no selection, so a PR that changes only the map selects no paid case.
+
+Dollar figures are lower bounds. Known cost excludes PTY trials, whose cost is
+unknown: about 39% of observed case runs in the committed map. The shadow block
+and `test:health` both say so.
+
+- **Shadow block:** `prCoverage.shadow` in the paid-plan manifest lists the gate
+  cases the map would select, would drop and would add, a provenance line per
+  changed file ("selects N case(s): touchfile (k), import (k), skill bash via
+  bin/gstack-x (k), observed bin/gstack-y (k)"), the predicted saving and the
+  unknown-cost share. The coverage summary prints one line of it.
+- **Shadow misses (`bun run test:health`, metric `pr-shadow-map`):** a red case
+  (more executed failed than passed trials in the run) that the shadow would
+  drop is an activation miss unless the case passed in a later run of the same
+  branch at the same head SHA. That later pass marks it a flaky drop, which is
+  listed but not counted. The D3 activation bar counts activation misses only.
+- **MAP_GAP:** the paid report runs the same bin matcher over each executed
+  case's recorded commands and prints, and writes to `map-gaps.txt`,
+  `MAP_GAP <case> <command>: non-blocking for this PR; the next census refresh
+  widens the map (docs/TESTING_INTERNALS.md#exercised-path-map)` for a command
+  outside the case's static-plus-observed closure. It is its own result: never a
+  case verdict, a lane problem or an INFRA re-dispatch input.
+- **Census refresh:** the weekly census unions its own recorded commands into the
+  map (no REST artifact downloads), uploads it as `exercised-map-a<attempt>`,
+  reports MAP_GAP lines and the cases that recorded no commands, and prints the
+  refresh command. Run `bun run test:exercised-map --from-run <id>`, or
+  `--from-dir <dir>` on a locally downloaded `exercised-map-a<attempt>` artifact
+  when the download hits HTTP 403, and open the change as an ordinary PR.
+  `bun run test:exercised-map --check` validates the committed file.
+- **Refresh contract:** a refresh whose input is unavailable or partial writes
+  nothing, keeps the committed union and exits with a stable code that names
+  what was missing: `2` usage; `3` input unavailable (a missing directory, or a
+  failed or HTTP 403 download); `4` input incomplete (no `shards/`, no
+  `trial-outcomes.jsonl`, an executed case without a shard artifact, or a missing
+  or malformed `exercised-commands.json`). The census step reports a failed
+  refresh in its job summary and uploads no map.
+- **Replay receipt:** `bun run test:exercised-map --replay` replays the recorded
+  red PR runs in `test/fixtures/exercised-map-replay.json` (every executed failed
+  gate trial in 225 `evals.yml` pull_request runs, 2026-10-07 to 2026-10-17)
+  through today's selector and its shadow, and exits 1 on any MISS: a failed
+  gate case the shadow would not run. `test/exercised-map.test.ts` pins zero.
+
+### PR receipts, recovery, readiness and verdict reuse
 
 Passes and failures of single-trial shards are written as receipts at the
 execution boundary, so a cancelled run's finished work survives. The
@@ -933,13 +1139,98 @@ unresolved run. `plan-slices` turns reuse off when recovery degraded, the
 checkpoint is missing or a cancelled run is still unresolved; recovery itself
 never fails the run, and the job summary names the reason (rate limit with its
 reset time, `gh auth status`, the 60-second budget). The whole store is saved by
-`slices-report`.
+`slices-report`. Both the restore and the save run on GitHub-hosted runners: an
+Ubicloud runner sends `actions/cache` to Ubicloud's transparent cache, which a
+GitHub-hosted restore never sees (until GSTA-48 every restore missed).
 
-On a `synchronize` push, when another run for the same PR started in the last 15
-minutes, the debounce job waits 90 seconds before planning; a run that outlives
-the wait reports "superseded by <sha>". PR labels: `evals-no-debounce` skips the
-wait and `evals-fresh` turns receipt reuse off. Labels apply from the next push,
-because adding a label does not start `evals.yml`.
+**Readiness (R1).** Paid slices for a PR head start only when the PR has been
+quiet for the window (repository variable `EVALS_QUIET_MINUTES`, default 10,
+measured from the run's creation) and Free Tests has concluded success on the
+same head SHA. The `readiness` job (`scripts/eval-readiness.ts`) sleeps out the
+window with no API calls, since a newer push cancels the run anyway, then polls
+Free Tests every minute for up to 80 minutes. Free Tests red on the head fails
+the run without paid work; re-run Free Tests, then re-run this workflow (a
+re-run keeps the creation time, so it does not wait out the window again). A
+head that is no longer the PR's head reports "superseded by <sha>" and plans
+nothing. Selection, trials and verdict rules do not change. Version Gate is not
+an input, so a stamp push waits only for its own Free Tests and always gets a
+gate. Dispatches (`eval:bg`, the census) never wait.
+
+**Verdict reuse (R2a restamp-only, R2 main moved; a gate edit).** A PR head
+reuses the verdict of the newest executed gate of the same PR instead of
+running one only when all of these hold. Every newer run of the PR either bound
+a verdict or provably ran no paid slice (superseded, readiness-blocked, a reuse,
+or cancelled before a slice finished); a newer run that is still running,
+finished a slice, or holds a `paid-slice-*` artifact without a bound verdict
+blocks reuse, so a newer red or partial result is never skipped. The gate is
+GREEN with reconcile exit 0, a successful run and no manually accepted
+(unscored) case; it ran the PR profile on a different head. Then either:
+
+- **R2a, restamp-only:** it ran on the same base (the tested merge commit's
+  first parent), the tree receipt (`lib/tree-receipt.ts` under the base's ship
+  policy) prints `TREE: same-modulo-stamps`, and every differing file is the
+  version file, `package.json`, the CHANGELOG or a release output (the agents
+  digest); or
+- **R2, main moved:** the base moved, and the PR's own diff from its
+  merge-base, excluding stamp files, is byte-identical to the gated head's
+  (`git diff --binary --full-index`, so pre-image blob ids are compared and a
+  main change to a file the PR also changes is a difference; `package.json`
+  compared without its version; release outputs with each revision's version
+  replaced; the CHANGELOG by its preamble and the sections the PR added and
+  removed, dropping only version or `[Unreleased]` headings).
+
+Finally this head's own plan must have the same selection fingerprint (cases,
+statuses, trial plans, profile), so a main move that changes what the PR gate
+selects runs the full gate. `recover-receipts` proposes the candidate from
+base-ref code (`scripts/gate-reuse.ts find`), `plan-slices` confirms the
+selection, `eval-slices` is skipped, and the report and PR comment say
+`PASS (reused: restamp-only, R2a)` or `PASS (reused: main moved, R2)` with
+the reused run, its head, why, and the receipt digest or own-diff signature.
+Free Tests and every other check still run on the new head. Executed runs
+upload a `gate-binding-a<attempt>` artifact (base, verdict, reconcile exit,
+manual count, selection); reused runs bind nothing, so reuse never chains off a
+reuse. Any other case (a changed own diff, a non-stamp byte including CHANGELOG
+entry text or a file mode, a missing binding, receipt or merge-base, a gh or git
+error, `evals-fresh`) runs the full gate. For a restamp to qualify, write the
+CHANGELOG entry before the gated push (under `## [Unreleased]` or the
+tentative version) so the stamp only re-heads it.
+
+PR labels: `evals-no-debounce` sets the quiet window to 0 (Free Tests is still
+required) and `evals-fresh` turns receipt reuse and verdict reuse off. Labels
+apply from the next push, because adding a label does not start `evals.yml`.
+
+### Replay gate cost
+
+`bun run scripts/gate-cost-replay.ts --runs <id,...> [--since YYYY-MM-DD --until YYYY-MM-DD | --prs 3201,3202] [--json]`
+measures the paid PR gate's bill from recorded artifacts, for free. `--runs`
+names complete full-gate runs; their `paid-slice-*` and `trial-outcomes`
+artifacts are downloaded read-only with `gh` into `.context/gate-cost-cache`
+once and reused from there. It prints:
+
+- recorded $ per gate (mean, min, max), split by model and by token class
+  (cache write, output including thinking, cache read, uncached input), priced
+  through `lib/pricing.ts`;
+- a per-case mean cost table (`--cases` prints all of it); a case whose runs
+  record no cost (PTY sessions) is estimated from its duration and marked
+  estimated, at recorded dollars per recorded session-second unless
+  `--usd-per-second` pins the rate;
+- for each squash merge on origin/main's first-parent history in the window
+  (bare dates are UTC days, `--until` inclusive), the selection cost under
+  today's selector, R4's exercised-map shadow and the screening rule, and the
+  mean, median and mean case count per merged PR over every merged PR in the
+  window, zeros included;
+- a seeded merge-train model (every merged PR lands in a train; screened and
+  unscreened defect rates, outside reds, a $6 bisect per red, culprits
+  requeued, one rebuild per unattributed red) for each screening policy, with
+  $ per week and per merged PR and the multiple against $9,950 and $8,400 a week.
+
+Screening figures are labelled `screen-provisional`: the rule's preamble
+detector is a line-commonality heuristic, not T2's hunk classifier, so they
+stay heuristic until T2 lands. A `package.json` change that only moves the
+version is neither selected nor a canary trigger, and all 24 judges always run.
+The selectors are this checkout's, so an old merge is replayed against today's
+maps. A shallow checkout says which `git fetch --shallow-since` to run. Logic:
+`lib/gate-cost.ts`; tests: `test/gate-cost.test.ts`.
 
 ## Free suite runner, judge reuse and engine skips
 
@@ -968,7 +1259,7 @@ runtime match; records preserve original provenance. The cookie workflow's custo
 input, the other 11 judge cases, dynamic agent tests, and local runs without
 scoped cache configuration stay fresh.
 Scheduled/manual full coverage and `test:release` always run fresh.
-See [testing policy](CONTRIBUTING.md#test-tiers) for commands and measured targets.
+See [testing policy](../CONTRIBUTING.md#test-tiers) for commands and measured targets.
 Anything that needs Aside
 itself (`test/skill-e2e-aside.test.ts`, the Aside qa/design E2E cases, the
 live render in `test/aside-render.test.ts`) runs only on a Mac with the Aside
@@ -1026,15 +1317,45 @@ Free-suite flake rules:
   daemon without `CI=true` launches Chromium sandboxed.
 - Handshakes with a runner wait for the runner's own observable effect (its
   progress line, a coalesced read count), not for a fixture side file or a timer.
+- Fixtures that commit and then list, watch or remove a repository's `.git`
+  turn git auto-maintenance off themselves (`maintenance.auto=false` and
+  `gc.auto=0` in the repo config, or in the explicit git env they build). Since
+  git 2.29, `git commit` starts a detached `git maintenance run --auto` that
+  creates and deletes `.git/objects/maintenance.lock` after the commit has
+  returned; a listing counts it, a watcher's `lstat` misses it, and Bun's
+  `rmSync(..., { recursive: true, force: true })` returns without an error while
+  leaving the directory behind. `runFreeShard` appends the same two keys to
+  every shard child's `GIT_CONFIG_*` pairs as a backstop, so it covers fixtures
+  that inherit the environment, and `bun run scripts/ship-measure.ts free
+  --backend local` measures with that environment; a fixture with its own
+  replacement env never sees the backstop.
+
+To reproduce a ledger entry, take the shard's exact file list from the CI run's
+`free-plan` artifact, then rerun it with the flaky retry off on a CI-mirrored VM:
+
+```bash
+gh run download <run-id> -R garrytan/gstack -n free-plan -D /tmp/free-plan
+files=$(jq -r --argjson s <shard> '.shards[] | select(.shard == $s) | .files | join(",")' /tmp/free-plan/free-plan.json)
+bun run test:ubicloud --diagnostic --files "$files" --reruns 30
+```
+
+The ledger entry names the shard (`flake-ledger-<shard>`). Read the counts from
+the run's `free-measurement.json` (`completed`, `passed`, `capHit`): with a
+before-fix failure rate p, a fix needs at least 3/p clean completed reruns of
+the same command, so zero failures would have under a 5% chance if nothing had
+changed. Cut or unstarted reruns are incomplete, not passes.
 
 ### Free suite duration seed
 
 `scripts/free-test-durations.json` drives shard packing; files missing from it
-pack at the seed's 99th percentile. Acceptable seeds come from
-`bun run test:ubicloud --record-durations` (each file timed in its own child on a
-VM with the CI lane's environment) or a CI recording. A 4-core laptop or
-small-sandbox recording is not acceptable: browser and display tests skip or slow
-down there, so the seed misstates them.
+pack at the seed's 99th percentile. Acceptable seeds come only from a recording
+in the CI lane's environment, each file timed in its own child: the weekly
+`free-durations-record.yml` run, or `bun run test:ubicloud --record-durations`
+(it needs `UBICLOUD_API_KEY` and copies the refreshed seed back into the
+checkout). A 4-core laptop or small-sandbox
+recording is not acceptable: browser and display tests skip or slow down there,
+so the seed misstates them. Contributors without `UBICLOUD_API_KEY` leave the
+refresh to a maintainer.
 
 - `--ci-plan` warns in the job summary, with the refresh command, when more than 5
   files are unseeded; it never fails a PR. `--ci-verify` lists shards that ran
@@ -1052,6 +1373,20 @@ down there, so the seed misstates them.
   `{file, reason, todo}` and the test prints it. A merge-base without the
   allowlist file counts as the first allowlist. Fix a failure by splitting the
   file, then rerun `bun run test:ubicloud --record-durations`.
+- `free-durations-record.yml` (Mondays 04:00 UTC, before test-health, and on
+  dispatch) records the Linux seed on `ubicloud-standard-8` with
+  `scripts/ubicloud/setup-free-suite.sh` and the Windows seed through
+  `windows-free-tests.yml`'s `record_durations` path. When either recording adds
+  or drops a test file, it force-updates the `bot/free-duration-seeds` branch,
+  opens or refreshes one seed PR whose body states the ratchet result, and
+  dispatches the free lanes on it. A file that fails while recording turns its
+  job red but keeps its duration, and the PR body names it; the seed PR's own
+  free checks decide whether the tree is healthy. An interrupted recording
+  uploads no seed, and more than 5 red files on either OS proposes nothing. The
+  bot never edits the allowlist: a ratchet failure is fixed on the branch by a
+  maintainer before the PR merges, and while the open seed PR holds any commit
+  besides the bot's one refresh commit, later runs leave it alone. Only runs on
+  `main` push the branch; a dispatch from another ref reports only.
 
 ### Windows free lane
 
@@ -1059,7 +1394,8 @@ down there, so the seed misstates them.
 runs one strict serial shard per `windows-latest` job
 (`bun run test:windows --ci-run`), and verifies every shard receipt on Linux
 (`--windows-only --ci-verify`). Packing uses Windows-measured durations from
-`scripts/free-test-durations-windows.json`; refresh them with
+`scripts/free-test-durations-windows.json`; the weekly
+`free-durations-record.yml` run refreshes them, or by hand run
 `gh workflow run windows-free-tests.yml --ref <branch> -f record_durations=true`,
 then download the `free-test-durations-windows` artifact and commit it.
 

@@ -68,8 +68,8 @@ Timeout, failed dispatch, or missing final output is review_not_run, never clean
     .replaceAll('Codex (in-host)', 'Primary native reviewer')
     .replace(/\*\*Primary native reviewer ([^\n]+) subagent\*\* \((?:via Agent tool|native tool)\):/g,
       '**Primary native reviewer $1 review** (advertised native fresh-context API):')
-    .replaceAll(/Claude Code: set Agent `run_in_background: false` if its schema exposes it\.\n\s*Other hosts: foreground; await completion when supported\./g,
-      'Use only the advertised native worker API. Preserve the main model and effort; when the API is `collaboration.spawn_agent`, set `fork_turns: "none"` and omit unselected overrides. Wait for actual terminal completion.')
+    .replaceAll(/(?:Claude Code|Codex): set Agent `run_in_background: false` if its schema exposes it\.\n\s*A launch receipt means it went background: await its completion notice\.\n\s*Other hosts: foreground; await completion when supported\./g,
+      'Use the advertised native worker API and documented wait/status mechanism. Preserve the selected model and effort, and wait for terminal completion before continuing.')
     .replaceAll('Send its `nativeDispatchPrompt`\n  verbatim as the Agent prompt: ONLY/FINAL tool call this response.',
       'Send the complete `nativeDispatchPrompt` verbatim through the advertised native worker API. Do not treat prompt construction or a launch handle as completion.')
     .replaceAll('Keep native Reads enabled. Child first Reads `nativePromptPath` to EOF:\n  all criteria + plan; no summaries or prior reviews.',
