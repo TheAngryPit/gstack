@@ -229,9 +229,10 @@ jobs:
   # Capy machines install GSTACK_BUN_DEFAULT (bin/gstack-bun-version.sh) when
   # no project pin decides, above the 1.4.2 minimum every other lane pins, so
   # the quick tier also runs on it. Its pin equals GSTACK_BUN_DEFAULT;
-  # test/bun-version-drift.test.ts checks this job exists and agrees.
+  # test/bun-version-drift.test.ts checks this job exists and agrees. Forks
+  # use GitHub-hosted Linux runners because Ubicloud is not available there.
   quick-bun-default:
-    runs-on: ubicloud-standard-8
+    runs-on: ${{ github.repository == 'garrytan/gstack' && 'ubicloud-standard-8' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
