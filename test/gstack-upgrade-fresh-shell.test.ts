@@ -177,7 +177,8 @@ describe.skipIf(IS_WINDOWS)('gstack-upgrade rendered command contract', () => {
     expect(hostRenders.length).toBe(ALL_HOST_CONFIGS.length);
     for (const host of hostRenders) {
       expect(host.upgradeText).toContain('UPGRADE_AVAILABLE <old> <new> <sha>');
-      expect(host.upgradeText).toContain('--apply-candidate "<sha from UPGRADE_AVAILABLE>"');
+      expect(host.upgradeText).toContain('CANDIDATE_SHA="<sha from UPGRADE_AVAILABLE>"');
+      expect(host.upgradeText).toContain('--apply-candidate "$CANDIDATE_SHA"');
       expect(host.upgradeText).toContain('required latest Actions attempts');
       for (const command of host.upgrade) {
         expect(command).not.toMatch(/\bgit\s+(pull|reset|stash|fetch|clone|checkout|merge)\b/);
@@ -238,7 +239,7 @@ describe.skipIf(IS_WINDOWS)('/spec fences refuse bad paths on every host', () =>
 });
 
 describe.skipIf(IS_WINDOWS)('gstack-upgrade resolves its registered source', () => {
-  test('uses the source row for the current host and refuses a missing registration', async () => {
+  test('uses the source row for the active runtime and refuses a missing registration', async () => {
     for (const host of hostRenders) {
       const w = mkdtempSync(join(root, `source-${host.host}-`));
       const state = join(w, 'state');
@@ -254,7 +255,7 @@ describe.skipIf(IS_WINDOWS)('gstack-upgrade resolves its registered source', () 
       writeFileSync(join(source, 'bin', 'gstack-session-update'), '#!/bin/sh\n', { mode: 0o755 });
       writeFileSync(join(runtime, 'bin', 'gstack-paths'), `#!/bin/sh\necho "${state}"\n`, { mode: 0o755 });
       const destination = join(home, 'skills');
-      const row = [host.host, 'global', '-', destination, join(destination, 'gstack'), source, '1.0.0', 'false', 'committed', 'now', 'gpt-5.6-sol', 'a'.repeat(40)].join('\t');
+      const row = [host.host, 'global', '-', destination, runtime, source, '1.0.0', 'false', 'committed', 'now', 'gpt-5.6-sol', 'a'.repeat(40)].join('\t');
       const other = [host.host === 'codex' ? 'claude' : 'codex', 'global', '-', '/other', '/other/gstack', '/wrong/source', '1.0.0', 'false', 'committed', 'now', '-', '-'].join('\t');
       const registry = join(state, 'installs.tsv');
       writeFileSync(registry, `${other}\n${row}\n`);
@@ -273,6 +274,15 @@ describe.skipIf(IS_WINDOWS)('gstack-upgrade resolves its registered source', () 
       const missing = await runLookup();
       expect(missing.status).not.toBe(0);
       expect(missing.stderr).toContain('trusted registered GStack source was not found');
+      if (host.host === 'copilot' || host.host === 'agy') {
+        mustSh(source, 'git remote set-url origin https://github.com/garrytan/gstack.git');
+        writeFileSync(join(runtime, '.source-path'), `${source}\n`);
+        const runtimeSource = await runLookup();
+        expect(runtimeSource.status, runtimeSource.stderr).toBe(0);
+        expect(runtimeSource.stdout).toContain(`SOURCE_DIR=${source}`);
+        expect(runtimeSource.stdout).toContain('UPDATE_LANE=manual-origin');
+        rmSync(join(runtime, '.source-path'));
+      }
 
       writeFileSync(registry, `${row}\n`);
       mustSh(source, 'git remote set-url origin https://github.com/TheAngryPit/gstack.git/');
@@ -292,6 +302,61 @@ describe.skipIf(IS_WINDOWS)('gstack-upgrade resolves its registered source', () 
       expect(manual.stderr + manual.stdout).not.toContain('DEFERRED: trusted-fork auto-activation');
       expect(host.upgradeText).toContain('MANUAL_UPGRADE_AVAILABLE <old> <new> <target> <repo>');
       expect(host.upgradeText).toContain('Other origins stay manual');
+    }
+  }, 60_000);
+
+  test('Codex selects the row for the active project or global runtime regardless of registry order', async () => {
+    const host = hostRenders.find((candidate) => candidate.host === 'codex')!;
+    const w = mkdtempSync(join(root, 'source-codex-multiple-'));
+    const state = join(w, 'state');
+    const home = join(w, 'home');
+    const globalRuntime = join(w, 'global-runtime');
+    const projectRuntime = join(w, 'project-runtime');
+    const globalSource = join(w, 'global-source');
+    const projectSource = join(w, 'project-source');
+    mkdirSync(state, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    for (const runtime of [globalRuntime, projectRuntime]) {
+      mkdirSync(join(runtime, 'bin'), { recursive: true });
+      mkdirSync(join(runtime, 'lib'), { recursive: true });
+      writeFileSync(join(runtime, 'bin', 'gstack-paths'), `#!/bin/sh\necho "${state}"\n`, { mode: 0o755 });
+    }
+    for (const [source, origin] of [[globalSource, 'https://github.com/TheAngryPit/gstack.git'], [projectSource, 'https://github.com/garrytan/gstack.git']] as const) {
+      makeGstackLike(source, true);
+      mustSh(source, `git remote add origin ${origin}`);
+      writeFileSync(join(source, 'bin', 'gstack-session-update'), '#!/bin/sh\n', { mode: 0o755 });
+    }
+    const globalRow = ['codex', 'global', '-', join(home, 'global-skills'), globalRuntime, globalSource, '1.0.0', 'false', 'committed', 'now', 'gpt-5.6-sol', 'a'.repeat(40)].join('\t');
+    const projectRow = ['codex', 'project', join(w, 'project'), join(w, 'project-skills'), projectRuntime, projectSource, '1.0.0', 'false', 'committed', 'now', 'gpt-5.6-sol', 'b'.repeat(40)].join('\t');
+    const registry = join(state, 'installs.tsv');
+    const sourceLookup = fence(host.upgrade, 'GSTACK_STATE_ROOT=$(');
+    const lookup = async (activeRoot: string, rows: string[]) => {
+      writeFileSync(registry, `${rows.join('\n')}\n`);
+      return bashAsync(w, sourceLookup, {
+        HOME: home,
+        GSTACK_ROOT: activeRoot,
+        GSTACK_BIN: join(activeRoot, 'bin'),
+      });
+    };
+
+    for (const [activeRoot, expectedSource, expectedLane] of [
+      [globalRuntime, globalSource, 'trusted-fork'],
+      [projectRuntime, projectSource, 'manual-origin'],
+    ] as const) {
+      for (const rows of [[globalRow, projectRow], [projectRow, globalRow]]) {
+        const result = await lookup(activeRoot, rows);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(`SOURCE_DIR=${expectedSource}`);
+        expect(result.stdout).toContain(`UPDATE_LANE=${expectedLane}`);
+      }
+    }
+
+    const conflictingRow = ['codex', 'project', join(w, 'other-project'), join(w, 'other-skills'), globalRuntime, projectSource, '1.0.0', 'false', 'committed', 'now', 'gpt-5.6-sol', 'c'.repeat(40)].join('\t');
+    for (const rows of [[globalRow, conflictingRow], [conflictingRow, globalRow]]) {
+      const conflict = await lookup(globalRuntime, rows);
+      expect(conflict.status).not.toBe(0);
+      expect(conflict.stderr).toContain('active GStack runtime root matches registry rows with different sources');
+      expect(conflict.stdout).not.toContain('UPDATE_LANE=');
     }
   }, 60_000);
 });

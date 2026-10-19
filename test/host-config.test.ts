@@ -750,7 +750,7 @@ describe('Copilot host render (#393)', () => {
       expect(md).not.toContain('$HOME/.claude/skills/gstack');
       expect(md).not.toContain('.codex/skills');
     }
-    expect(read('gstack-upgrade')).toContain('$HOME/.copilot/skills/gstack/.source-path');
+    expect(read('gstack-upgrade')).toContain('$ACTIVE_ROOT/.source-path');
     expect(read('gstack-upgrade')).toContain('./setup --host copilot --refresh-registered');
   });
 
@@ -785,7 +785,7 @@ describe('Antigravity CLI host render', () => {
       expect(md).not.toMatch(/\.gemini\/(?:config\/)?skills/);
     }
     expect(read('gstack-review')).toContain('_r=~/.gemini/antigravity-cli/skills/gstack');
-    expect(read('gstack-upgrade')).toContain('$HOME/.gemini/antigravity-cli/skills/gstack/.source-path');
+    expect(read('gstack-upgrade')).toContain('$ACTIVE_ROOT/.source-path');
     expect(read('gstack-upgrade')).toContain('./setup --host agy --refresh-registered');
   });
 
