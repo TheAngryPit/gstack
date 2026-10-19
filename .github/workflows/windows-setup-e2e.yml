@@ -284,10 +284,10 @@ jobs:
           echo "$OUT" | grep -q '^ok hosts/claude/hooks/question-log-hook$' || (echo "the TypeScript hooks were not checked" && exit 1)
         shell: bash
 
-      - name: /gstack-upgrade's checkout guard passes at the checkout root and refuses below it
+      - name: Spec's checkout guard passes at the checkout root and refuses below it
         run: |
           set -euo pipefail
-          GUARD=$(grep -m1 -- '--show-prefix' gstack-upgrade/SKILL.md.tmpl)
+          GUARD=$(grep -m1 -- '--show-prefix' spec/sections/gate-and-file.md.tmpl)
           echo "guard: $GUARD"
           INSTALL_DIR="$PWD" bash -c "cd \"\$INSTALL_DIR\" && $GUARD && echo GUARD_OK" | grep -q GUARD_OK || (echo "the guard refused the checkout root" && exit 1)
           if INSTALL_DIR="$PWD/bin" bash -c "cd \"\$INSTALL_DIR\" && $GUARD && echo GUARD_OK" 2>/dev/null | grep -q GUARD_OK; then

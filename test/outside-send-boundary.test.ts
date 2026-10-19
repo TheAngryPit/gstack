@@ -63,7 +63,7 @@ describe('generated skills start outside CLIs only through the consent-enforcing
       if (host === 'claude') {
         expect(wrapped.length).toBeGreaterThan(5);
       } else {
-        expect(wrapped.map(f => path.relative(path.join(TMP, host), f)).sort()).toEqual([
+        expect(wrapped.map(f => path.relative(path.join(TMP, host), f).replace(/\\/g, '/')).sort()).toEqual([
           '.agents/skills/gstack-claude-code/SKILL.md',
           '.agents/skills/gstack/SKILL.md',
         ]);
