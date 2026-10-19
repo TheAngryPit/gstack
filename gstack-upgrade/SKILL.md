@@ -48,20 +48,27 @@ if [ "claude" = claude ]; then
 fi
 GSTACK_STATE_ROOT=$("$GSTACK_BIN/gstack-paths" --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 SOURCE_DIR=""
-case "claude" in
-  copilot)
-    SOURCE_DIR="$(cat "$HOME/.copilot/skills/gstack/.source-path" 2>/dev/null || true)"
-    ;;
-  agy)
-    SOURCE_DIR="$(cat "$HOME/.gemini/antigravity-cli/skills/gstack/.source-path" 2>/dev/null || true)"
-    ;;
-esac
-if [ -z "$SOURCE_DIR" ] && [ -f "$GSTACK_STATE_ROOT/installs.tsv" ]; then
+ACTIVE_ROOT="${GSTACK_ROOT:-}"
+[ -n "$ACTIVE_ROOT" ] || ACTIVE_ROOT="${GSTACK_BIN%/bin}"
+_REGISTRY_AMBIGUOUS=0
+if [ -f "$GSTACK_STATE_ROOT/installs.tsv" ]; then
   while IFS=$'\t' read -r _registry_host _registry_scope _registry_project _registry_dest _registry_root _registry_source _registry_version _registry_prefix _registry_render _registry_updated _registry_model _registry_commit; do
-    [ "$_registry_host" = "claude" ] && [ "$_registry_source" != "-" ] || continue
+    [ "$_registry_host" = "claude" ] && [ "$_registry_root" = "$ACTIVE_ROOT" ] && [ "$_registry_source" != "-" ] || continue
+    if [ -n "$SOURCE_DIR" ] && [ "$SOURCE_DIR" != "$_registry_source" ]; then
+      _REGISTRY_AMBIGUOUS=1
+      break
+    fi
     SOURCE_DIR="$_registry_source"
-    break
   done < "$GSTACK_STATE_ROOT/installs.tsv"
+fi
+[ "$_REGISTRY_AMBIGUOUS" -eq 0 ] || {
+  echo "ERROR: the active GStack runtime root matches registry rows with different sources; no update was attempted." >&2
+  exit 1
+}
+if [ -z "$SOURCE_DIR" ]; then
+  case "claude" in
+    copilot|agy) SOURCE_DIR="$(cat "$ACTIVE_ROOT/.source-path" 2>/dev/null || true)" ;;
+  esac
 fi
 [ -z "$SOURCE_DIR" ] || [ -d "$SOURCE_DIR/.git" ] || {
   if [ -x "$GSTACK_STATE_ROOT/session-update-recovery/recover" ]; then
