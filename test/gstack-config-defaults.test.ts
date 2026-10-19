@@ -364,7 +364,7 @@ describe('transcript_ingest_mode (recent|all|off, rejecting validator)', () => {
 
   test('rejects legacy letters and unknown values with the file unchanged', () => {
     set('transcript_ingest_mode', 'recent');
-    for (const value of ['A', 'incremental', 'new-only', 'yes', 'Recent']) {
+    for (const value of ['A', 'incremental', 'bulk', 'new-only', 'yes', 'Recent']) {
       const before = snapshot();
       const r = set('transcript_ingest_mode', value);
       expect(r.status).toBe(1);

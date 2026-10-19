@@ -88,7 +88,7 @@ try {
   acquireRefreshLock(state);
   const stage = mkdtempSync(join(state, 'gbrain-codex-refresh-'));
   const render = join(state, 'render', 'codex');
-  const env = {...codexBrainProbeEnv(binding), GSTACK_HOME: stage, GSTACK_DETECT_NO_CACHE: '1'};
+  const env = {...codexBrainProbeEnv(binding), GSTACK_HOME: stage, GSTACK_STATE_ROOT: stage, GSTACK_DETECT_NO_CACHE: '1'};
   const detection = JSON.parse(execFileSync(process.execPath, [join(root, 'bin/gstack-gbrain-detect')], {env, cwd:binding.home, encoding:'utf8', timeout:30_000}));
   if (detection.gbrain_local_status !== 'ok') throw new Error(`Selected brain was not proven reachable (${detection.gbrain_local_status}). Previous installation retained.`);
   detection.gbrain_binding_host='codex';

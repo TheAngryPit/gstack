@@ -1,7 +1,7 @@
 import { test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readlinkSync, symlinkSync, readdirSync, chmodSync, realpathSync, copyFileSync } from 'fs';
 import { tmpdir, hostname } from 'os';
-import { join, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
 import { spawnSync, spawn } from 'child_process';
 import { createHash } from 'crypto';
 
@@ -35,7 +35,7 @@ if(['search','call','get','put'].includes(args[0])) {
   const ledger=process.env.GSTACK_HOME+'/security/egress.jsonl';
   appendFileSync(process.env.PROBE_LOG+'.receipt-order', JSON.stringify({receiptBeforeDispatch:existsSync(ledger)&&readFileSync(ledger,'utf8').includes('gbrain-codex')})+'\\n');
 }
-appendFileSync(process.env.PROBE_LOG,JSON.stringify({args,stdin:args[0]==='put'&&!args.includes('--content')?await Bun.stdin.text():undefined,path:process.env.PATH,home:process.env.GBRAIN_HOME,source:process.env.GBRAIN_SOURCE,extra:process.env.FIXTURE_PROVIDER,database:process.env.DATABASE_URL,brain:process.env.GBRAIN_BRAIN_ID,gdatabase:process.env.GBRAIN_DATABASE_URL,direct:process.env.GBRAIN_DIRECT_DATABASE_URL,cwd:process.cwd()})+'\\n');
+appendFileSync(process.env.PROBE_LOG,JSON.stringify({args,stdin:args[0]==='put'&&!args.includes('--content')?await Bun.stdin.text():undefined,path:process.env.PATH,home:process.env.GBRAIN_HOME,source:process.env.GBRAIN_SOURCE,stateRoot:process.env.GSTACK_STATE_ROOT,stateDir:process.env.GSTACK_STATE_DIR,extra:process.env.FIXTURE_PROVIDER,database:process.env.DATABASE_URL,brain:process.env.GBRAIN_BRAIN_ID,gdatabase:process.env.GBRAIN_DATABASE_URL,direct:process.env.GBRAIN_DIRECT_DATABASE_URL,cwd:process.cwd()})+'\\n');
 if(args[0]==='--version')console.log('gbrain 0.48.2.0');
 else if(args[0]==='doctor')console.log(JSON.stringify({status:'ok'}));
 else if(args[0]==='sources')console.log('[]');
@@ -50,6 +50,44 @@ afterEach(()=>rmSync(temp,{recursive:true,force:true}));
 test('missing selection fails closed even with multiple valid native registrations',()=>{
   expect(refresh([]).status).toBe(1);
   expect(existsSync(join(temp,'calls.jsonl'))).toBe(false);
+});
+test('Bun-installed gbrain symlinks retain the registered path and bind their resolved target',()=>{
+  const installedBin=join(temp,'.bun','bin');
+  const cli=join(temp,'.bun','install','global','node_modules','gbrain','src','cli.ts');
+  const replacementCli=join(temp,'.bun','install','global','node_modules','gbrain-alt','src','cli.ts');
+  mkdirSync(dirname(cli),{recursive:true});
+  mkdirSync(dirname(replacementCli),{recursive:true});
+  mkdirSync(installedBin,{recursive:true});
+  copyFileSync(command,cli);
+  symlinkSync(cli,join(installedBin,'gbrain'));
+  native.mcp_servers.chosen.command=join(installedBin,'gbrain');
+  saveNative();
+
+  const result=refresh();
+  expect(result.status,result.stderr).toBe(0);
+  const binding=JSON.parse(readFileSync(join(temp,'state','gbrain-codex-binding.json'),'utf8'));
+  expect(binding.command).toBe(join(installedBin,'gbrain'));
+  const probes=readFileSync(join(temp,'calls.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  expect(probes.length).toBeGreaterThan(0);
+  expect(probes.every(call=>call.path.split(':')[0]===installedBin)).toBe(true);
+
+  copyFileSync(cli,replacementCli);
+  rmSync(join(installedBin,'gbrain'));
+  symlinkSync(replacementCli,join(installedBin,'gbrain'));
+  const before=readFileSync(join(temp,'calls.jsonl'),'utf8');
+  expect(run('bin/gstack-gbrain-codex',['search','needle']).status).toBe(1);
+  expect(readFileSync(join(temp,'calls.jsonl'),'utf8')).toBe(before);
+});
+test('refresh pins the staged transaction over an inherited GSTACK_STATE_ROOT',()=>{
+  env.GSTACK_STATE_ROOT=join(temp,'state');
+  env.GSTACK_STATE_DIR=join(temp,'legacy-state');
+  const result=refresh();
+  expect(result.status,result.stderr).toBe(0);
+  const calls=readFileSync(join(temp,'calls.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  expect(calls.length).toBeGreaterThan(0);
+  expect(calls.every(call=>call.stateRoot.startsWith(join(temp,'state','gbrain-codex-refresh-')))).toBe(true);
+  expect(calls.every(call=>call.stateRoot!==env.GSTACK_STATE_ROOT)).toBe(true);
+  expect(calls.every(call=>call.stateRoot!==env.GSTACK_STATE_DIR)).toBe(true);
 });
 test('refresh selects one brain, preserves model and installs reachable Codex sections without writes',()=>{
   const result=refresh();

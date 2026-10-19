@@ -1,5 +1,5 @@
 /** Explicit Codex stdio binding. Never infer a brain from registration order. */
-import { readFileSync, realpathSync } from 'fs';
+import { readFileSync, realpathSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { basename, dirname, isAbsolute, join } from 'path';
 import { createHash } from 'crypto';
@@ -36,8 +36,9 @@ function readSelection(server: string, codexHome: string): {binding: CodexBrainB
   if (Object.keys(entry).some(key => !supportedFields.has(key))) throw new Error('Constrained or unsupported MCP registrations must use their native tool surface.');
   if (entry.env_vars?.length) throw new Error('Inherited Codex env_vars are unsupported; use an explicitly configured stdio environment.');
   if (entry.env.GBRAIN_BRAIN_ID && entry.env.GBRAIN_BRAIN_ID !== 'host') throw new Error('This binding supports the configured host brain, not mounted brains.');
-  const command = realpathSync(entry.command);
-  if (basename(command) !== 'gbrain') throw new Error('Selected executable must be named gbrain so detector probes use that exact command.');
+  const command = entry.command;
+  const resolvedCommand = realpathSync(command);
+  if (basename(command) !== 'gbrain' || !statSync(resolvedCommand).isFile()) throw new Error('Selected executable must be a file registered as gbrain so detector probes use that exact command.');
   const home = entry.env.GBRAIN_HOME;
   const source = entry.env.GBRAIN_SOURCE;
   const config = readFileSync(join(home, '.gbrain', 'config.json'));
@@ -45,7 +46,7 @@ function readSelection(server: string, codexHome: string): {binding: CodexBrainB
   try { engine = JSON.parse(config.toString()).engine; }
   catch { throw new Error('Cannot read the selected brain configuration.'); }
   if (engine !== 'postgres') throw new Error('CLI enrichment requires an explicit Postgres engine. PGLite must use its owning native MCP server.');
-  const fingerprint = createHash('sha256').update(JSON.stringify({command, registration: entry})).update(config).digest('hex');
+  const fingerprint = createHash('sha256').update(JSON.stringify({command, resolvedCommand, registration: entry})).update(config).digest('hex');
   return {binding: {schema: 1, server, codexHome, command, home, source, fingerprint}, env: entry.env};
 }
 export function selectCodexBrain(server: string, codexHome = process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex')): CodexBrainBinding {

@@ -140,8 +140,13 @@ event before claiming live automation. Importing a recorded Codex session is
 retrospective; it does not prove a live hook fired. No Claude settings or hooks
 are involved. A skill-start call alone does not automatically ingest transcripts.
 
-Set \`transcript_ingest_mode\` only to the authorised value: \`off\`,
-\`incremental\`, or \`bulk\`. \`off\` means never ingest, not incremental.
+Set \`transcript_ingest_mode\` only to an authorised value accepted by the
+config validator: \`off\`, \`recent\`, \`all\`, or \`new@<YYYY-MM-DDTHH:MM:SSZ>\`.
+Use \`recent+repos\`, \`all+repos\`, or \`new@<YYYY-MM-DDTHH:MM:SSZ>+repos\` only
+when the user also authorises and configures the \`transcript_repos\` allowlist.
+\`off\` means never ingest; \`recent\` covers sessions from the last 90 days,
+\`all\` covers all history, and \`new@…\` applies a session start-time cutoff.
+\`--incremental\` and \`--bulk\` are collector execution flags, not config values.
 Historical ingestion, future capture and sync remain independently reportable.
 Verify a resulting authorised page through the canonical GBrain path and record
 parser proof, hook/runtime proof, ingestion proof and Git push proof separately.
