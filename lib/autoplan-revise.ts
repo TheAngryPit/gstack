@@ -9,21 +9,27 @@
  * when named: `--incorporates <ids>` binds each id to the old and new hashes
  * and refuses an unchanged plan; `--withdraw <id>` is the owner's journaled
  * decision to drop one. Archives keep `.r<rev>` names with `.v<k>` only on
- * collision. One recoverable transaction: the staged plan and state are
+ * collision. An edit that only incorporates decisions whose source findings
+ * are all below High (no user challenge, no newly in-scope phase) applies
+ * without re-review: the touched phases' reviewed hash is rebound to the
+ * revision and `applied_without_rereview` is journaled; anything unsure
+ * reopens. One recoverable transaction: the staged plan and state are
  * written and `revise_intent` journaled before anything moves; `resume`
  * (recoverRevise) completes an interrupted revise from the stage.
  */
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { exportRun } from './autoplan-export';
 import { applyRenames, approve, closeDraftDirections, finishGate, planReopen } from './autoplan-gate';
+import { carryLines, keepPlanFile, voidPendingCheck } from './autoplan-carry';
 import { atCap, pendingDeltas, roundCap, roundOf } from './autoplan-budget';
 import { diffStat, lineDiff } from './autoplan-confirm';
 import { SETTLEABLE_CHANGES } from './autoplan-reconcile';
 import { normalizeRevision, reviewHash, scaffold } from './autoplan-plan-text';
 import { parseScopeTokens } from './autoplan-scope';
 import { PHASES, detectScope, extractHeading, phaseOrder, type Phase, type ScopeFlags } from './autoplan-prompts';
-import { FILES, RunError, journal, now, pendingAmendments, readJournal, readState, writeState, type RunState } from './autoplan-state';
+import { FILES, RunError, journal, now, pendingAmendments, readDecisions, readJournal, readState, voiceRows, writeState, type RunState } from './autoplan-state';
 
 export interface ReviseOptions { out: string; plan?: string; incorporates?: string[]; withdraw?: string[]; settle?: string[]; cwd: string }
 export interface ReviseResult { state: RunState; reopened: Phase[]; lines: string[] }
@@ -82,11 +88,31 @@ function settleEvidence(state: RunState, ids: string[], revised?: string): { pla
   return { plan_sha256: active, changes };
 }
 
+const SEVERITY_ORDER = ['Informational', 'Low', 'Medium', 'High', 'Critical'];
+export const BELOW_HIGH = ['Informational', 'Low', 'Medium'];
+
+/**
+ * The severity an incorporated decision resolves to: the highest of the findings its gate item named (the
+ * decisions.jsonl origin's ids, looked up in that phase's bound rows). `unknown` when the row, its origin or a
+ * finding is missing; `challenge` for a user challenge, whose direction change is always re-reviewed.
+ */
+export function decisionSeverity(state: RunState, decision: string): string {
+  const row = readDecisions(state.out).find(d => d.id === decision);
+  const [phase, ids] = row?.origin?.split('|') ?? [];
+  if (!phase || !ids || !state.phases[phase]?.closed_at) return 'unknown';
+  const rows = [...voiceRows(state, phase, 'native'), ...voiceRows(state, phase, 'outside')];
+  const found = ids.split('+').filter(id => id && id !== 'null').map(id => rows.find(r => r.id === id));
+  if (!found.length || found.some(f => !f)) return 'unknown';
+  if (found.some(f => (f as { user_challenge?: boolean }).user_challenge)) return 'challenge';
+  return found.map(f => f!.severity).reduce((a, b) => (SEVERITY_ORDER.indexOf(b) > SEVERITY_ORDER.indexOf(a) ? b : a));
+}
+
 /** Every accepted change is in: approve, unless a plan delta after a round cap still needs the owner (a new gate revision). */
 function approveOrRegate(state: RunState, at: string): string[] {
   if (pendingDeltas(state).length) {
     finishGate(state);
-    return [`GATE: gate_rev=${state.gate_rev} (a plan change after a round cap needs the owner) render with: gstack-gate render ${path.join(state.out, 'gate.json')}`];
+    const carried = carryLines(state);
+    return carried;
   }
   return [...approve(state, at), `APPROVED: gate_rev=${state.gate_rev} (every accepted change is in the plan or settled)`];
 }
@@ -137,22 +163,34 @@ export function reviseRun(o: ReviseOptions): ReviseResult {
 
   const flags = (state.scope_flags ?? (state.scope.cli_flags ? parseScopeTokens(state.scope.cli_flags, 'run.json') : { ui: state.scope.source === 'flags' ? state.scope.ui : undefined, developerTool: state.scope.developer_tool, agentPrimary: state.scope.agent_primary })) as ScopeFlags;
   const detected = detectScope(path.join(staging, FILES.active), o.cwd, flags, file);
-  const order = PHASES.filter(p => state.phase_order.includes(p) || phaseOrder(detected).includes(p));
+  // A lean run keeps its one phase: scope the revision adds becomes a lens, never another reviewer.
+  const order = state.lean ? state.phase_order : PHASES.filter(p => state.phase_order.includes(p) || phaseOrder(detected).includes(p));
   const added = order.filter(p => !state.phase_order.includes(p));
   const opened = state.phase_order.filter(p => state.phases[p]?.snapshot);
   const changed = opened.filter(p => state.phases[p]!.snapshot !== newHash);
   const touched = state.phase_order.filter(p => changed.includes(p) || (p === 'eng' && opened.includes('eng') && changed.length > 0));
+  // Below-High decisions only, every touched phase closed, nothing newly in scope (no added phase, docs-only still holds): the edit is theirs, so no re-review.
+  const severities = incorporates.map(id => [id, decisionSeverity(state, id)] as const);
+  // A lean run has one gate revision (R65): the owner's accepted changes apply without re-review whatever their severity.
+  const quiet = severities.length > 0 && (!!state.lean || severities.every(([, sev]) => BELOW_HIGH.includes(sev))) && touched.length > 0 && !added.length
+    && touched.every(p => state.phases[p]?.closed_at) && (!!state.lean || !(state.scope.docs_only && !detected.docs_only));
   // A phase that used its last round is not reopened: the delta becomes an owner gate item, so the cap neither loops nor hides it.
-  const capped = touched.filter(p => atCap(state, p));
-  const reopen = touched.filter(p => !capped.includes(p));
-  const delta = capped.length ? diffStat(lineDiff(fs.readFileSync(state.active_plan, 'utf8'), fs.readFileSync(path.join(staging, FILES.active), 'utf8'))) : { added: 0, removed: 0 };
+  const capped = quiet ? [] : touched.filter(p => atCap(state, p));
+  const reopen = quiet ? [] : touched.filter(p => !capped.includes(p));
+  const delta = capped.length || quiet ? diffStat(lineDiff(fs.readFileSync(state.active_plan, 'utf8'), fs.readFileSync(path.join(staging, FILES.active), 'utf8'))) : { added: 0, removed: 0 };
   const atGate = state.status === 'gate_pending' ? state.gate_rev : undefined;
   journal(out, { event: 'revise_intent', k, staging: path.relative(out, staging), plan: file, old_plan_sha256: oldHash, new_plan_sha256: newHash, at_gate_rev: atGate ?? null, incorporates, withdraw, settle });
+  voidPendingCheck(state, 'the plan was revised');
 
   const renames = reopen.length ? planReopen(state, reopen, state.gate_rev ?? 0, `revise v${k}`) : [];
   for (const phase of capped) {
     (state.capped_deltas ??= []).push({ k, phase, round: roundOf(state, phase), cap: roundCap(state, phase)!, old_plan_sha256: oldHash, new_plan_sha256: newHash, ...delta, status: 'pending', at });
     journal(out, { event: 'cap_delta', k, phase, round: roundOf(state, phase), cap: roundCap(state, phase), old_plan_sha256: oldHash, new_plan_sha256: newHash, ...delta });
+  }
+  for (const p of quiet ? touched : []) {
+    const ps = state.phases[p]!;
+    (ps.rebound ??= []).push({ k, from: ps.snapshot!, to: newHash, decisions: incorporates, at });
+    ps.snapshot = newHash;
   }
   for (const p of added) state.phases[p] = {};
   state.phase_order = order; state.required_phases = order;
@@ -161,13 +199,17 @@ export function reviseRun(o: ReviseOptions): ReviseResult {
   state.plan_input = file; state.plan_source = path.join(out, `plan-source.v${k}.md`); state.plan_revision = k;
   delete state.plan_reality;
   const settled = [...settleAmendments(state, incorporates, 'incorporated', at, { old_plan_sha256: oldHash, new_plan_sha256: newHash }), ...settleAmendments(state, withdraw, 'withdrawn', at, { by: 'owner' }),
-    ...settleAmendments(state, settle, 'settled', at, { plan_sha256: evidence?.plan_sha256 }).map(r => ({ ...r, changes: evidence!.changes[r.decision as string] }))];
+    ...settleAmendments(state, settle, 'settled', at, { plan_sha256: evidence?.plan_sha256 }).map(r => ({ ...r, changes: evidence!.changes[r.decision as string] })),
+    ...(quiet ? [{ event: 'applied_without_rereview', ...(state.lean ? { lean: true } : {}), k, decisions: incorporates, severities: Object.fromEntries(severities), phases: touched, old_plan_sha256: oldHash, new_plan_sha256: newHash }] : [])];
   if (amending) state.status = pendingAmendments(state).length ? 'amend_pending' : state.phase_order.some(p => !state.phases[p]?.closed_at) ? 'running' : pendingDeltas(state).length ? 'gate_pending' : 'complete';
-  const regate = capped.length > 0 && state.status === 'gate_pending';
-  const committed = { event: 'plan_revised', k, plan: file, old_plan_sha256: oldHash, new_plan_sha256: newHash, reopened: reopen, added, at_gate_rev: atGate ?? null };
+  // A quiet revise that ends at gate_pending still has an earlier capped delta waiting: the owner gets a new gate for it.
+  const regate = (capped.length > 0 || quiet) && state.status === 'gate_pending';
+  const committed = { event: 'plan_revised', k, plan: file, old_plan_sha256: oldHash, new_plan_sha256: newHash, source_file_sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex'), reopened: reopen, added, at_gate_rev: atGate ?? null };
   fs.writeFileSync(path.join(staging, FILES.run), JSON.stringify({ state, renames, committed, settled }, null, 2) + '\n');
   publish(state, staging, renames, committed, settled);
-  const lines = [`REVISED: plan=${newHash.slice(0, 12)} reopened=${reopen.join(',') || 'none'}${added.length ? ` added=${added.join(',')}` : ''}${capped.length ? ` capped=${capped.join(',')}` : ''}`, amendmentLine(state)];
+  keepPlanFile(state.out, file);
+  const lines = [`REVISED: plan=${newHash.slice(0, 12)} reopened=${reopen.join(',') || 'none'}${added.length ? ` added=${added.join(',')}` : ''}${capped.length ? ` capped=${capped.join(',')}` : ''}`,
+    ...(quiet ? [`APPLIED: ${incorporates.join(',')} without re-review (${state.lean ? 'lean run: one gate revision' : 'below High'}; plan +${delta.added} -${delta.removed} lines)`] : []), amendmentLine(state)];
   for (const phase of capped) lines.push(`CAPPED: ${phase} used round ${roundOf(state, phase)} of ${roundCap(state, phase)}: not reopened; the gate asks the owner about the unreviewed delta (+${delta.added} -${delta.removed} lines)`);
   if (regate) {
     lines.push(...approveOrRegate(state, at));

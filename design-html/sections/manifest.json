@@ -17,6 +17,12 @@
       "trigger": "writing the finalized HTML in Step 3 — the Pretext wiring patterns and API cheatsheet are the required reference for all text-layout code"
     },
     {
+      "id": "craft",
+      "file": "craft.md",
+      "title": "Craft: Persuade pages and the craft floor",
+      "trigger": "writing the Step 1 implementation spec — the Persuade intake and archetype, and the craft floor every page ships with"
+    },
+    {
       "id": "detector-install-offer",
       "file": "detector-install-offer.md",
       "title": "Design detector install offer (one question, asked once)",

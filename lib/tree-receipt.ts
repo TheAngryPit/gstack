@@ -14,10 +14,13 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { normalizeChangelog } from './changelog-check';
+import { foldIntoUnreleased, parseFragment, type Fragment } from './changelog-fragments';
 import { compareIdentity, executionIdentity, normalizeLockfile, readBundle, type EvidenceBundle, type ExecutionIdentity } from './evidence-bundle';
-import { parseUnifiedDiff, rewriteStamps, versionAtRef, type FileDiff, type GateAheadRecord } from './restamp';
+import { parseUnifiedDiff, versionAtRef, type FileDiff, type GateAheadRecord } from './restamp';
+import { branchSides, stampOnlyLine, type BranchSide } from './stamp-only';
 import type { ResultCodeName } from './result-codes';
 import { matchesAny, type ShipPolicy } from './ship-policy';
+import { regeneratedAtBase } from './version-gate-train';
 
 export type HunkClass = 'stamp' | 'changed';
 export interface FileVerdict { path: string; rule: string; verdict: HunkClass; residual?: string; line?: number }
@@ -49,15 +52,43 @@ function blob(cwd: string, treeish: string, rel: string): string | null {
   return r.status === 0 ? r.stdout : null;
 }
 
-/** Every removed/added pair differs only by the exact stamp rewrites (old -> new). */
-function stampOnlyHunks(hunks: FileDiff['hunks'], oldV: string, newV: string, templates: readonly string[]): { why: string; line: number } | null {
+/**
+ * Every file's verdict for one gated/current pair, with the changelog_fragments fold: a fragment deleted
+ * between the two is a stamp only when the CHANGELOG change is exactly those fragments folded under the new
+ * heading. gstack-tree-receipt and gstack-pregate clear both classify through this, so their rules agree.
+ */
+export function classifyFiles(repoRoot: string, fileDiffs: FileDiff[], gated: string, current: string, policy: ShipPolicy, versionRel: string, oldV: string | null, newV: string | null, side?: (rel: string) => BranchSide | undefined): FileVerdict[] {
+  const prefix = policy.changelog_fragments ? policy.changelog_fragments.dir.replace(/\/+$/, '') + '/' : null;
+  const folded = new Map<string, Fragment>();
+  for (const f of fileDiffs) {
+    if (!prefix || f.status !== 'D' || f.binary || f.modeChanged || !f.path.startsWith(prefix) || f.path.slice(prefix.length).includes('/') || !f.path.endsWith('.md')) continue;
+    const text = blob(repoRoot, gated, f.path);
+    const parsed = text === null ? null : parseFragment(f.path, text);
+    if (parsed && !('code' in parsed)) folded.set(f.path, parsed);
+  }
+  const fragments = [...folded.values()].sort((a, b) => (a.path < b.path ? -1 : 1));
+  const changelogVerdict = (f: FileDiff) => classifyFile(repoRoot, f, gated, current, policy, versionRel, oldV, newV, fragments, side);
+  const clDiff = fileDiffs.find(f => policy.changelog && f.path === policy.changelog);
+  const clStamp = !!clDiff && changelogVerdict(clDiff).verdict === 'stamp';
+  return fileDiffs.map((f): FileVerdict => {
+    if (!folded.has(f.path)) return f === clDiff ? changelogVerdict(f) : classifyFile(repoRoot, f, gated, current, policy, versionRel, oldV, newV, [], side);
+    return clStamp ? { path: f.path, rule: 'changelog_fragments', verdict: 'stamp' } : { path: f.path, rule: 'changelog_fragments', verdict: 'changed', residual: `deleted without its text folded under the new heading in ${policy.changelog ?? 'the CHANGELOG'}` };
+  });
+}
+
+/**
+ * Every removed/added pair differs only by stamp rewrites to the new version:
+ * the old version, or a tentative one (newer than it) the stamp_paths stage
+ * moved (#3512), each in a stamp form (`stampOnlyLine`, bounded by the fork version on the branch's own lines, where a
+ * declared placeholder may also move inside a stamp_patterns template, GST-1026).
+ */
+function stampOnlyHunks(hunks: FileDiff['hunks'], oldV: string, newV: string, templates: readonly string[], side?: BranchSide, placeholders: readonly string[] = []): { why: string; line: number } | null {
   for (const h of hunks) {
     if (h.removed.length !== h.added.length) return { why: `${h.removed.length} line(s) removed, ${h.added.length} added`, line: h.at };
     for (let i = 0; i < h.removed.length; i++) {
       const r = h.removed[i]!;
       const a = h.added[i]!;
-      const rewritten = rewriteStamps(r, oldV, newV, templates);
-      if (rewritten.count === 0 || rewritten.text !== a) return { why: `${JSON.stringify(r.trim().slice(0, 60))} -> ${JSON.stringify(a.trim().slice(0, 60))}`, line: h.at + i };
+      if (!stampOnlyLine(r, a, oldV, newV, templates, side, h.removedAt[i], placeholders)) return { why: `${JSON.stringify(r.trim().slice(0, 60))} -> ${JSON.stringify(a.trim().slice(0, 60))}`, line: h.at + i };
     }
   }
   return null;
@@ -68,7 +99,7 @@ function jsonEqualModuloVersion(a: string | null, b: string | null, name: string
   return normalizeLockfile(name, a) === normalizeLockfile(name, b);
 }
 
-function classifyFile(repoRoot: string, f: FileDiff, gated: string, current: string, policy: ShipPolicy, versionRel: string, oldV: string | null, newV: string | null): FileVerdict {
+export function classifyFile(repoRoot: string, f: FileDiff, gated: string, current: string, policy: ShipPolicy, versionRel: string, oldV: string | null, newV: string | null, folded: readonly Fragment[] = [], side?: (rel: string) => BranchSide | undefined): FileVerdict {
   const changed = (rule: string, residual: string, line = f.hunks[0]?.at): FileVerdict => ({ path: f.path, rule, verdict: 'changed', residual, line });
   const stamp = (rule: string): FileVerdict => ({ path: f.path, rule, verdict: 'stamp' });
   if (f.binary) return changed('binary', 'binary content differs');
@@ -95,11 +126,13 @@ function classifyFile(repoRoot: string, f: FileDiff, gated: string, current: str
     return changed('manifest', 'a field other than version changed');
   }
   if (policy.changelog && f.path === policy.changelog) {
-    return before !== null && after !== null && normalizeChangelog(before) === normalizeChangelog(after) ? stamp('changelog-heading') : changed('changelog', 'entry text changed (only a heading move or re-heading is a stamp)');
+    if (before !== null && after !== null && normalizeChangelog(foldIntoUnreleased(before, folded)) === normalizeChangelog(after)) return stamp(folded.length ? 'changelog-fragments' : 'changelog-heading');
+    return changed('changelog', folded.length ? 'entry text is not exactly the deleted fragments folded under the new heading' : 'entry text changed (only a heading move or re-heading is a stamp)');
   }
   const rule = matchesAny(policy.stamp_paths, f.path) ? 'stamp_paths' : matchesAny(policy.release_outputs, f.path) ? 'release_outputs' : matchesAny(policy.stamp_files, f.path) ? 'stamp_files' : null;
-  if (oldV && newV && oldV !== newV && rule) {
-    const bad = stampOnlyHunks(f.hunks, oldV, newV, policy.stamp_patterns);
+  const own = rule ? side?.(f.path) : undefined;
+  if (oldV && newV && (oldV !== newV || own) && rule) {
+    const bad = stampOnlyHunks(f.hunks, oldV, newV, policy.stamp_patterns, own, policy.stamp_placeholders);
     return bad ? changed(rule, bad.why, bad.line) : stamp(rule);
   }
   return changed('other', `${f.hunks.length} hunk(s) outside every stamp rule`);
@@ -107,8 +140,12 @@ function classifyFile(repoRoot: string, f: FileDiff, gated: string, current: str
 
 export interface ReceiptOptions {
   repoRoot: string; gated: string; current?: string; policy: ShipPolicy; policyLabel: string; versionRel?: string;
+  /** The base ref the gated head's own lines are read against (the fork-version bound, GST-963); without it every line keeps the old version's bound. */
+  baseRef?: string;
   predecessor?: { pr: string | null; recordedHead: string | null; ref?: string | null; currentHead?: string | null };
   bundlePath?: string; gh?: (args: string[]) => { ok: boolean; out: string }; env?: NodeJS.ProcessEnv; rerunCommand?: string;
+  /** Rerun the policy's release_tool (repo code: only under --allow-repo-commands) on the current head at its version; a release output it regenerates byte for byte is a stamp (GST-1176). */
+  regenerate?: boolean;
 }
 
 export function fromGateAhead(file: string): GateAheadRecord {
@@ -141,8 +178,20 @@ export function buildReceipt(o: ReceiptOptions): TreeReceipt | { error: string; 
   const versionRel = o.versionRel ?? ('rel' in cv ? cv.rel : 'rel' in gv ? gv.rel : 'VERSION');
   const oldV = 'version' in gv ? gv.version : null;
   const newV = 'version' in cv ? cv.version : null;
-  const diffText = git(o.repoRoot, ['diff', '--unified=0', '--no-color', '--no-ext-diff', gatedHead, currentHead]) ?? '';
-  const files = parseUnifiedDiff(diffText).map(f => classifyFile(o.repoRoot, f, gatedHead, currentHead, o.policy, versionRel, oldV, newV));
+  const d = spawnSync('git', ['diff', '--unified=0', '--no-color', '--no-ext-diff', gatedHead, currentHead], { cwd: o.repoRoot, encoding: 'utf8', timeout: 60_000, maxBuffer: 256 * 1024 * 1024 });
+  if (d.status !== 0) {
+    const why = (d.error as NodeJS.ErrnoException | undefined)?.code ?? (d.signal ? `killed by ${d.signal}` : (d.stderr ?? '').trim().split('\n')[0]?.slice(0, 200) || `exit ${d.status}`);
+    return { error: `git diff ${gatedHead.slice(0, 12)} ${currentHead.slice(0, 12)} failed (${why}), so the changed files cannot be classified (GST-448)`, code: 'EVIDENCE_IDENTITY_UNKNOWN' };
+  }
+  const diffText = d.stdout.replace(/\n$/, '');
+  const classified = classifyFiles(o.repoRoot, parseUnifiedDiff(diffText), gatedHead, currentHead, o.policy, versionRel, oldV, newV, o.baseRef && oldV ? branchSides(o.repoRoot, o.baseRef, gatedHead, oldV) : undefined);
+  const rendered = o.regenerate && o.policy.release_tool && newV ? classified.filter(f => f.verdict === 'changed' && (f.rule === 'release_outputs' || (f.rule === 'path' && f.residual === 'added' && matchesAny(o.policy.release_outputs, f.path) && (!o.policy.stamp_files.length || matchesAny(o.policy.stamp_files, f.path))))).map(f => f.path) : [];
+  const regen = rendered.length ? regeneratedAtBase({ repoRoot: o.repoRoot, head: currentHead, baseVersion: blob(o.repoRoot, currentHead, 'VERSION') ?? newV!, tool: o.policy.release_tool!, outputs: rendered }) : null;
+  const files = classified.map((f): FileVerdict => {
+    if (!regen || !rendered.includes(f.path)) return f;
+    if (regen.kind === 'same' || (regen.kind === 'differs' && !regen.files.includes(f.path))) return { path: f.path, rule: 'release_tool', verdict: 'stamp' };
+    return { ...f, residual: `${f.residual}; ${regen.kind === 'error' ? regen.reason : `not what release_tool generates at ${newV}`}` };
+  });
   const residual = files.filter(f => f.verdict === 'changed').map(f => f.path);
   const stampFiles = files.filter(f => f.verdict === 'stamp').map(f => f.path);
   const stampDiff = stampFiles.length ? (git(o.repoRoot, ['diff', '--no-color', '--no-ext-diff', gatedHead, currentHead, '--', ...stampFiles]) ?? '') : '';

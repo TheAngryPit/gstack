@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { emptyBunConfig } from '../src/bun-child-config';
 import { spawnTerminalAgent } from '../src/terminal-agent-control';
 
 const ROOT = path.resolve(import.meta.dir, '..', '..');
@@ -22,13 +23,22 @@ function seedHostileProject(dir: string): void {
   fs.writeFileSync(path.join(dir, 'bunfig.toml'), 'preload = ["./preload.ts"]\n');
 }
 
+// The probe publishes its result by rename, so a poller never sees the file
+// half-written (Free Tests 39902683183 and 40322888041: a 50 ms poll read the
+// empty file writeFileSync had just created, "JSON Parse error: Unexpected EOF").
 function probeSource(out: string): string {
-  return `require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: process.env.GSTACK_CHROMIUM_NO_SANDBOX ?? null }));\n`;
+  return `const fs = require('node:fs'); const tmp = ${JSON.stringify(out)} + '.tmp'; fs.writeFileSync(tmp, JSON.stringify({ sandbox: process.env.GSTACK_CHROMIUM_NO_SANDBOX ?? null })); fs.renameSync(tmp, ${JSON.stringify(out)});\n`;
 }
 
+/** The probe's complete result: waits for the file to exist and to hold content, not only to exist. */
 async function waitForFile(file: string): Promise<string> {
   const deadline = Date.now() + 20_000;
-  while (!fs.existsSync(file) && Date.now() < deadline) await Bun.sleep(50);
+  let content = '';
+  while (Date.now() < deadline) {
+    try { content = fs.readFileSync(file, 'utf-8'); } catch {}
+    if (content) return content;
+    await Bun.sleep(50);
+  }
   return fs.readFileSync(file, 'utf-8');
 }
 
@@ -44,6 +54,19 @@ afterEach(() => {
 });
 
 describe('D0: project .env and bunfig.toml are ignored', () => {
+  test('waitForFile returns a result that is still being written only once it holds content', async () => {
+    const out = path.join(path.dirname(project), 'late.json');
+    fs.writeFileSync(out, '');
+    setTimeout(() => fs.writeFileSync(out, '{"sandbox":null}'), 150);
+    expect(JSON.parse(await waitForFile(out))).toEqual({ sandbox: null });
+    const atomic = path.join(path.dirname(project), 'atomic.json');
+    fs.writeFileSync(path.join(path.dirname(project), 'atomic-probe.ts'), probeSource(atomic));
+    const run = Bun.spawnSync([process.execPath, '--no-env-file', `--config=${emptyBunConfig()}`, path.join(path.dirname(project), 'atomic-probe.ts')], { cwd: project, env: { PATH: process.env.PATH ?? '' }, stdout: 'pipe', stderr: 'pipe', timeout: 30_000 });
+    expect(run.exitCode, run.stderr.toString()).toBe(0);
+    expect(JSON.parse(fs.readFileSync(atomic, 'utf-8'))).toEqual({ sandbox: null });
+    expect(fs.existsSync(atomic + '.tmp')).toBe(false);
+  });
+
   test('every compiled binary in scripts/build.sh turns dotenv and bunfig autoload off, and the flags work', () => {
     const lines = fs.readFileSync(path.join(ROOT, 'scripts', 'build.sh'), 'utf-8').split('\n').filter(l => /build --compile/.test(l));
     expect(lines.length).toBeGreaterThanOrEqual(5);

@@ -13,6 +13,7 @@ import * as path from 'path';
 import { classify, collectPins, evaluatePins, renderPinLines, satisfies } from '../lib/runtime-pins';
 
 const ROOT = path.resolve(import.meta.dir, '..');
+const BUN_DEFAULT = fs.readFileSync(path.join(ROOT, 'bin/gstack-bun-version.sh'), 'utf8').match(/^GSTACK_BUN_DEFAULT="([^"]+)"$/m)![1];
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true }); });
 
@@ -142,15 +143,15 @@ describe('CI exact pins are alternatives', () => {
   const lane = (name: string, version: string, os = 'ubuntu-latest') => [`  ${name}:`, `    runs-on: ${os}`, '    steps:', '      - uses: oven-sh/setup-bun@v2', '        with:', `          bun-version: ${version}`];
   const workflow = (...jobs: string[][]) => ['jobs:', ...jobs.flat(), ''].join('\n');
 
-  test('the real gstack checkout (CI 1.4.2 lanes plus the 1.4.3 install-default job) passes on 1.4.2 and on 1.4.3, and names the alternatives on 1.4.1', () => {
+  test('the real gstack checkout (CI 1.4.2 lanes plus the install-default job) passes on 1.4.2 and on the install default, and names the alternatives on 1.4.1', () => {
     const pins = collectPins(ROOT);
     const ci = [...new Set(pins.filter(p => p.tool === 'bun' && p.field === 'CI' && p.kind === 'exact' && p.lane !== 'windows' && p.lane !== 'macos').map(p => p.constraint))].sort();
-    expect(ci).toEqual(['1.4.2', '1.4.3']);
-    for (const bun of ['1.4.2', '1.4.3']) expect(evaluatePins(pins, { bun }, 'linux').failures.filter(f => f.startsWith('bun'))).toEqual([]);
+    expect(ci).toEqual(['1.4.2', BUN_DEFAULT]);
+    for (const bun of ['1.4.2', BUN_DEFAULT]) expect(evaluatePins(pins, { bun }, 'linux').failures.filter(f => f.startsWith('bun'))).toEqual([]);
     const low = evaluatePins(pins, { bun: '1.4.1' }, 'linux').failures.find(f => f.startsWith('bun '))!;
     expect(low).toStartWith('bun 1.4.1 outside engines.bun >=1.4.2 (package.json:');
-    expect(low).toContain('CI exact pins are alternatives, any one of 1.4.2, 1.4.3 satisfies CI');
-    expect(renderPinLines(evaluatePins(pins, { bun: '1.4.2' }, 'linux'), 'linux')).toContain('PIN_CI_ALTERNATIVES: bun 1.4.2 1.4.3');
+    expect(low).toContain(`CI exact pins are alternatives, any one of 1.4.2, ${BUN_DEFAULT} satisfies CI`);
+    expect(renderPinLines(evaluatePins(pins, { bun: '1.4.2' }, 'linux'), 'linux')).toContain(`PIN_CI_ALTERNATIVES: bun 1.4.2 ${BUN_DEFAULT}`);
   });
 
   test('gbrain-like (every CI lane 1.4.3) still fails a local 1.4.2 exactly as before', () => {

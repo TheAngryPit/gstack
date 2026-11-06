@@ -14,6 +14,8 @@ import * as os from 'os';
 import { spawnSync } from 'child_process';
 import { isManualReviewEntry } from './cookie-workflow-manual-review';
 import type { ManualJudgeReview } from './cookie-workflow-manual-review';
+import type { CodexTokenUsage } from './codex-session-runner';
+import { CREDENTIAL_REJECTION } from './session-ledger';
 
 // v2: EvalTestEntry.harvest gains optional {insertions, deletions, net} and
 // may be explicitly null (arm-benchmark harvest-failure taxonomy). Readers
@@ -67,6 +69,8 @@ export interface EvalTestEntry {
   cost_usd: number;
   /** False when the harness captured no billing, so cost_usd 0 means unknown. Absent means known. */
   cost_known?: boolean;
+  /** Codex sessions: the token classes behind cost_usd. */
+  token_usage?: CodexTokenUsage;
   /** Absent in older records means executed; reuse is never a new model run. */
   execution?: 'executed' | 'reused';
   reused_from?: { input_key: string; run_id: string; revision: string; completed_at: string };
@@ -82,6 +86,9 @@ export interface EvalTestEntry {
   // TRIAL_ENV variables the paid runner sets on an isolated trial shard.
   /** Registry id (E2E_TIERS / LLM_JUDGE_TOUCHFILES key) this record belongs to. */
   case_id?: string;
+  /** Registry id whose cost this record carries (runSkillTest's testName) when its name is a display label;
+   *  the report binds cost by it, never the failed record or its failure class. */
+  cost_case_id?: string;
   kind?: EvalCaseKind;
   /** 1-based trial index within the case's panel. */
   trial?: number;
@@ -210,6 +217,15 @@ export function trialContextFromEnv(env: NodeJS.ProcessEnv = process.env): Trial
 export function failureClassOf(entry: Pick<EvalTestEntry, 'failure_class' | 'exit_reason'>): TrialFailureClass {
   if (entry.failure_class && FAILURE_CLASSES.includes(entry.failure_class)) return entry.failure_class;
   return entry.exit_reason === 'timeout' ? 'timeout' : 'assertion';
+}
+
+/** Evidence that a failed trial died on rejected credentials, from a session its runner saw end that way or
+ *  from its failure text. The run's key is shared, so a rerun cannot help: the trial is INFRA, never a verdict.
+ *  A failure that merely mentions a key matches no provider rejection and keeps its own class. */
+export function credentialRejection(facts: { error?: string; sessions?: readonly Pick<SessionCauseFacts, 'end' | 'evidence'>[] }): string | undefined {
+  const texts = [...(facts.sessions ?? []).filter((s) => s.end === 'api_error').map((s) => s.evidence), facts.error];
+  const line = texts.flatMap((text) => text?.split(/\r\n?|\n/) ?? []).find((l) => CREDENTIAL_REJECTION.test(l));
+  return oneLine(line, FAILURE_CAUSE_EVIDENCE_MAX);
 }
 
 /** Machine-recorded cause of a failed trial, beside its policy class. failure_class

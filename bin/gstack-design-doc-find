@@ -14,6 +14,13 @@
 #      design system /design-consultation writes, never a design doc (#2839).
 #      office-hours writes both copies; the committed copy is what teammates
 #      see, but a stale repo doc never shadows a newer private session.
+#
+# Host plan copy (#542): /office-hours in host plan mode records the plan file
+# that holds its doc in <state-root doc>.plan-copy. When that file exists this
+# prints, on stderr so the path on stdout is unchanged, a DESIGN_PLAN_COPY line
+# with the write-through command, plus a STALE_DESIGN_DOC line when the plan
+# file is newer than the chosen doc and differs from it. The design doc stays
+# the source of truth; edits in the plan copy are written through to it.
 set -u
 
 if [ "$#" -ne 2 ] || [ -z "$1" ]; then
@@ -42,4 +49,14 @@ if [ -n "$REPODOC" ] && { [ -z "$LOCALDOC" ] || [ "$REPODOC" -nt "$LOCALDOC" ]; 
   DESIGN="$REPODOC"
 fi
 [ -n "$DESIGN" ] && printf '%s\n' "$DESIGN"
+
+COPY=""
+[ -n "$LOCALDOC" ] && COPY=$(head -1 "$LOCALDOC.plan-copy" 2>/dev/null)
+case "$COPY" in /*.md) ;; *) COPY="" ;; esac
+if [ -n "$COPY" ] && [ -f "$COPY" ]; then
+  echo "DESIGN_PLAN_COPY: $COPY is the host plan-mode copy of $LOCALDOC, which stays the source of truth. After your last edit to the copy, write it through: cp \"$COPY\" \"$LOCALDOC\"" >&2
+  if [ "$COPY" -nt "$DESIGN" ] && ! cmp -s "$COPY" "$DESIGN"; then
+    echo "STALE_DESIGN_DOC: the plan copy is newer than $DESIGN. Write it through now, then read $LOCALDOC: cp \"$COPY\" \"$LOCALDOC\"" >&2
+  fi
+fi
 exit 0

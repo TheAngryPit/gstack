@@ -11,7 +11,7 @@ import { normalizeRelativePath as freeNormalize } from '../scripts/test-free-sha
 import { PAID_TEST_GLOBS } from './helpers/paid-test-set';
 import { E2E_TIERS, LLM_JUDGE_TOUCHFILES } from './helpers/touchfiles-data';
 import { selectTests } from './helpers/test-selection';
-import { workflowJudgeDependencies } from './helpers/workflow-judge-cache';
+import { sourceDependencyClosure } from '../scripts/eval-input-cache';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 
@@ -27,7 +27,7 @@ function runnerDependencies(root: string, entries: string[]): string[] {
     const source = fs.readFileSync(file, 'utf8').replace(/^#![^\n]*(?:\n|$)/, '\n');
     let audited = source;
     if (relative === 'test/helpers/test-selection.ts') {
-      if (createHash('sha256').update(source).digest('hex') !== '052ad5a52472bcb41db04c9f21fe6a819e9547768468f7e5d390e0014b567677') {
+      if (createHash('sha256').update(source).digest('hex') !== 'd618192ed8d354df55ebe8df0c52d3437ef51b4517ef04513efced4ae097c6a6') {
         throw new Error('Re-audit the historical touchfile map loader before excluding its computed import');
       }
       audited = source.replace('`const m = await import(${JSON.stringify(dataPath)});`,', "'',");
@@ -62,7 +62,10 @@ describe('paid/free dependency boundary', () => {
     const runner = runnerDependencies(ROOT, ['scripts/test-paid-shards.ts', 'scripts/eval-select.ts']);
     const paid = [...new Set(PAID_TEST_GLOBS.flatMap(pattern => [...new Bun.Glob(pattern).scanSync(ROOT)]))];
     expect(paid.length).toBeGreaterThan(0);
-    const all = workflowJudgeDependencies(ROOT, paid);
+    const all = sourceDependencyClosure(ROOT, ['test/helpers/llm-judge.ts', 'lib/eval-model.ts', 'test/helpers/eval-budgets.ts',
+      'scripts/test-paid-shards.ts', 'scripts/test-strict-output.ts', 'scripts/eval-select.ts',
+      'scripts/test-pr-profile.ts', '.github/workflows/evals.yml',
+      'package.json', 'bun.lock', '.github/docker/Dockerfile.ci', ...paid]);
     for (const dependencies of [runner, all]) {
       expect(dependencies).toContain('scripts/lib/shard-engine.ts');
       expect(dependencies).toContain('test/helpers/test-selection.ts');
@@ -106,6 +109,38 @@ describe('paid/free dependency boundary', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  test('release metadata and crew templates never widen the PR gate; ETHOS.md selects only the prompts that quote it (#3499)', () => {
+    // Release metadata no paid case reads keeps the PR profile, alone and beside a mapped prompt (#3499).
+    for (const file of ['NOTICE.md', 'LICENSE', 'licenses/MIT-pstack.txt', 'captain/templates/merge-ask.md']) {
+      expect(fs.existsSync(path.join(ROOT, file)), file).toBe(true);
+      const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [file, 'CHANGELOG.md'] });
+      expect(result.coverage?.mode, file).toBe('pr');
+      expect(result.coverage?.unknownFiles, file).toEqual([]);
+      expect(result.selection, file).toEqual({ e2e: [], judges: [] });
+    }
+    // ETHOS.md is read by the /office-hours and /plan-ceo-review prompts, so it selects their cases, not the whole gate.
+    const ethos = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: ['ETHOS.md', 'NOTICE.md'] });
+    expect(ethos.coverage?.mode).toBe('pr');
+    expect(ethos.coverage?.unknownFiles).toEqual([]);
+    expect(ethos.selection.e2e).toContain('plan-ceo-review-plan-mode');
+    expect(ethos.selection.e2e).toContain('office-hours-auto-mode');
+    expect(ethos.selection.judges).toEqual([]);
+    expect(ethos.selection.e2e!.length).toBeLessThan(10);
+  });
+
+  // Value: protects=a root guide that only README, docs and free tests read keeps a screen narrow, and a root doc a paid prompt quotes still selects beside it; fails_when=a guide-only PR restores every gate case as a "real unknown dependency" (GST-1027: screens 41246728073 and 41321112436 ran the full suite for it);
+  //   why_new=the README regex in knownNonBehaviorFile names only five root docs; seam=FREE_ONLY_PR_FILES in scripts/test-pr-profile.ts; no_claim=the train gate's full census
+  test('USING_GBRAIN_WITH_GSTACK.md selects no paid case; ETHOS.md beside it keeps its selection (GST-1027)', () => {
+    const guide = 'USING_GBRAIN_WITH_GSTACK.md';
+    expect(fs.existsSync(path.join(ROOT, guide))).toBe(true);
+    const alone = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [guide] });
+    expect([alone.coverage?.mode, alone.coverage?.unknownFiles, alone.selection]).toEqual(['pr', [], { e2e: [], judges: [] }]);
+    const ethos = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: ['ETHOS.md'] });
+    expect(ethos.selection.e2e!.length).toBeGreaterThan(0);
+    const both = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [guide, 'ETHOS.md'] });
+    expect([both.coverage?.mode, both.selection]).toEqual(['pr', ethos.selection]);
+  });
+
   test('only audited free-only dependencies avoid unknown-dependency fallback', () => {
     for (const file of [...FREE_ONLY_PR_FILES, 'scripts\\test-free-shards.ts']) {
       const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [file] });
@@ -114,7 +149,7 @@ describe('paid/free dependency boundary', () => {
       expect(result.selection).toEqual({ e2e: [], judges: [] });
     }
     // Tracked files outside every mapping and outside the derivable directories restore the full gate.
-    for (const file of ['ETHOS.md', 'SECURITY.md', 'conductor.json', 'NOTICE.md']) {
+    for (const file of ['SECURITY.md', 'conductor.json']) {
       const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [FREE_ONLY_PR_FILES[0], file] });
       expect(result.coverage?.mode, file).toBe('full-fallback');
       expect(result.coverage?.unknownFiles).toContain(file);
@@ -188,10 +223,9 @@ describe('paid/free dependency boundary', () => {
       expect(result.judges).toEqual(category === 'e2e' ? [] : ['quality']);
     }
     const real = computePaidCaseSelection({ profile: 'pr', env: {},
-      changedFiles: [file, 'plan-ceo-review/SKILL.md.tmpl'] });
+      changedFiles: [file, 'plan-ceo-review/SKILL.md.tmpl', 'retro/SKILL.md'] });
     expect(real.coverage?.mode).toBe('pr');
     expect(real.selection.e2e).toContain('auq-format-gate');
-    expect(real.selection.judges).toContain('plan-ceo-review/SKILL.md modes');
     expect(real.selection.e2e?.every(id => PR_PROFILE_CASE_IDS.includes(id as typeof PR_PROFILE_CASE_IDS[number]))).toBe(true);
   });
 });

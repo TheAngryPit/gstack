@@ -1,0 +1,619 @@
+/**
+ * review-ledger — the proof that /ship's reviewers got their briefs unchanged and that the
+ * parent changed nothing they returned (GSTA-167 no-loss gate). One JSONL ledger per run:
+ *
+ *   rendered  a brief gstack-review-dispatch render wrote (role, name, file, sha256)
+ *   sent      the prompt a dispatch program actually passed, by hash; a mismatch fails the pass
+ *   output    a reader's raw output (sha256), the merged.jsonl ids collect wrote from it, and whether it was a review at all
+ *   judgment  each lead-judgment change: an added or promoted finding, with its reason
+ *   judge     the verdict on the parent's judged set (ok, or the dropped and downgraded ids)
+ *
+ * Findings reach merged.jsonl only through collect, with each voice's label as written (a prose finding's own Severity field when
+ * it has one, else its line's most severe label), except that a prose voice's `Blocks: yes` and the native voice's FIXABLE collect
+ * as CRITICAL (GSTA-167 normalizer v2).
+ * The parent's judged set may add or promote a finding and may fold a duplicate into one at least
+ * as severe; it never drops or downgrades one. verify replays every check from the ledger alone.
+ */
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { checkReviewedTree, isReviewedTreeLine, promptHash, type TreeCheck } from './review-brief';
+
+export interface LedgerEvent { event: 'rendered' | 'sent' | 'output' | 'judgment' | 'judge' | 'program' | 'quarantined' | 'fetch-sweep'; [k: string]: unknown }
+export const readerKey = (role: string, name?: string) => (name ? `${role}/${name}` : role);
+
+export function appendEvent(ledger: string, e: LedgerEvent): void {
+  fs.appendFileSync(ledger, JSON.stringify({ ...e, at: new Date().toISOString() }) + '\n', { mode: 0o600 });
+}
+export function readLedger(ledger: string): LedgerEvent[] {
+  let text: string;
+  try { text = fs.readFileSync(ledger, 'utf8'); } catch { return []; }
+  return text.split('\n').filter(l => l.trim()).flatMap(l => { try { return [JSON.parse(l) as LedgerEvent]; } catch { return []; } });
+}
+const lastRendered = (events: LedgerEvent[], reader: string) => [...events].reverse().find(e => e.event === 'rendered' && e.reader === reader);
+
+/** Compare a dispatched prompt with the brief rendered for that reader; records the sent event. */
+export function recordSent(ledger: string, reader: string, sentText: string): { ok: boolean; rendered: string | null; sent: string } {
+  const r = lastRendered(readLedger(ledger), reader);
+  const sent = promptHash(sentText);
+  const rendered = typeof r?.sha256 === 'string' ? r.sha256 : null;
+  const ok = rendered === sent;
+  appendEvent(ledger, { event: 'sent', reader, sha256: sent, rendered, match: ok });
+  return { ok, rendered, sent };
+}
+
+/** Severity ranks across the voices' vocabularies; a label with no severity (FIXABLE, INVESTIGATE) ranks 0. */
+const RANKS: Record<string, number> = { critical: 4, p0: 4, high: 3, p1: 3, medium: 2, p2: 2, informational: 2, low: 1, p3: 1, fixable: 0, investigate: 0 };
+export function rank(label: unknown): number | null {
+  if (typeof label !== 'string') return null;
+  const r = RANKS[label.trim().replace(/^\[|\]$/g, '').toLowerCase()];
+  return r === undefined ? null : r;
+}
+const LABELS = 'CRITICAL|INFORMATIONAL|Critical|Informational|High|HIGH|Medium|MEDIUM|Low|LOW|P[0-3]|FIXABLE|INVESTIGATE';
+/** A label anywhere on a line makes it a finding, headings and table rows included: losing a finding costs more than keeping a phantom one, which the judge may fold. */
+const ANY_LABEL = new RegExp(`(?<![A-Za-z0-9])(${LABELS})(?![A-Za-z0-9])`);
+/** A heading that is only a label ("## High", "**Critical findings**") gives its label to the top-level list items under it, until the next heading or bold-only line. */
+const LABEL_HEADING = new RegExp(`^(?:#{1,6}\\s*|\\*\\*)(${LABELS})(?:\\s+(?:findings?|severity|issues?))?\\s*:?\\**\\s*$`);
+const HEADING = /^(?:#{1,6}\s|\*\*[^*]+\*\*:?$)/;
+const LIST_ITEM = /^(?:[-*+]|\d+[.)])\s+\S/;
+/** A numbered finding heading ("**1. …**", "### 2) …", GST-1031) or a finding lead that names its number ("**Finding 1 (FIXABLE): …**", GST-1657). */
+const NUMBERED_HEAD = /^(?:#{1,6}\s+|\*\*\s*)(?:\d+[.)]\s|Finding\s+\d+\b)/;
+const stronger = (a: string, b: string) => ((rank(a) ?? 0) >= (rank(b) ?? 0) ? a : b);
+/** A prose voice's `Blocks: yes` (GSTA-167 normalizer v2): the finding is CRITICAL whatever its label; `Blocks: no` never lowers one. */
+const BLOCKS_YES = /(?<![A-Za-z0-9])Blocks:?\**:?\s*\**\s*yes(?![A-Za-z0-9])/i;
+const ALL_LABELS = new RegExp(ANY_LABEL.source, 'g');
+/** A file:line locus ("auth.ts:9"): prose naming one after a finding's fields starts the next finding. */
+const LOCUS = /[\w./-]+\.\w+:\d+/;
+/** A line that is only a finding's `Severity` or `Blocks` field ("Severity: High", "- Blocks: yes", "Severity High"). */
+const META = new RegExp(`^(?:[-*+]\\s+)?\\**\\s*(Severity|Blocks)\\**\\s*(?::|\\s+\\**(?:${LABELS}|yes|no)(?![A-Za-z0-9]))`, 'i');
+
+/** The severity and Blocks a prose finding's own fields state (GST-766): recorded beside the collected label, never in its place. */
+export interface Stated { severity?: string; blocks?: string }
+const STATED_SEVERITY = new RegExp(`(?<![A-Za-z0-9])Severity\\**\\s*:?\\s*\\**\\s*(${LABELS})(?![A-Za-z0-9])`, 'gi');
+/**
+ * A finding's own `Severity` field: at the line's start (its colon optional there, "Severity Low"), or after a separator with its colon
+ * ("1. Drops rows (q.ts:7). Severity: Low", "(t.md:3) Severity: Low", "- Severity: P0"), its label closing the clause. With one present a severity word in the body never raises the label (GST-976); prose that mentions a
+ * severity ("pass 1 had Severity: Low", "filed at severity low", "(Severity: Low in pass 1)") is not a field.
+ */
+const SEVERITY_FIELD = new RegExp(`(?:^(?:[-*+>]\\s+|\\d+[.)]\\s+)?\\**\\s*Severity\\**\\s*:?\\s*\\**\\s*((?:${LABELS})(?:\\s*[/→]\\s*\\**\\s*(?:${LABELS}))*)(?![A-Za-z0-9])|(?:[.;,|()]["'”’\`]*\\s*|\\s[—–-]\\s*)\\**\\s*Severity\\**\\s*:\\s*\\**\\s*((?:${LABELS})(?:\\s*[/→]\\s*\\**\\s*(?:${LABELS}))*)(?![A-Za-z0-9])(?=\\**\\s*(?:$|[.;,|()*—–]|-\\s|Blocks)))`, 'gi');
+/**
+ * A label leading its line past list, quote, heading, emphasis and emoji marks (one mark per step, so a long divider stays linear)
+ * and an optional file:line, closed by a mark or a separator, or by a space, comma or parenthesis after an all-caps word ("[P0] …",
+ * "1. **High**: …", "### CRITICAL: …", "1. api.ts:10 CRITICAL: …", "1. CRITICAL missing auth"): the reader's own label, which a
+ * Severity field never lowers. "P0 pilot …" is not one.
+ */
+const FIELD_LABELS = new RegExp(ANY_LABEL.source, 'gi');
+const LEAD_LABEL = new RegExp(`^(?:[^\\p{L}\\p{N}\\s]\\s*|\\d+[.)]\\s*)*(?:\\w[\\w./-]*:\\d+(?:[-–:,]\\s*\\d+)*[^\\p{L}\\p{N}\\s]*\\s+(?:[^\\p{L}\\p{N}\\s]\\s*)*)?(${LABELS})(?=[*_\`\\])]|\\s*[:|—–]|\\s+-\\s|\\s*$|(?<=[A-Z]{3})[\\s,(.])`, 'u');
+const STATED_BLOCKS = /(?<![A-Za-z0-9])Blocks\**\s*:?\s*\**\s*(yes|no)(?![A-Za-z0-9])/gi;
+/** A prose reader's `Blocks` field as it can lower a count (GST-1031): its colon required, so prose ("blocks no other writer") never does, and a JSON finding (no Blocks field in its schema) never has one. */
+const BLOCKS_FIELD = /(?<![A-Za-z0-9])Blocks\**\s*:\s*\**\s*(yes|no)(?![A-Za-z0-9-])/gi;
+/** A native voice's finding whose reader stated `Blocks: no` and one Severity (GST-1031 ruling A): lead judgment may lower it to that Severity, never below, on record with a reason (GST-1406). */
+const statedLowering = (reader: string, raw: string, to: number) => {
+  const ls = [...raw.matchAll(SEVERITY_FIELD)].flatMap(m => (m[1] ?? m[2]!).match(FIELD_LABELS)!);
+  return reader.split('/')[0] === 'adversarial-native' && statesNoBlocks(raw) && ls.length === 1 && to >= (rank(ls[0]!) || Infinity);
+};
+export const statesNoBlocks = (raw: string) => { if (raw.startsWith('{') || BLOCKS_YES.test(raw)) return false; const said = [...raw.matchAll(BLOCKS_FIELD)].map(m => m[1]!.toLowerCase()); return said.length > 0 && !said.includes('yes'); };
+/**
+ * A summary candidate (GST-1031): a prose finding whose every severity word is denied ("so nothing is CRITICAL", "No CRITICAL issues", "nothing reaches CRITICAL")
+ * or names a fix ("the test covers the CRITICAL fix"), with no lead label, no Severity or Blocks field, no FIXABLE or INVESTIGATE tag,
+ * and no file:line or exception clause in any sentence naming a label. A defect called CRITICAL ("this is CRITICAL") is none. It still collects at its label (a blocker named in another sentence stays on record), unless closingSummary reads it as a no-defect sentence (GST-435); lead
+ * judgment may lower it with a reason, which judge records as dismissed. "No CRITICAL issues except the token leak in log.ts:3" is no candidate.
+ */
+const SENTENCE = /(?<=[.!?])\s+/;
+const EXCEPTION = /(?<![A-Za-z])(?:except|but|other than|apart from|aside from|besides|unless|save for)(?![A-Za-z])/i;
+const PATH_LOCUS = /(?:[\w.-]+\/)+[\w.-]+:\d+|[\w.-]+\.\w+:\d+/;
+/** A verb rating its subject against a severity (GST-1628: "rises to CRITICAL", "reaches the CRITICAL floor", "would meet", "qualifies as"), denying like "is" does; the severity it names closes the clause.
+ * "the <label>" rates only with a floor noun after it: without one the verb may take the finding as its object ("Neither fix hits the P0"). */
+const RATE_VERB = `(?:(?:would|could|will|can|does|do|did)\\s+)?(?:ris(?:e|es|en)|rose|reach(?:es|ed)?|hits?|meets?|met|cross(?:es|ed)?|climb(?:s|ed)?|escalat(?:e|es|ed)|qualif(?:y|ies|ied)|count(?:s|ed)?|amount(?:s|ed)?)`
+  + `(?:\\s+(?:up\\s+)?(?:to|as|at))?\\s+`;
+const rates = (labels: string, nouns: string) => `${RATE_VERB}(?:(?:the\\s+level\\s+of\\s+)?${labels}(?:\\s+${nouns}(?![A-Za-z]))?|the\\s+${labels}\\s+${nouns}(?![A-Za-z]))`;
+const LABEL_LIST = `[*\`]*(?:${LABELS})[*\`]*(?:\\s*(?:,|/|\\bor\\b|\\band\\b|\\bnor\\b)\\s*[*\`]*(?:${LABELS})[*\`]*)*(?![A-Za-z0-9])`;
+const DENIED_OR_FIXED = new RegExp(`(?:(?<![A-Za-z])(?:nothing|none|no|neither|zero)(?:\\s+(?:of\\s+)?(?:these|them|this|it|other|else|further|new|remaining|the\\s+\\w+|\\w+\\s+findings?|findings?|issues?))?\\s+(?:else\\s+)?(?:(?:(?:is|are|was|were|would\\s+be|at)\\s+)?${LABEL_LIST}|${rates(LABEL_LIST, '(?:floor|bar|threshold|level)')})(?=\\s*(?:issues?|findings?|problems?|regressions?|bugs?|defects?|blockers?|concerns?|items?|severity|impact|remains?|to\\s+report|here|found|introduced|[.;:,!?)—–-]|$))|(?<![A-Za-z])(?:cover(?:s|ed)?|fix(?:es|ed)?|address(?:es|ed)?|resolve[sd]?|close[sd]?)\\s+(?:the|that|this)\\s+${LABEL_LIST}\\s+(?:fix|finding|issue|bug|defect|blocker)(?:e?s)?(?![A-Za-z]))`, 'gi');
+export const summaryCandidate = (t: string) => ANY_LABEL.test(t) && !ANY_LABEL.test(t.replace(DENIED_OR_FIXED, ' ')) && !t.startsWith('{') && !t.startsWith('**') && !LIST_ITEM.test(t) && !HEADING.test(t) && !LEAD_LABEL.test(t)
+  && !t.match(SEVERITY_FIELD) && !t.match(STATED_BLOCKS) && [...t.matchAll(ALL_LABELS)].every(m => !!rank(m[1]))
+  && t.split(SENTENCE).filter(s => ANY_LABEL.test(s)).every(s => !PATH_LOCUS.test(s) && !EXCEPTION.test(s));
+/**
+ * A reader's own no-defect closing sentence (GST-435: gstack-evals #194 "I found nothing CRITICAL.", #202 "I found no defect that is
+ * CRITICAL..."): a prose line whose paragraph has no line above it that runs on or names an exception, with no list, heading, bold or lead label, no
+ * Severity or Blocks field, no FIXABLE or INVESTIGATE, no file:line or path and no exception clause, whose every labelled sentence is
+ * wholly one of these clauses, its labels spelled as ALL_LABELS spells them: a denial (`no CRITICAL issues`, `no defect that is
+ * CRITICAL`, `nothing at CRITICAL`, `there are no High findings`, `neither finding is CRITICAL`, or with a rating verb, GST-1628:
+ * `none of these rises to CRITICAL`, `nothing reaches the CRITICAL floor`), a count (`I found three
+ * INFORMATIONAL issues`) or `nothing blocks`. It yields the labels its counts name and whether the line also holds an unlabelled
+ * sentence, which may describe a defect, so parseFindings keeps that line on record at INFORMATIONAL; the denied label is never a
+ * finding. A quantifier that points at a finding elsewhere (`nothing else`, `no other`, `remaining`), a named defect in the same
+ * sentence (`No auth check guards the admin route, so nothing CRITICAL`) or any other labelled sentence keeps the line as it was.
+ */
+const SEV = `[*\`]*(?:CRITICAL|INFORMATIONAL|Critical|Informational|High|HIGH|Medium|MEDIUM|Low|LOW|P[0-3])[*\`]*`;
+const SEV_LIST = `${SEV}(?:\\s*(?:,|/|\\bor\\b|\\band\\b|\\bnor\\b)\\s*${SEV})*(?![A-Za-z0-9])`;
+const NOUN = '(?:issues?|findings?|defects?|bugs?|problems?|regressions?|blockers?|concerns?|items?|notes?|ones?)';
+const RATES = rates(SEV_LIST, '(?:severity|level|floor|bar|threshold)');
+const DENY = `(?<![A-Za-z])(?:(?:no|zero)\\s+${SEV_LIST}(?:\\s+${NOUN})?|(?:no|zero)\\s+${NOUN}\\s+(?:(?:that\\s+is|that's|that\\s+are|which\\s+is|which\\s+are|at|rated)\\s+(?:at\\s+)?${SEV_LIST}(?:\\s+(?:severity|level))?|(?:(?:that|which)\\s+)?${RATES})`
+  + `|nothing\\s+(?:at\\s+)?${SEV_LIST}(?:\\s+(?:severity|level))?|there(?:'s|\\s+is|\\s+are|\\s+was|\\s+were)\\s+(?:still\\s+)?(?:no|zero|nothing(?:\\s+at)?)\\s+${SEV_LIST}(?:\\s+${NOUN})?`
+  + `|(?:nothing|none\\s+of\\s+(?:them|these|those|the\\s+(?:findings|fixes|notes|issues|changes))|neither(?:\\s+(?:finding|fix|note|issue|change|one)|\\s+of\\s+(?:them|these|the\\s+(?:findings|fixes|notes))))`
+  + `(?:\\s+(?:here|in\\s+(?:this|the)\\s+(?:diff|change|fix|patch|range|PR)))?\\s+(?:(?:is|are|was|were)\\s+(?:at\\s+)?${SEV_LIST}|${RATES}))`;
+const SUMMARY_ITEM = `(?:(?:(?:I|we)\\s+(?:also\\s+)?(?:found|find|see|saw|spotted|identified|noticed|observed|have|had|raised|report)\\s+)?`
+  + `(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|\\d+|a\\s+few|several|some|an?)\\s+${SEV_LIST}\\s+${NOUN}|${DENY})`
+  + `|(?:nothing|none\\s+of\\s+(?:them|these|the\\s+(?:findings|fixes|notes))|no\\s+(?:finding|issue)s?)\\s+(?:is\\s+|are\\s+)?(?:blocking|blocks?)(?:\\s+(?:landing|the\\s+merge|merging))?)`
+  + `(?:\\s+(?:here|found|to\\s+report|remain(?:s|ing)?|in\\s+(?:this|the)\\s+(?:diff|change|changes|fix|fixes|patch|range|PR|review|pass|commit)))*`;
+const SUMMARY_SENTENCE = new RegExp(`^(?:(?:so|overall|in\\s+short|in\\s+summary|in\\s+total|to\\s+sum\\s+up)[,:]?\\s+)?${SUMMARY_ITEM}(?:(?:\\s*[,;]\\s*|\\s+)(?:and\\s+)?${SUMMARY_ITEM})*\\s*[.!…]*$`);
+const DENIED = new RegExp(DENY, 'g');
+export const closingSummary = (t: string): { labels: string[]; prose: boolean } | undefined => {
+  if (t.startsWith('{') || t.startsWith('**') || LIST_ITEM.test(t) || HEADING.test(t) || LEAD_LABEL.test(t) || t.match(SEVERITY_FIELD) || t.match(STATED_BLOCKS) || BLOCKS_YES.test(t)
+    || LOCUS.test(t) || PATH_LOCUS.test(t) || EXCEPTION.test(t) || /(?<![A-Za-z0-9])(?:FIXABLE|INVESTIGATE)(?![A-Za-z0-9])/i.test(t)) return undefined;
+  const sentences = t.split(SENTENCE).map(s => s.trim());
+  const labelled = sentences.filter(s => ANY_LABEL.test(s)).map(s => s.replace(/^[A-Z](?=[a-z])/, c => c.toLowerCase()));
+  if (!labelled.length || !labelled.every(s => SUMMARY_SENTENCE.test(s))) return undefined;
+  return { labels: labelled.flatMap(s => [...s.replace(DENIED, ' ').matchAll(ALL_LABELS)].map(m => m[1]!)), prose: labelled.length < sentences.length };
+};
+/**
+ * The native reader's own verdict line (GSTA-258 L4: #3901 "There are three low-severity findings, all FIXABLE, and none blocks."): a prose
+ * line, no list item, heading, lead label, file:line, Severity or Blocks field, whose only labels are FIXABLE or INVESTIGATE and which says
+ * nothing blocks. It collects at FIXABLE as written, never raised to CRITICAL; the findings it summarizes collect on their own lines.
+ */
+const NONE_BLOCKS = /(?<![A-Za-z])(?:(?:none|nothing|neither)(?:\s+of\s+(?:them|these|those))?\s+(?:blocks?|is\s+blocking|are\s+blocking|would\s+block)|no\s+(?:finding|issue|one)s?\s+(?:blocks?|would\s+block)|no\s+blocking\s+(?:defects?|findings?|issues?))(?![A-Za-z])/i;
+const quietSummary = (t: string) => ANY_LABEL.test(t) && NONE_BLOCKS.test(t) && !LOCUS.test(t) && !PATH_LOCUS.test(t) && !LIST_ITEM.test(t) && !HEADING.test(t) && !LEAD_LABEL.test(t)
+  && !t.match(SEVERITY_FIELD) && !t.match(STATED_BLOCKS) && [...t.matchAll(ALL_LABELS)].every(m => rank(m[1]) === 0);
+export function stated(raw: string): Stated | undefined {
+  if (raw.startsWith('{')) return undefined;
+  const severity = [...raw.matchAll(STATED_SEVERITY)].at(-1)?.[1];
+  const said = [...raw.matchAll(BLOCKS_FIELD)].map(m => m[1]!.toLowerCase());
+  const blocks = said.includes('yes') || (said.length && BLOCKS_YES.test(raw)) ? 'yes' : said.at(-1);
+  return severity || blocks ? { ...(severity ? { severity } : {}), ...(blocks ? { blocks } : {}) } : undefined;
+}
+
+export interface MergedLine { id: string; reader: string; label: string; stated?: Stated; summary_candidate?: true; raw: string; output_sha256: string }
+
+/**
+ * One reader's findings as written: a JSON object per line (severity kept as written); else each prose line carrying a severity or
+ * FIXABLE/INVESTIGATE label, at the most severe label on it, and each top-level list item under a label-only heading (the stronger
+ * of the two labels). A line with a `Severity` field takes that field's label instead (a field stating more than one label, "High/Critical", counts as none), whatever its
+ * body names (GST-976: "the P0 pilot" collected as P0 under `Severity: Low`); a label leading the line and an earlier field of the same
+ * finding are its floor. A `Severity` or `Blocks` field line continues the open finding, once per field: `Severity` sets its label, `Blocks: yes` makes it CRITICAL, `Blocks: no` never lowers it; with no finding open it is one, carrying
+ * the paragraph's subject.
+ * A list item, a heading, a bold or post-blank paragraph at the margin, or a line naming a file:line after the open finding's fields
+ * starts the next finding, except an unlabeled, unnumbered bullet with no file:line under a paragraph finding whose fields have not
+ * come yet, which is its detail and joins its text (GSTA-196: 4 findings with detail bullets collected as 8). An inline
+ * `Blocks: yes` is CRITICAL too. The native voice's FIXABLE collects as CRITICAL; other labels stay as written for lead judgment. When in doubt the parser merges rather than drops: a lost blocker costs the gate.
+ * A numbered finding heading ("**1. …**", or a lead naming its number, "**Finding 1 (FIXABLE): …**", GST-1657) keeps every unlabeled line
+ * under it, located or listed or bold, until its fields come (GST-1031), so its Severity and Blocks never split off as a second record;
+ * the line right under it that carries those fields, no other label and no file:line joins it at the stronger label, as a paragraph after
+ * a blank line does (a located line there is another finding), unless the heading itself names CRITICAL or P0, whose blocker another
+ * subject's Blocks: no must not lift. A prose line that only names a severity in passing is a summary (summaryLine).
+ * A native FIXABLE finding that states `Blocks: no` and one Severity field collects at that field on every class (GST-1031 ruling A);
+ * one with no Blocks: no, no Severity field or only a FIXABLE field stays CRITICAL. fixableRaises false (a code or docs review with no
+ * risk, error, history or floor reason, GST-987) also drops FIXABLE's raise from label headings and leads.
+ */
+export function parseFindings(reader: string, output: string, fixableRaises = true): Array<{ label: string; raw: string }> {
+  type Finding = { label: string; raw: string; fields: Set<string>; list: boolean; lead?: string; fixable?: boolean; heading?: boolean };
+  const out: Finding[] = [];
+  let section: string | null = null;
+  let current: Finding | null = null;
+  let head = '';
+  let gap = false;
+  let prev = '';
+  let treeSeen = false;
+  const role = reader.split('/')[0];
+  const named = (l: string) => (role === 'adversarial-native' && l.toUpperCase() === 'FIXABLE' ? 'CRITICAL' : l);
+  const strongestOf = (labels: Array<string | undefined>) => labels.reduce<string | undefined>((a, b) => (a === undefined ? b : b === undefined ? a : stronger(a, b)), undefined);
+  const strongest = (t: string) => strongestOf([...t.matchAll(ALL_LABELS)].map(m => named(m[1]!)));
+  const fieldOf = (t: string) => { const ls = [...t.matchAll(SEVERITY_FIELD)].flatMap(m => (m[1] ?? m[2]!).match(FIELD_LABELS)!); return ls.length === 1 && (fixableRaises || role !== 'adversarial-native' || rank(ls[0]!)) ? ls[0] : undefined; };
+  const critical = (t: string) => BLOCKS_YES.test(t) || (fixableRaises && role === 'adversarial-native' && /(?<![A-Za-z0-9])FIXABLE(?![A-Za-z0-9])/.test(t));
+  const leadOf = (t: string) => { const l = LEAD_LABEL.exec(t)?.[1]; return l === undefined || !fixableRaises ? l : named(l); };
+  const labelOf = (t: string, continued: boolean) => {
+    if (role === 'adversarial-native' && quietSummary(t)) return 'FIXABLE';
+    const summary = continued ? undefined : closingSummary(t);
+    if (summary) return strongestOf([...summary.labels.map(named), summary.prose ? 'INFORMATIONAL' : undefined]);
+    const field = fieldOf(t);
+    if (field === undefined) return strongest(t);
+    return critical(t) ? 'CRITICAL' : strongestOf([leadOf(t), field])!;
+  };
+  const push = (label: string, raw: string, fields: string[] = [], lead?: string): Finding => { const f = { label, raw, fields: new Set(fields), list: LIST_ITEM.test(raw), lead }; out.push(f); return f; };
+  for (const line of output.replace(/\r\n/g, '\n').split('\n')) {
+    const t = line.trim();
+    if (!t) { gap = true; prev = ''; continue; }
+    if (!treeSeen && isReviewedTreeLine(t)) { treeSeen = true; continue; }
+    const afterGap = gap;
+    const continued = !!prev && !HEADING.test(prev) && (EXCEPTION.test(prev) || !/[.!?…}]["'”’)\]*_`]*$/.test(prev));
+    prev = t;
+    gap = false;
+    if (/^NO FINDINGS\.?$/.test(t) || /^Recommendation:/i.test(t)) { current = null; continue; }
+    const indented = line !== line.trimStart();
+    const label = labelOf(t, continued);
+    const blocks = BLOCKS_YES.test(t);
+    const listItem = !indented && LIST_ITEM.test(t);
+    const locus = LOCUS.test(t);
+    const meta = listItem && locus ? null : META.exec(t);
+    if (meta) {
+      const field = meta[1]!.toLowerCase();
+      if (current && !current.fields.has(field)) {
+        current.fields.add(field);
+        if (blocks) current.label = 'CRITICAL';
+        else if (field === 'severity' && fieldOf(t) !== undefined && !critical(current.raw)) current.label = strongestOf([current.lead, label])!;
+        else if (label) current.label = stronger(current.label, label);
+        current.raw += ` | ${t}`;
+      } else if (blocks || label) current = push(blocks ? 'CRITICAL' : label!, head ? `${head} | ${t}` : t, [field]);
+      else current = null;
+      continue;
+    }
+    const heading = LABEL_HEADING.exec(t);
+    if (heading) { section = fixableRaises ? named(heading[1]!) : heading[1]!; current = null; head = ''; continue; }
+    const field = fieldOf(t);
+    if (!afterGap && current?.heading && !current.fields.size && (field !== undefined || t.match(BLOCKS_FIELD)) && !ANY_LABEL.test(t.replace(SEVERITY_FIELD, ' '))
+      && !LIST_ITEM.test(t) && !LOCUS.test(t) && !HEADING.test(t) && !NUMBERED_HEAD.test(t) && !t.startsWith('{')
+      && ![...current.raw.split(' | ')[0]!.matchAll(ALL_LABELS)].some(m => rank(m[1]) === 4)) {
+      current.raw += ` | ${t}`;
+      current.label = blocks ? 'CRITICAL' : stronger(current.label, label ?? current.label);
+      if (field !== undefined) current.fields.add('severity');
+      if (t.match(BLOCKS_FIELD)) current.fields.add('blocks');
+      continue;
+    }
+    if (current?.heading && !current.fields.size && !label && !blocks && !/^#{1,6}\s/.test(t) && !NUMBERED_HEAD.test(t) && !t.startsWith('{')) { current.raw += ` | ${t}`; continue; }
+    if (!indented && HEADING.test(t)) { section = null; current = null; }
+    if (t.startsWith('{')) {
+      try {
+        const o = JSON.parse(t) as Record<string, unknown>;
+        if (typeof o.severity === 'string') { current = push(o.severity, t, [], o.severity); continue; }
+      } catch { /* prose that starts with a brace */ }
+    }
+    const detail = listItem && /^[-*+]\s/.test(t) && !locus && !label && !section && !!current && !current.list && !current.fields.size;
+    if (detail && !blocks) { current!.raw += ` | ${t}`; continue; }
+    if (afterGap && current?.heading && !current.fields.size && !LIST_ITEM.test(t) && !HEADING.test(t) && !NUMBERED_HEAD.test(t) && !LEAD_LABEL.test(t) && !LOCUS.test(t)) {
+      current.raw += ` | ${t}`;
+      if (blocks) current.label = 'CRITICAL';
+      else if (label) current.label = stronger(current.label, label);
+      continue;
+    }
+    const fresh = (listItem && !detail) || (!indented && !detail && (t.startsWith('**') || afterGap)) || (!!current?.fields.size && locus);
+    if (fresh) { current = null; head = t; }
+    const inherited = section && listItem ? section : undefined;
+    const found = label && inherited ? stronger(inherited, label) : label ?? inherited;
+    if (found) {
+      current = push(blocks ? 'CRITICAL' : found, t, [], strongestOf([leadOf(t), inherited, fieldOf(t)]));
+      current.fixable = inherited?.toUpperCase() === 'FIXABLE';
+      current.heading = !indented && NUMBERED_HEAD.test(t);
+      if (!indented) head = t;
+      continue;
+    }
+    if (blocks && !t.startsWith('{')) {
+      if (current) { current.label = 'CRITICAL'; current.raw += ` | ${t}`; continue; }
+      current = push('CRITICAL', head && head !== t ? `${head} | ${t}` : t);
+      continue;
+    }
+    if (!fresh && !current && (!LIST_ITEM.test(head) || locus)) head = t;
+  }
+  const unblocked = (f: Finding) => fixableRaises || role !== 'adversarial-native' || !(f.fixable || f.label.toUpperCase() === 'FIXABLE' || /(?<![A-Za-z0-9])FIXABLE(?![A-Za-z0-9])/.test(f.raw)) || statesNoBlocks(f.raw);
+  const relaxed = fixableRaises && role === 'adversarial-native' ? parseFindings(reader, output, false) : undefined;
+  const statesSeverity = (raw: string) => { const ls = [...raw.matchAll(SEVERITY_FIELD)].flatMap(m => (m[1] ?? m[2]!).match(FIELD_LABELS)!); return ls.length === 1 && !!rank(ls[0]); };
+  return out.map((f, i) => {
+    const own = relaxed?.length === out.length && relaxed[i]!.raw === f.raw && statesNoBlocks(f.raw) && statesSeverity(f.raw) ? relaxed[i]!.label : undefined;
+    return { label: own ?? (unblocked(f) ? f.label : 'CRITICAL'), raw: f.raw };
+  });
+}
+
+/**
+ * Whether the native voice's FIXABLE raises a finding with its own Severity field to CRITICAL (GST-987): true on the gate class, on any
+ * risk reason (security, secret, auth, money, user data), a depth error, a history or floor escalation, and whenever the plan's
+ * REVIEW_CLASS or REVIEW_DEPTH reasons cannot be read: only a code or docs plan whose every reason is `runtime=<n>` relaxes it.
+ */
+export function fixableRaises(planLines?: readonly string[]): boolean {
+  const cls = planLines?.map(l => /^REVIEW_CLASS: (\S+)/.exec(l)?.[1]).find(Boolean);
+  const reasons = planLines?.map(l => /^REVIEW_DEPTH: .*?\breasons=(\S+)/.exec(l)?.[1]).find(Boolean);
+  if (!cls || !reasons) return true;
+  return !['code', 'docs'].includes(cls) || !reasons.split(',').every(r => /^runtime=\d+$/.test(r));
+}
+
+/**
+ * The clean marker each reader's own brief prescribes for a review that found nothing: `NO FINDINGS` alone on a line for the
+ * specialists, the batched specialist and the targeted reader (ship/sections/review-army.md, the specialist brief; review/specialists/*.md),
+ * the Red Team (its brief in ship/sections/review-army.md) and fix-check (scripts/resolvers/fix-check.ts); the `Recommendation:` line
+ * for the outside voice (ship/sections/adversarial.md, the outside prompt); either for the native adversarial voice, whose brief asks
+ * for both. A reply with no finding and no marker (a refusal, an empty reply, a reader that never saw the diff) is not a review.
+ */
+const NO_FINDINGS: [string, RegExp] = ['NO FINDINGS', /^[`*]*NO FINDINGS\.?[`*]*$/];
+const RECOMMENDATION: [string, RegExp] = ['Recommendation:', /^[`*]*Recommendation:/i];
+const CLEAN_MARKERS: Record<string, Array<[string, RegExp]>> = {
+  specialist: [NO_FINDINGS], 'specialist-batched': [NO_FINDINGS], targeted: [NO_FINDINGS], 'red-team': [NO_FINDINGS], 'fix-check': [NO_FINDINGS],
+  'adversarial-native': [NO_FINDINGS, RECOMMENDATION], 'outside-voice': [RECOMMENDATION],
+};
+/** The markers a reader's zero-finding reply may carry; a role outside the brief roles takes either. */
+export const cleanMarkers = (reader: string) => CLEAN_MARKERS[reader.split('/')[0]!] ?? [NO_FINDINGS, RECOMMENDATION];
+const hasCleanMarker = (reader: string, output: string) => output.replace(/\r\n/g, '\n').split('\n').some(l => cleanMarkers(reader).some(([, re]) => re.test(l.trim())));
+
+/**
+ * collect: hash the raw output, append its findings to merged.jsonl and record both; a reply with no finding and no clean marker records
+ * review: false. With unavailable (the outside voice only) the output is its failure text, recorded as missing coverage. With a
+ * failed tree check (GST-482: the reply reviewed another checkout, or names none) nothing is merged and the output is no review.
+ */
+export function collect(ledger: string, reader: string, output: string, mergedFile: string, outputFile?: string, unavailable?: string, tree?: TreeCheck, raises = true): { sha: string; lines: MergedLine[]; review: boolean } {
+  const sha = promptHash(output);
+  const prior = readLedger(ledger).filter(e => e.event === 'output' && e.reader === reader).length;
+  const wrongTree = !unavailable && tree !== undefined && !tree.ok;
+  const lines = unavailable || wrongTree ? [] : parseFindings(reader, output, raises).map((f, i) => {
+    const s = stated(f.raw);
+    return { id: `${reader}#${prior ? `${prior + 1}.` : ''}${i + 1}`, reader, label: f.label, ...(s ? { stated: s } : {}), ...(summaryCandidate(f.raw) ? { summary_candidate: true as const } : {}), raw: f.raw, output_sha256: sha };
+  });
+  const review = !unavailable && !wrongTree && (lines.length > 0 || hasCleanMarker(reader, output));
+  fs.appendFileSync(mergedFile, lines.map(l => JSON.stringify(l) + '\n').join(''), { mode: 0o600 });
+  appendEvent(ledger, { event: 'output', reader, sha256: sha, file: outputFile ? path.resolve(outputFile) : null, merged: path.resolve(mergedFile), ids: lines.map(l => l.id), review, ...(unavailable ? { unavailable } : {}), ...(raises ? {} : { fixable_raises: false }),
+    ...(tree && !unavailable ? { tree: tree.expected, reported_tree: tree.reported, tree_ok: tree.ok } : {}) });
+  return { sha, lines, review };
+}
+/** The outside voice may fail without blocking (ship/sections/adversarial.md): its failure is recorded as unavailable coverage, never as a review. */
+export const mayBeUnavailable = (reader: string) => reader.split('/')[0] === 'outside-voice';
+const unavailableOutput = (o: LedgerEvent) => typeof o.unavailable === 'string' && mayBeUnavailable(String(o.reader));
+
+export function readJsonl<T>(file: string): T[] {
+  return fs.readFileSync(file, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l) as T);
+}
+
+export interface JudgedLine { id: string; severity: string; reason?: string; duplicate_of?: string }
+export interface Judgment { ok: boolean; dropped: string[]; downgraded: string[]; unexplained: string[]; invalid: string[]; added: string[]; promoted: string[]; folded: string[]; dismissed: string[] }
+
+/** The lead-judgment rule: every merged finding survives at its severity or above, except a summary candidate lowered with a reason (dismissed); additions and promotions carry a reason. */
+export function judge(merged: MergedLine[], judged: JudgedLine[]): Judgment {
+  const byId = new Map(judged.map(j => [j.id, j]));
+  const mergedIds = new Set(merged.map(m => m.id));
+  const res: Judgment = { ok: true, dropped: [], downgraded: [], unexplained: [], invalid: [], added: [], promoted: [], folded: [], dismissed: [] };
+  for (const j of judged) if (rank(j.severity) === null) res.invalid.push(j.id);
+  for (const m of merged) {
+    const j = byId.get(m.id);
+    if (!j) { res.dropped.push(m.id); continue; }
+    const target = j.duplicate_of ? byId.get(j.duplicate_of) : j;
+    // A duplicate folds into a different line that stands on its own; a self-fold, a cycle or a chain keeps no survivor.
+    if (!target || (j.duplicate_of && (j.duplicate_of === j.id || target.duplicate_of))) { res.dropped.push(m.id); continue; }
+    const from = rank(m.label) ?? 0;
+    const to = rank(target.severity);
+    if (to === null) continue;
+    if (to < from) (!j.duplicate_of && j.reason?.trim() && (summaryCandidate(m.raw) || statedLowering(m.reader, m.raw, to)) ? res.dismissed : res.downgraded).push(m.id);
+    else if (j.duplicate_of) res.folded.push(m.id);
+    else if (to > from) { res.promoted.push(m.id); if (!j.reason?.trim()) res.unexplained.push(m.id); }
+  }
+  for (const j of judged) if (!mergedIds.has(j.id) && !j.duplicate_of) { res.added.push(j.id); if (!j.reason?.trim()) res.unexplained.push(j.id); }
+  res.ok = !res.dropped.length && !res.downgraded.length && !res.unexplained.length && !res.invalid.length;
+  return res;
+}
+
+/** judge, logged: one judgment event per addition and promotion, then the verdict. */
+export function recordJudgment(ledger: string, merged: MergedLine[], judged: JudgedLine[], judgedFile: string, mergedFile: string): Judgment {
+  const res = judge(merged, judged);
+  const given = new Set(merged.map(m => m.id));
+  const absent = collectedIds(readLedger(ledger)).filter(id => !given.has(id));
+  if (absent.length) { res.dropped.push(...absent); res.ok = false; }
+  const byId = new Map(judged.map(j => [j.id, j]));
+  const labels = new Map(merged.map(m => [m.id, m.label]));
+  if (res.ok) {
+    for (const id of res.added) appendEvent(ledger, { event: 'judgment', kind: 'added', id, to: byId.get(id)!.severity, reason: byId.get(id)!.reason });
+    for (const id of res.promoted) appendEvent(ledger, { event: 'judgment', kind: 'promoted', id, from: labels.get(id), to: byId.get(id)!.severity, reason: byId.get(id)!.reason });
+    for (const id of res.dismissed) appendEvent(ledger, { event: 'judgment', kind: 'dismissed', id, from: labels.get(id), to: byId.get(id)!.severity, reason: byId.get(id)!.reason });
+  }
+  appendEvent(ledger, { event: 'judge', ok: res.ok, judged: path.resolve(judgedFile), judged_sha256: promptHash(fs.readFileSync(judgedFile, 'utf8')), merged: path.resolve(mergedFile), merged_ids: merged.map(m => m.id), dropped: res.dropped, downgraded: res.downgraded, unexplained: res.unexplained, invalid: res.invalid, added: res.added.length, promoted: res.promoted.length, folded: res.folded.length, dismissed: res.dismissed.length });
+  return res;
+}
+
+/** A recorded output's file text while it still hashes to what collect recorded. */
+function unchangedOutput(o: LedgerEvent): string | undefined {
+  try {
+    const text = typeof o.file === 'string' ? fs.readFileSync(o.file, 'utf8') : undefined;
+    return text !== undefined && promptHash(text) === o.sha256 ? text : undefined;
+  } catch { return undefined; }
+}
+
+/** Whether a reply names the tree its render recorded (GST-482), checked on the reply itself, never on an output event's editable fields. */
+const treeHolds = (render: LedgerEvent | undefined, reply: string | undefined) => !render || !('tree' in render)
+  || (reply !== undefined && checkReviewedTree(reply, typeof render.tree === 'string' ? render.tree : null).ok);
+
+/** One file however its path is spelled: collect and judge may reach a run directory through a symlink. */
+const realPath = (f: string) => { try { return fs.realpathSync(f); } catch { return path.resolve(f); } };
+
+/**
+ * The blocking findings a run's ledger holds (GST-951): every collected line whose label ranks CRITICAL and whose reader did not state
+ * `Blocks: no` (GST-1031: the count keys on Blocks; lead judgment raising such a line above its label counts it), raised to its judged
+ * severity when the newest judge accepted a judged set that is unchanged since; lead judgment's additions count and a folded
+ * duplicate does not. Every reader counts the same way, whatever it is and whether or not Step 9.4 classified its findings.
+ * Each carries its locus (a JSON finding's path:line, else the first path:line its text names, an extensionless bin/ path
+ * included) so the summary can find its row.
+ * A ledger, merged file or judged set it cannot read, or a judged set changed since judge, throws: the count is never a guess.
+ */
+export interface LedgerBlocker { id: string; locus: string | null; /** The run-unique `<pass dir>/<id>` a row's ledger_id and a fix trailer name (GST-1168); the caller sets it. */ key?: string }
+function lineLocus(raw: string): string | null {
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o.path === 'string' && Number.isInteger(o.line)) return `${o.path.replace(/^\.\//, '')}:${o.line}`;
+  } catch { /* a prose finding */ }
+  return /(?:[\w.-]+\/)+[\w.-]+:\d+|[\w.-]+\.\w+:\d+/.exec(raw)?.[0]?.replace(/^\.\//, '') ?? null;
+}
+export function ledgerBlockers(ledger: string): LedgerBlocker[] {
+  const fail = (why: string): never => { throw new Error(`${ledger}: ${why}`); };
+  const read = (file: unknown, what: string): string => {
+    try { return fs.readFileSync(String(file), 'utf8'); } catch { return fail(`${what} ${String(file)} is unreadable`); }
+  };
+  const jsonLines = (text: string, what: string): any[] =>
+    text.split('\n').filter(l => l.trim()).map(l => { try { return JSON.parse(l); } catch { return fail(`${what} has a line that is not JSON`); } });
+  const events = jsonLines(read(ledger, 'ledger'), 'the ledger') as LedgerEvent[];
+  const ranks = new Map<string, number>();
+  const unblocking = new Map<string, number>();
+  const raws = new Map<string, string>();
+  const readers = new Map<string, string>();
+  const loci = new Map<string, string | null>();
+  const gone = quarantinedIds(events);
+  for (const o of events.filter(e => e.event === 'output' && idsOf(e).some(id => !gone.has(id)))) {
+    const lines = jsonLines(read(o.merged, `merged file of ${String(o.reader)}`), String(o.merged)) as MergedLine[];
+    for (const id of idsOf(o).filter(id => !gone.has(id))) {
+      const line = lines.find(l => l.id === id) ?? fail(`collected id ${id} is missing from ${String(o.merged)}`);
+      ranks.set(id, rank(line.label) ?? 0);
+      if (statesNoBlocks(line.raw)) unblocking.set(id, rank(line.label) ?? 0);
+      raws.set(id, line.raw);
+      readers.set(id, String(o.reader));
+      loci.set(id, lineLocus(line.raw));
+    }
+  }
+  const verdict = [...events].reverse().find(e => e.event === 'judge');
+  if (verdict?.ok === true) {
+    const text = read(verdict.judged, 'judged set');
+    if (promptHash(text) !== verdict.judged_sha256) fail(`judged set ${String(verdict.judged)} changed since judge`);
+    for (const j of jsonLines(text, String(verdict.judged)) as JudgedLine[]) {
+      if (j.duplicate_of) { ranks.delete(j.id); continue; }
+      const dismissed = !!j.reason?.trim() && (summaryCandidate(raws.get(j.id) ?? '') || statedLowering(readers.get(j.id) ?? '', raws.get(j.id) ?? '', rank(j.severity) ?? 0));
+      ranks.set(j.id, dismissed ? rank(j.severity) ?? 0 : Math.max(ranks.get(j.id) ?? 0, rank(j.severity) ?? 0));
+      if (!loci.has(j.id)) loci.set(j.id, lineLocus(j.reason ?? ''));
+    }
+  }
+  return [...ranks].filter(([id, r]) => r >= 4 && !(r <= (unblocking.get(id) ?? -1))).map(([id]) => ({ id, locus: loci.get(id) ?? null }));
+}
+
+/**
+ * Whether a recorded output was a review: its unchanged reply names its render's tree, and it has findings or carries the reader's
+ * clean marker, so a ledger written before collect recorded the field is judged by the same rule; with no readable file, collect's own
+ * review field.
+ */
+function reviewed(o: LedgerEvent, render?: LedgerEvent): boolean {
+  if (o.tree_ok === false || unavailableOutput(o)) return false;
+  const text = unchangedOutput(o);
+  if (!treeHolds(render, text)) return false;
+  if (Array.isArray(o.ids) && o.ids.length) return true;
+  return text !== undefined ? hasCleanMarker(String(o.reader), text) : o.review === true;
+}
+
+/** Every id collect recorded, in order. */
+const idsOf = (e: LedgerEvent) => (Array.isArray(e.ids) ? (e.ids as string[]) : []);
+/** Ids a fetch violation quarantined (lib/review-sweep.ts): they left merged.jsonl and no consumer of the ledger counts them. */
+export const quarantinedIds = (events: LedgerEvent[]) => new Set(events.filter(e => e.event === 'quarantined').flatMap(idsOf));
+/** Ids collect recorded, less the quarantined ones. */
+const collectedIds = (events: LedgerEvent[]) => {
+  const gone = quarantinedIds(events);
+  return events.filter(e => e.event === 'output').flatMap(idsOf).filter(id => !gone.has(id));
+};
+
+export interface VerifyRow { kind: 'BRIEF' | 'OUTPUT' | 'JUDGE' | 'FETCH'; reader: string; status: string; detail: string }
+
+/** Replay every check from a finished run's ledger: briefs dispatched as rendered, outputs merged as returned, judgment without loss. */
+export function verify(ledger: string): { rows: VerifyRow[]; clean: boolean; briefs: number; voided: number; unavailable: number } {
+  const events = readLedger(ledger);
+  const rows: VerifyRow[] = [];
+  const short = (s: unknown) => (typeof s === 'string' ? s.slice(0, 12) : '-');
+  // Each render opens one dispatch of its reader (a pass); its sends and outputs run until that reader's next render.
+  const renders = events.flatMap((e, i) => (e.event === 'rendered' ? [i] : []));
+  const episodes = renders.map((at, n) => {
+    const reader = String(events[at]!.reader);
+    const next = renders.slice(n + 1).find(j => events[j]!.reader === reader) ?? events.length;
+    const nth = renders.slice(0, n + 1).filter(j => events[j]!.reader === reader).length;
+    return { at, next, reader, label: nth > 1 ? `${reader}@${nth}` : reader };
+  });
+  let voided = 0;
+  const differs: string[] = [];
+  for (const p of episodes) {
+    const r = events[p.at]!;
+    const inside = events.map((e, i) => ({ e, i })).filter(({ e, i }) => i > p.at && i < p.next && e.reader === p.reader);
+    const sent = inside.filter(({ e }) => e.event === 'sent');
+    // A later render into the same path overwrote this one's file by design; only the newest render of a path can check it.
+    const overwritten = renders.some(j => j > p.at && events[j]!.file === r.file);
+    let fileNow = '';
+    try { fileNow = !overwritten && typeof r.file === 'string' && fs.existsSync(r.file) ? promptHash(fs.readFileSync(r.file, 'utf8')) : ''; } catch { /* unreadable */ }
+    // A mismatched send is void when the reader was re-sent byte-exact before anything was collected from it.
+    let mismatched = 0, epVoided = 0;
+    for (const s of sent.filter(({ e }) => e.sha256 !== r.sha256)) {
+      const after = inside.find(({ e, i }) => i > s.i && (e.event === 'output' || (e.event === 'sent' && e.sha256 === r.sha256)));
+      if (after?.e.event === 'sent') epVoided++; else mismatched++;
+    }
+    voided += epVoided;
+    const lastMatch = [...sent].reverse().find(({ e }) => e.sha256 === r.sha256);
+    const outputs = lastMatch ? inside.filter(({ e, i }) => e.event === 'output' && i > lastMatch.i) : [];
+    const collected = outputs.some(({ e }) => reviewed(e, r));
+    const unavailable = !collected && outputs.some(({ e }) => unavailableOutput(e));
+    const status = !sent.length ? 'NOT_SENT' : mismatched ? 'MISMATCH' : collected ? 'MATCH' : unavailable ? 'UNAVAILABLE' : 'NOT_COLLECTED';
+    const payload = r.payload as { file?: unknown; sha256?: unknown } | undefined;
+    let payloadNow: string | null = null;
+    if (!overwritten && payload && typeof payload.file === 'string') { try { payloadNow = createHash('sha256').update(fs.readFileSync(payload.file)).digest('hex'); } catch { payloadNow = ''; } }
+    const tampered = (fileNow && fileNow !== r.sha256 ? ' file_changed_since_render' : '') + (payloadNow !== null && payloadNow !== payload!.sha256 ? ' payload_changed_since_render' : '');
+    // A fetch violation quarantined this dispatch; it counts only once a later render of the same reader replaced it.
+    const quarantine = inside.some(({ e }) => e.event === 'quarantined') ? (p.next < events.length ? 'SUPERSEDED' : 'QUARANTINED') : null;
+    rows.push({ kind: 'BRIEF', reader: p.label, status: quarantine ?? (tampered ? 'MISMATCH' : status), detail: `rendered=${short(r.sha256)} sent=${sent.map(({ e }) => short(e.sha256)).join(',') || '-'}${epVoided ? ` voided=${epVoided}` : ''}${outputs.length && !collected && !unavailable ? ' not_reviewed' : ''}${tampered}${quarantine ? ' quarantined' : ''}` });
+  }
+  for (const [i, o] of events.entries()) {
+    if (o.event !== 'output') continue;
+    const reader = String(o.reader);
+    const p = episodes.find(q => q.reader === reader && q.at < i && i < q.next);
+    if (p && events.slice(i + 1, p.next).some(e => e.event === 'quarantined' && e.reader === reader)) {
+      rows.push({ kind: 'OUTPUT', reader: p.label, status: p.next < events.length ? 'SUPERSEDED' : 'QUARANTINED', detail: `sha=${short(o.sha256)} findings=${idsOf(o).length} quarantined` });
+      continue;
+    }
+    let status = 'MATCH';
+    const notes: string[] = [];
+    const lastSent = p ? events.slice(p.at + 1, i).filter(e => e.event === 'sent' && e.reader === reader).at(-1) : undefined;
+    if (!p) { status = 'MISMATCH'; notes.push('brief_not_rendered'); }
+    else if (!lastSent || lastSent.sha256 !== events[p.at]!.sha256) { status = 'MISMATCH'; notes.push('brief_not_sent_verbatim'); }
+    let text: string | undefined;
+    try { text = typeof o.file === 'string' ? fs.readFileSync(o.file, 'utf8') : undefined; } catch { /* missing or unreadable */ }
+    const render = p ? events[p.at]! : undefined;
+    if (text !== undefined && promptHash(text) !== o.sha256) { status = 'MISMATCH'; notes.push('output_file_changed'); }
+    const ids = Array.isArray(o.ids) ? (o.ids as string[]) : [];
+    let lines: MergedLine[] = [];
+    try { lines = typeof o.merged === 'string' ? readJsonl<MergedLine>(o.merged).filter(l => ids.includes(l.id)) : []; } catch { notes.push('merged_unreadable'); status = 'MISMATCH'; }
+    if (lines.length !== ids.length) { status = 'MISMATCH'; notes.push(`merged_lines=${lines.length}/${ids.length}`); }
+    if (lines.some(l => l.output_sha256 !== o.sha256)) { status = 'MISMATCH'; notes.push('merged_line_from_other_output'); }
+    // Each merged row must be the finding collect parses at that id's index from the unchanged output, its reader, label and raw text byte for byte.
+    if (text === undefined) {
+      status = 'MISMATCH';
+      notes.push(typeof o.file === 'string' ? 'output_file_missing' : 'output_file_unrecorded');
+      differs.push(...ids);
+    } else if (promptHash(text) === o.sha256) {
+      const parsed = parseFindings(reader, text, o.fixable_raises !== false);
+      const off = ids.filter((id, k) => { const m = lines.find(l => l.id === id); return !m || m.reader !== reader || parsed[k]?.label !== m.label || parsed[k]?.raw !== m.raw; });
+      if (unavailableOutput(o) && parsed.length) { status = 'MISMATCH'; notes.push('unavailable_output_has_findings'); }
+      else if (!unavailableOutput(o)) {
+        if (off.length) { status = 'MISMATCH'; notes.push(`merged_line_differs=${JSON.stringify(off)}`); differs.push(...off); }
+        // A reply collect refused for its tree (GST-482) records no ids whatever it holds; the refusal is re-derived from the reply.
+        if (parsed.length !== ids.length && !(o.tree_ok === false && !ids.length && !treeHolds(render, text))) { status = 'MISMATCH'; notes.push(`merged_count_differs=${parsed.length}/${ids.length}`); }
+      }
+    }
+    if (status === 'MATCH' && !reviewed(o, render)) {
+      // A non-review the same dispatch later replaced with a review (the brief re-sent verbatim, then answered) is void, counted like a voided send.
+      const later = p ? events.slice(i + 1, p.next) : [];
+      const review = later.findIndex(e => e.event === 'output' && e.reader === reader && reviewed(e, render));
+      const replaced = review > 0 && later.slice(0, review).some(e => e.event === 'sent' && e.reader === reader && e.sha256 === events[p!.at]!.sha256);
+      if (unavailableOutput(o)) { status = 'UNAVAILABLE'; notes.push(`reason=${JSON.stringify(o.unavailable)}`); }
+      else if (replaced) { status = 'VOIDED'; voided++; notes.push('replaced_by_a_review'); }
+      else if (o.tree_ok === false || !treeHolds(render, text)) { status = 'NOT_REVIEWED'; notes.push(`wrong_tree reported=${JSON.stringify(o.reported_tree)} expected=${JSON.stringify(o.tree)}`); }
+      else { status = 'NOT_REVIEWED'; notes.push('no_finding_no_clean_marker'); }
+    }
+    rows.push({ kind: 'OUTPUT', reader: p?.label ?? reader, status, detail: `sha=${short(o.sha256)} findings=${ids.length}${notes.length ? ' ' + notes.join(' ') : ''}` });
+  }
+  const lastJudge = events.map(e => e.event).lastIndexOf('judge');
+  if (lastJudge >= 0) {
+    const v = events[lastJudge]!;
+    const notes: string[] = [];
+    const late = events.slice(lastJudge + 1).filter(e => e.event === 'output').map(e => String(e.reader));
+    if (late.length) notes.push(`output_after_judge=${late.join(',')}`);
+    const judgedIds = new Set(Array.isArray(v.merged_ids) ? (v.merged_ids as string[]) : []);
+    const missing = collectedIds(events.slice(0, lastJudge)).filter(id => !judgedIds.has(id));
+    if (missing.length) notes.push(`merged_ids_missing=${missing.join(',')}`);
+    // The judged set must come from the merged file collect wrote, holding only rows collect recorded.
+    const outputs = events.slice(0, lastJudge).filter(e => e.event === 'output' && Array.isArray(e.ids) && e.ids.length);
+    if (outputs.some(e => typeof e.merged !== 'string' || realPath(e.merged) !== realPath(String(v.merged)))) notes.push('judge_merged_not_collected');
+    let rerun: Judgment | null = null;
+    try {
+      const judgedText = fs.readFileSync(String(v.judged), 'utf8');
+      if (promptHash(judgedText) !== v.judged_sha256) notes.push('judged_changed_since_judge');
+      const merged = readJsonl<MergedLine>(String(v.merged));
+      const collected = new Set(collectedIds(events.slice(0, lastJudge)));
+      const extra = merged.filter(m => !collected.has(m.id)).map(m => m.id);
+      if (extra.length) notes.push(`merged_rows_not_collected=${JSON.stringify(extra)}`);
+      rerun = judge(merged, readJsonl<JudgedLine>(String(v.judged)));
+    } catch { notes.push('judged_or_merged_unreadable'); }
+    if (rerun && !rerun.ok) notes.push(`rerun_rejects dropped=${JSON.stringify(rerun.dropped)} downgraded=${JSON.stringify(rerun.downgraded)}`);
+    const forged = differs.filter(id => judgedIds.has(id));
+    if (forged.length) notes.push(`merged_line_differs=${JSON.stringify(forged)}`);
+    const status = !v.ok ? 'REJECTED' : notes.length ? 'MISMATCH' : 'OK';
+    rows.push({ kind: 'JUDGE', reader: '-', status, detail: `dropped=${JSON.stringify(v.dropped)} downgraded=${JSON.stringify(v.downgraded)} added=${v.added} promoted=${v.promoted} folded=${v.folded}${v.dismissed ? ` dismissed=${v.dismissed}` : ''}${notes.length ? ' ' + notes.join(' ') : ''}` });
+  } else if (events.some(e => e.event === 'output')) rows.push({ kind: 'JUDGE', reader: '-', status: 'MISSING', detail: 'outputs were collected but no judged set was checked' });
+  // Each stage sweep's verdict; a violation stays open until a later attempt of the same stage swept clean or partial.
+  const sweeps = events.filter(e => e.event === 'fetch-sweep');
+  for (const s of sweeps) {
+    const resolved = s.verdict === 'violation' && sweeps.some(t => t.pass === s.pass && t.stage === s.stage && Number(t.attempt) > Number(s.attempt) && t.verdict !== 'violation');
+    const found = Array.isArray(s.found) ? (s.found as Array<{ path: string }>) : [];
+    rows.push({ kind: 'FETCH', reader: `${String(s.pass)}/${String(s.stage)}#${String(s.attempt)}`, status: s.verdict === 'violation' ? (resolved ? 'RESOLVED' : 'VIOLATION') : String(s.verdict).toUpperCase(), detail: `found=${found.length}${found.length ? ` paths=${JSON.stringify(found.map(x => x.path))}` : ''}${s.partial ? ` partial=${JSON.stringify(s.partial)}` : ''}` });
+  }
+  const clean = episodes.length > 0 && rows.every(r => ['MATCH', 'OK', 'VOIDED', 'UNAVAILABLE', 'SUPERSEDED', 'CLEAN', 'PARTIAL', 'RESOLVED'].includes(r.status));
+  return { rows, clean, briefs: episodes.length, voided, unavailable: rows.filter(r => r.kind === 'BRIEF' && r.status === 'UNAVAILABLE').length };
+}

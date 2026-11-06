@@ -21,6 +21,7 @@
 # session tokens are outstanding.
 
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 # The --help heredoc is over 512 bytes; keep it off a pipe (test/heredoc-pipe-deadlock.test.ts).
 BASH_COMPAT=50
 
@@ -67,4 +68,4 @@ if ! command -v bun >/dev/null 2>&1; then
   exit 1
 fi
 
-exec bun run "$ENTRY" "$@"
+exec bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" run "$ENTRY" "$@"

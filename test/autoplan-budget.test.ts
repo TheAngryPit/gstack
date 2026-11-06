@@ -1,7 +1,7 @@
 /**
  * Field list 2, W5: the autoplan run budget on the simulated Capy host. An
- * unattended Capy run reserves the default per-voice estimate so --spend-cap
- * binds, and a refused dispatch stops the run `incomplete` with a structured
+ * unattended run under --spend-cap (or on Capy) reserves the default per-voice
+ * estimate so the cap binds, `--estimate-usd` persists for later phases, and a refused dispatch stops the run `incomplete` with a structured
  * stop object that export, validate and resume understand; `budget` journals
  * the owner's raise. `close --deferred` keeps a dispatched voice's
  * reservation, routes an open Critical to the gate and carries open findings
@@ -43,15 +43,15 @@ describe('spend: the default host estimate binds and budget_exhausted is a resum
     const first = r.ap(['next', '--out', out, '--plan', plan, '--no-ui', '--spend-cap', '12']);
     expect(first.status, first.stderr).toBe(0);
     expect(first.stdout).toMatch(/^ESTIMATE: 5\.00 per voice reserved for each host-subagent attempt/m);
-    expect(first.stdout).toMatch(/^ROUNDS: ceo=1\/3 eng=1\/3 max_rounds=3 host_spend=unknown$/m);
+    expect(first.stdout).toMatch(/^ROUNDS: ceo=1\/2 eng=1\/2 max_rounds=2 host_spend=unknown$/m);
     expect(spend(out).reserved.map((x: any) => x.estimate_usd)).toEqual([5, 5]);
-    expect(readRunJson(out).max_rounds).toBe(3);
+    expect(readRunJson(out).max_rounds).toBe(2);
     phaseVia(r, out, 'ceo', NONE);
     expect(unknownUsd(out)).toBe(10);
     const stopped = r.ap(['next', '--out', out]);
     expect(stopped.status).toBe(3);
     expect(stopped.stderr).toMatch(/\(SPEND_CAP_EXCEEDED\)$/m);
-    expect(stopped.stdout).toMatch(/^STOP: reason=budget_exhausted phase=eng cap=12\.00 spent=0\.00 reserved=0\.00 unknown=2\(10\.00\) next_estimate=10\.00 rounds=ceo:1\/3,eng:1\/3$/m);
+    expect(stopped.stdout).toMatch(/^STOP: reason=budget_exhausted phase=eng cap=12\.00 spent=0\.00 reserved=0\.00 unknown=2\(10\.00\) next_estimate=10\.00 rounds=ceo:1\/2,eng:1\/2$/m);
     expect(stopped.stdout).toContain(`RECOVER: gstack-autoplan close --out ${out} --phase eng --deferred`);
     expect(stopped.stdout).toContain(`RECOVER: gstack-autoplan budget --out ${out} --spend-cap <usd>`);
     expect(stopped.stdout).toContain(`GSTACK_RESULT: skill=autoplan status=incomplete run=${out}`);
@@ -97,7 +97,7 @@ describe('close --deferred', () => {
     expect(noBy.stderr).toMatch(/\(ANSWER_BY_REQUIRED\)$/m);
     const close = r.ap(['close', '--out', s.out, '--phase', 'ceo', '--deferred', 'owner stop', '--by', 'human']);
     expect(close.status, close.stderr).toBe(0);
-    expect(close.stdout).toMatch(/^PHASE_DEFERRED: ceo round=1\/3 by=human open=2 \(Critical=1 Medium=1\) blockers=\S+-ceo-native-1 reason="owner stop"$/m);
+    expect(close.stdout).toMatch(/^PHASE_DEFERRED: ceo round=1\/2 by=human open=2 \(Critical=1 Medium=1\) blockers=\S+-ceo-native-1 reason="owner stop"$/m);
     expect(close.stdout).toContain('GSTACK_RESULT: skill=autoplan status=running');
     const run = readRunJson(s.out);
     expect(run.phases.ceo.outside.status).toBe('skipped');
@@ -126,9 +126,9 @@ describe('close --deferred', () => {
     expect(v.status, v.stdout + v.stderr).toBe(0);
     const reply = answer(s.out, 1, 'rec');
     expect(reply.status, reply.stderr).toBe(0);
-    expect(reply.stdout).toMatch(/^ROUND_GRANTED: ceo cap=4 \(uc\d+b by human\)$/m);
+    expect(reply.stdout).toMatch(/^ROUND_GRANTED: ceo cap=3 \(uc\d+b by human\)$/m);
     expect(reply.stdout).toMatch(/^REOPENED: ceo,eng/m);
-    expect(reply.stdout).toMatch(/^ROUND_GRANTED: eng cap=4 \(reruns after ceo; uc\d+b by human\)$/m);
+    expect(reply.stdout).toMatch(/^ROUND_GRANTED: eng cap=3 \(reruns after ceo; uc\d+b by human\)$/m);
     expect(readRunJson(s.out).round_grants).toEqual({ ceo: 1, eng: 1 });
   });
 });
@@ -256,5 +256,39 @@ describe('confirm rounds', () => {
     expect(rows[0].correlates).toEqual([expect.stringMatching(/-ceo-native-1$/), expect.stringMatching(/-ceo-outside-1$/)]);
     expect(rows[0].settled_by).toBeTruthy();
     expect(rows[1].settled_by).toBeUndefined();
+  });
+});
+
+describe('the cap binds on every unattended host (GBRA-223 claim 4)', () => {
+  const OFF_CAPY = { GSTACK_CAPY: '' };
+  test('a capped unattended run off Capy reserves the default per voice, so the cap stops it; with no cap it reserves nothing', () => {
+    const dir = path.join(r.host.base, 'offcapy');
+    const out = path.join(dir, 'run');
+    const first = r.ap(['next', '--out', out, '--plan', writePlan(dir), '--no-ui', '--spend-cap', '12'], OFF_CAPY);
+    expect(first.status, first.stderr).toBe(0);
+    expect(first.stdout).toMatch(/^ESTIMATE: 5\.00 per voice reserved for each host-subagent attempt/m);
+    expect(spend(out).reserved.map((x: any) => x.estimate_usd)).toEqual([DEFAULT_HOST_ESTIMATE_USD, DEFAULT_HOST_ESTIMATE_USD]);
+    phaseVia(r, out, 'ceo', NONE);
+    const stopped = r.ap(['next', '--out', out], OFF_CAPY);
+    expect(stopped.status).toBe(3);
+    expect(stopped.stderr).toMatch(/\(SPEND_CAP_EXCEEDED\)$/m);
+    const freeDir = path.join(r.host.base, 'offcapy-nocap');
+    const free = path.join(freeDir, 'run');
+    const uncapped = r.ap(['next', '--out', free, '--plan', writePlan(freeDir), '--no-ui'], OFF_CAPY);
+    expect(uncapped.status, uncapped.stderr).toBe(0);
+    expect(uncapped.stdout).not.toMatch(/^ESTIMATE:/m);
+    expect(spend(free).reserved.map((x: any) => x.estimate_usd)).toEqual([0, 0]);
+  });
+
+  test('--estimate-usd persists: later phases reserve it without the flag', () => {
+    const s = start(['--spend-cap', '40', '--estimate-usd', '3']);
+    expect(spend(s.out).reserved.map((x: any) => x.estimate_usd)).toEqual([3, 3]);
+    expect(readRunJson(s.out).estimate_usd).toBe(3);
+    phaseVia(r, s.out, 'ceo', NONE);
+    expect(spend(s.out).settled.map((x: any) => x.reserved_usd)).toEqual([3, 3]);
+    const eng = r.ap(['next', '--out', s.out]);
+    expect(eng.status, eng.stderr).toBe(0);
+    expect(eng.stdout).toMatch(/^PHASE: eng /m);
+    expect(spend(s.out).reserved.map((x: any) => x.estimate_usd)).toEqual([3, 3]);
   });
 });

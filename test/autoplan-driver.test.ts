@@ -3,7 +3,8 @@
  * parent agent reads to drive /autoplan through `gstack-autoplan`. It is
  * generated from autoplan/DRIVER.md.tmpl by resolvers that read the code
  * (phase order, scope flags, run files, RESULT FORMAT, result codes, the
- * coordinator contract), stays under 160 lines with no harness vocabulary,
+ * coordinator contract), stays at or under 162 lines (160 until the decision
+ * trail paragraph joined the coordinator contract section) with no harness vocabulary,
  * is in the generator's normal, out-dir and dry-run inventories, and is
  * found from an installed root through its recorded `.source-path`.
  */
@@ -47,8 +48,8 @@ describe('autoplan/DRIVER.md content comes from the code', () => {
     }
   });
 
-  test('at most 160 lines and no harness vocabulary', () => {
-    expect(doc.split('\n').length).toBeLessThanOrEqual(160);
+  test('at most 162 lines and no harness vocabulary', () => {
+    expect(doc.split('\n').length).toBeLessThanOrEqual(162);
     for (const term of ['PreToolUse', 'PostToolUse', 'SessionStart', 'AskUserQuestion', 'Skill tool']) expect(doc).not.toContain(term);
   });
 

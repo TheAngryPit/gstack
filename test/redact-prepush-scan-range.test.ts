@@ -17,24 +17,10 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { spawnSync } from "child_process";
+import { gitEnv } from "./helpers/git-env";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
-
-// Fixture git was spawned with the parent environment. A global or system
-// core.hooksPath, or the same key via GIT_CONFIG_COUNT /
-// GIT_CONFIG_PARAMETERS, runs on these pushes and rejects the local remote
-// (#2967). /dev/null drops the global file on every platform: Git for
-// Windows rejects NUL (see EMPTY_GLOBAL_GIT_CONFIG in lib/cso/process.ts).
-// Config written inside the fixture repo still applies.
-function gitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  env.GIT_CONFIG_GLOBAL = "/dev/null";
-  env.GIT_CONFIG_NOSYSTEM = "1";
-  env.GIT_CONFIG_COUNT = "0";
-  delete env.GIT_CONFIG_PARAMETERS;
-  return env;
-}
 
 let dir: string;
 const run = (args: string[], cwd = dir): string => {

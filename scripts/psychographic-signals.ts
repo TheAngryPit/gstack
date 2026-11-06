@@ -224,26 +224,122 @@ export const SIGNAL_MAP: Record<string, Record<string, DimensionDelta[]>> = {
 };
 
 /**
- * Apply a user choice for a question to the running dimension totals.
+ * Label cues: option key → leading words of UI labels that mean that key.
  *
- * @param dims - running total of dimension nudges (mutated)
- * @param signal_key - from the question registry entry
- * @param user_choice - the option key the user selected
- * @returns list of dimension deltas applied (empty if no mapping)
+ * The AskUserQuestion hook only sees the label the user clicked ("A) Fix it
+ * now (recommended)"), never a stable key, while SIGNAL_MAP is keyed by the
+ * registry's option keys (#2623). resolveOptionKey() maps a label back to a
+ * key when bin/gstack-question-log records a hook event. Every key also
+ * matches its own words ("fix-now" → "fix now"), so only phrasings beyond
+ * that need an entry here. Cues are
+ * lowercase words separated by single spaces and match at the start of the
+ * normalized label; candidates are limited to the question's own registered
+ * options, and the longest cue wins.
  */
-export function applySignal(
-  dims: Record<Dimension, number>,
-  signal_key: string,
-  user_choice: string,
-): DimensionDelta[] {
-  const subMap = SIGNAL_MAP[signal_key];
-  if (!subMap) return [];
-  const deltas = subMap[user_choice];
-  if (!deltas) return [];
-  for (const { dim, delta } of deltas) {
-    dims[dim] = (dims[dim] ?? 0) + delta;
+const OPTION_LABEL_CUES: Record<string, readonly string[]> = {
+  accept: ['yes', 'approve', 'agree', 'add', 'include', 'apply', 'adopt', 'enable', 'go ahead', 'do it', 'proceed', 'run', 'create', 'merge', 'roll back', 'migrate', 'open', 'promote', 'reorganize', 'polish'],
+  reject: ['no', 'disagree', 'decline', 'cancel', 'abort', 'dont', 'do not', 'keep current', 'keep as is', 'keep it as is'],
+  skip: ['no', 'no thanks', 'not now', 'dont', 'do not', 'pass', 'drop', 'ignore', 'leave it', 'ship as is', 'ship it as is'],
+  defer: ['later', 'fix later', 'add to todos', 'add to todo', 'add a todo', 'todo', 'postpone', 'backlog', 'park', 'track it'],
+  'fix-now': ['fix', 'fix it', 'fix them', 'fix before shipping'],
+  'fix-anyway': ['fix', 'fix it'],
+  investigate: ['dig in', 'look into', 'debug', 'diagnose', 'root cause'],
+  'ack-and-ship': ['ack', 'acknowledge', 'ship', 'ship anyway', 'ship it'],
+  'accept-risk': ['accept', 'accept the risk', 'live with it'],
+  'false-positive': ['not a bug', 'mark false positive', 'mark as false positive', 'mark it false positive'],
+  'add-test': ['add', 'add tests', 'add the test', 'write', 'write the test', 'test it'],
+  expand: ['scope expansion'],
+  selective: ['cherry pick', 'selective expansion'],
+  hold: ['keep', 'keep scope', 'hold scope'],
+  reduce: ['cut', 'trim', 'shrink', 'scope down', 'scope reduction'],
+  revise: ['edit', 'change', 'rework'],
+  restart: ['start over', 'redo'],
+  'build-now': ['build', 'build it now', 'include in this pr'],
+  'keep-local': ['keep'],
+  'keep-vendored': ['keep'],
+  'yes-upgrade': ['yes', 'upgrade'],
+  'always-auto': ['always'],
+  'not-now': ['later', 'snooze'],
+  'never-ask': ['never', 'disable'],
+};
+
+function normalizeOptionLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/\s*\(recommended\)\s*$/, '')
+    .replace(/['\u2019]/g, '')
+    .replace(/^\s*(?:option\s+)?[a-z0-9]\s*(?:[).:]|-(?=\s))\s+/, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Map a chosen UI label to the registered option key of its question.
+ *
+ * Returns the key when exactly one of the question's registered options
+ * matches with the longest cue; undefined for unregistered ids, questions
+ * without options, unmatched labels and ties, so an unclear answer stays
+ * unmapped instead of nudging the wrong dimension.
+ */
+export function resolveOptionKey(question_id: string, choice: string): string | undefined {
+  const options = (QUESTIONS as Record<string, QuestionDef>)[question_id]?.options as string[] | undefined;
+  if (!options?.length) return undefined;
+  if (options.includes(choice)) return choice;
+  const label = normalizeOptionLabel(choice);
+  if (!label) return undefined;
+  let best: string | undefined;
+  let bestWords = 0;
+  let tie = false;
+  for (const key of options) {
+    for (const cue of [key.replace(/-/g, ' '), ...(OPTION_LABEL_CUES[key] ?? [])]) {
+      if (label !== cue && !label.startsWith(cue + ' ')) continue;
+      const words = cue.split(' ').length;
+      if (words > bestWords) {
+        best = key;
+        bestWords = words;
+        tie = false;
+      } else if (words === bestWords && best !== key) {
+        tie = true;
+      }
+    }
   }
-  return deltas;
+  return tie ? undefined : best;
+}
+
+/**
+ * Map a choice on an unregistered question to an option key of its hinted
+ * signal (#3442). Only the exact key or the key's own words count, never
+ * OPTION_LABEL_CUES: a signal's keys mix several questions' options, so a
+ * cue such as "accept" could map a "yes" to the opposite delta. The longest
+ * matching key wins; a tie or no match returns undefined.
+ */
+export function resolveHintedOptionKey(signal_key: string, choice: string): string | undefined {
+  if (!Object.hasOwn(SIGNAL_MAP, signal_key)) return undefined;
+  const keys = Object.keys(SIGNAL_MAP[signal_key]!);
+  if (keys.includes(choice)) return choice;
+  const label = normalizeOptionLabel(choice);
+  if (!label) return undefined;
+  let best: string | undefined;
+  let bestWords = 0;
+  let tie = false;
+  for (const key of keys) {
+    const words = key.replace(/-/g, ' ');
+    if (label !== words && !label.startsWith(words + ' ')) continue;
+    const n = words.split(' ').length;
+    if (n > bestWords) {
+      best = key;
+      bestWords = n;
+      tie = false;
+    } else if (n === bestWords) {
+      tie = true;
+    }
+  }
+  return tie ? undefined : best;
+}
+
+/** One line per signal key with its option keys, as `--signal-keys` prints it. */
+export function signalKeyLines(): string[] {
+  return Object.entries(SIGNAL_MAP).map(([key, byChoice]) => `${key}: ${Object.keys(byChoice).join(' | ')}`);
 }
 
 /**
@@ -268,17 +364,6 @@ export function validateRegistrySignalKeys(): {
     if (!registrySignalKeys.has(k)) extra.push(k);
   }
   return { missing, extra };
-}
-
-/** Empty dimension totals — starting point for derivation. */
-export function newDimensionTotals(): Record<Dimension, number> {
-  return {
-    scope_appetite: 0,
-    risk_tolerance: 0,
-    detail_preference: 0,
-    autonomy: 0,
-    architecture_care: 0,
-  };
 }
 
 /** Sigmoid clamp: map accumulated delta total to [0, 1]. */

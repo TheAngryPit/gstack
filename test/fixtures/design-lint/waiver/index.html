@@ -1,0 +1,41 @@
+<!-- Ported from Nutlope/hallmark scripts/fixtures/waiver/index.html at 7ec8682 (MIT, Copyright (c) 2026 Hallmark contributors; see NOTICE.md and licenses/MIT-hallmark.txt). Waivers rewritten to the gstack-lint-disable form. -->
+<!doctype html>
+<!--
+  Waiver fixture. Seven waivers are claimed on a deliberately expressive page.
+  Five are honoured (absolute-surface-token, zero-chroma-neutrals, line-length,
+  overused-font, balanced-display-head), which is more than three, so the lint
+  adds a polish house-style note: the choices belong in DESIGN.md. Two are
+  refused: low-contrast blocks and the Floor is never waivable, and the
+  template-footer reason is boilerplate under 24 characters. Expected from
+  test/design-lint.test.ts: blocks=0, waiver refusals 2, house-style 1.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waiver fixture</title>
+<meta name="description" content="Seven waivers claimed on a black-paper manifesto page; five honoured, two refused.">
+<style>
+/* gstack-lint-disable low-contrast: the manifesto is printed white on black */
+/* gstack-lint-disable absolute-surface-token: the manifesto stage is printed on black paper */
+/* gstack-lint-disable zero-chroma-neutrals: the manifesto rules are pure grey by intent */
+/* impeccable-disable line-length: the manifesto sets long declarative lines */
+/* gstack-lint-disable overused-font: the manifesto pairs a display serif with a grotesque */
+/* gstack-lint-disable balanced-display-head: the manifesto head is one word and cannot wrap, so balance has nothing to balance */
+/* gstack-lint-disable template-footer: fine here honestly */
+:root {
+  --color-paper: #000;
+  --color-ink: oklch(96% 0 250);
+  --font-display: Inter, sans-serif;
+  --font-body: "Public Sans", sans-serif;
+}
+html, body { overflow-x: clip; }
+body { background: var(--color-paper); color: var(--color-ink); font-family: var(--font-body); }
+h1 { font-family: var(--font-display); }
+</style>
+</head>
+<body>
+  <h1>A manifesto printed on a black stage</h1>
+  <p>The manifesto sets long declarative lines and lets the paper do the shouting.</p>
+</body>
+</html>

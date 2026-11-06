@@ -7,6 +7,7 @@ import { describeE2ETier, e2eTierEnabled } from './helpers/e2e-gate';
 import { EvalCollector, expectContract } from './helpers/eval-store';
 import { sharedLibsPlanExcerpt } from './helpers/shared-libs-plan-excerpt';
 import { createSharedPlanReuseSelector } from './helpers/shared-libs-plan-actor';
+import { readSkillEffective } from './helpers/skill-startup';
 import {
   SHARED_LIBS_ROOT, commitFixture, createSharedLibsFixture, fixtureWrite, installSourceShims,
   readRequests, runSharedCapture, runSharedInteractive, seedOpportunitySources,
@@ -169,7 +170,7 @@ describeE2E('Shared-code opportunity and coordination judgment (periodic)', () =
     const f = createSharedLibsFixture('plan-callers');
     try {
       seedOpportunitySources(f);
-      const entrypoint = fs.readFileSync(path.join(SHARED_LIBS_ROOT, 'plan-eng-review/SKILL.md'), 'utf8');
+      const entrypoint = readSkillEffective(path.join(SHARED_LIBS_ROOT, 'plan-eng-review/SKILL.md'));
       const source = fs.readFileSync(path.join(SHARED_LIBS_ROOT, 'plan-eng-review/sections/review-sections.md'), 'utf8');
       const instructions = path.join(f.root, 'eng-code-quality.md');
       fs.writeFileSync(instructions, sharedLibsPlanExcerpt(entrypoint, source));

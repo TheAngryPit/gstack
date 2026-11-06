@@ -17,9 +17,12 @@
  *     subcommand `--help` is generic — so capability detection is best-effort and
  *     defaults to "unsupported". When we can't protect a user-managed source's
  *     files, we FAIL CLOSED (refuse the remove) rather than delete unprotected.
- *   - The autopilot lock filename isn't documented and (gbrain #1226) ignores
- *     GBRAIN_HOME, so the live `gbrain autopilot` process is the PRIMARY signal;
- *     known lock paths under both the configured home and ~/.gbrain are secondary.
+ *   - The live `gbrain autopilot` process is the PRIMARY signal and it is
+ *     deliberately machine-wide (#3360, Garry 2026-10-24): any autopilot on the
+ *     machine refuses, whichever brain or repo it serves, because two syncs that
+ *     share one brain or working tree can race. The refusal names the matched
+ *     pid and command so the user can tell whose it is. Known lock paths under
+ *     both the configured home and ~/.gbrain are secondary.
  *   - We refuse only on an AFFIRMATIVE autopilot signal — inability to introspect
  *     never blocks a normal sync (that would brick the tool).
  *   - Path containment uses realpath so a symlink inside ~/.gbrain/clones can't
@@ -69,11 +72,17 @@ export interface AutopilotStatus {
   signal: string | null;
 }
 
+/** A running process whose command line matches `gbrain autopilot`. */
+export interface AutopilotProcess {
+  pid: number;
+  command: string;
+}
+
 export interface AutopilotProbe {
   /** Override the lock-path list (tests). */
   lockPaths?: string[];
-  /** Override the live-process check (tests). */
-  processRunning?: () => boolean;
+  /** Override the live-process check (tests): a bare boolean, or the matched processes. */
+  processRunning?: () => boolean | AutopilotProcess[];
 }
 
 /**
@@ -109,10 +118,17 @@ export function detectAutopilot(
     // Stale lock (holder pid is dead): ignore this signal, keep checking. Pure
     // decision function — we do NOT delete the file here; the caller may clean it.
   }
-  // Primary signal: a live `gbrain autopilot` process.
-  const running = (probe.processRunning ?? defaultProcessRunning)();
-  if (running) return { active: true, signal: "process:gbrain autopilot" };
-  return { active: false, signal: null };
+  // Primary signal: a live `gbrain autopilot` process anywhere on the machine.
+  const running = (probe.processRunning ?? autopilotProcesses)();
+  if (running === true) return { active: true, signal: "process:gbrain autopilot" };
+  if (!Array.isArray(running) || running.length === 0) return { active: false, signal: null };
+  const listed = running.map(p => `pid ${p.pid} \`${p.command}\``).join(", ");
+  return {
+    active: true,
+    signal: `process:gbrain autopilot ${listed}; this check counts any process on this machine whose command line contains ` +
+      `"gbrain autopilot", even an autopilot serving another brain or repo. Stop that autopilot (or its service, if ` +
+      `\`gbrain autopilot --install\` set one up), or end the process that only mentions it`,
+  };
 }
 
 /** Read the holder pid from a lock/pid file. Returns null if no integer pid is present. */
@@ -143,11 +159,22 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-function defaultProcessRunning(): boolean {
+function autopilotProcesses(): AutopilotProcess[] {
   // No reliable pgrep on Windows; rely on the lock-file signal there.
-  if (process.platform === "win32") return false;
-  const r = spawnSync("pgrep", ["-f", "gbrain autopilot"], { encoding: "utf-8", timeout: 3_000 });
-  return r.status === 0 && (r.stdout || "").trim().length > 0;
+  if (process.platform === "win32") return [];
+  const found = spawnSync("pgrep", ["-f", "gbrain autopilot"], { encoding: "utf-8", timeout: 3_000 });
+  const pids = found.status === 0 ? (found.stdout || "").split(/\s+/).filter(p => /^\d+$/.test(p)) : [];
+  if (pids.length === 0) return [];
+  const ps = spawnSync("ps", ["-o", "pid=,args=", "-p", pids.join(",")], { encoding: "utf-8", timeout: 3_000 });
+  const commands = new Map<string, string>();
+  for (const line of (ps.stdout || "").split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(.*\S)/);
+    if (m) commands.set(m[1], m[2]);
+  }
+  return pids.map(pid => ({
+    pid: Number(pid),
+    command: (commands.get(pid) ?? "command unavailable").replace(/\/\/[^\s/@]+@/g, "//***@").slice(0, 200),
+  }));
 }
 
 // ── Capability detection (E4 + Codex: per-process memo, no persistent cache) ─

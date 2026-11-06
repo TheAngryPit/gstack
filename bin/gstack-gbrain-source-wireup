@@ -39,6 +39,7 @@
 # Depends on: bun (already a gstack dependency), gbrain, git.
 
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_BIN="$SCRIPT_DIR/gstack-config"
@@ -222,7 +223,7 @@ ensure_worktree() {
 # is not JSON.
 source_local_path() {
   gbrain sources list --json 2>/dev/null \
-    | GB_SOURCE_ID="$1" bun -e '
+    | GB_SOURCE_ID="$1" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e '
         const raw = await Bun.stdin.text();
         try {
           const s = (JSON.parse(raw).sources || []).find((x) => x.id === process.env.GB_SOURCE_ID);

@@ -24,6 +24,7 @@
 # GSTACK_CHROMIUM_NO_SANDBOX=1 for the probe. Bash 3.2 plus POSIX tools.
 BASH_COMPAT=50
 set -u
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)" || { echo "gstack-browser-ensure: cannot resolve the install root" >&2; exit 1; }
 DOCS="https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#browser-ensure-failed"
@@ -58,7 +59,7 @@ probe() {
     else PROBE_OUT=$(cd "$ROOT" && node -e "$PROBE" </dev/null 2>&1); PROBE_RC=$?; fi
   elif command -v bun >/dev/null 2>&1; then
     ENGINE=bun
-    PROBE_OUT=$(cd "$ROOT" && bun -e "$PROBE" </dev/null 2>&1); PROBE_RC=$?
+    PROBE_OUT=$(cd "$ROOT" && bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "$PROBE" </dev/null 2>&1); PROBE_RC=$?
   else
     fail "neither node nor bun is on PATH to launch Chromium" "install Node.js (https://nodejs.org) or Bun, then re-run $0"
   fi
@@ -73,7 +74,7 @@ if [ ! -d "$ROOT/node_modules/playwright" ]; then
   [ "$CHECK" -eq 1 ] && fail "playwright is not installed under $ROOT/node_modules" "cd $ROOT && ./setup"
   command -v bun >/dev/null 2>&1 || fail "playwright is not installed under $ROOT/node_modules and bun is not on PATH" "install Bun, then cd $ROOT && ./setup"
   log "gstack-browser-ensure: installing node modules (bun install)..."
-  (cd "$ROOT" && { bun install --frozen-lockfile >/dev/null 2>&1 || bun install >/dev/null; }) || fail "bun install failed under $ROOT" "cd $ROOT && bun install, then re-run $0"
+  (cd "$ROOT" && { bun install --production --frozen-lockfile >/dev/null 2>&1 || { bun install --lockfile-only >/dev/null && bun install --production --frozen-lockfile >/dev/null; }; }) || fail "bun install failed under $ROOT" "cd $ROOT && bun install --production --frozen-lockfile, then re-run $0"
 fi
 
 probe

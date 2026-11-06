@@ -40,6 +40,7 @@
 BASH_COMPAT=50
 
 set -u
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 usage() {
   sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'
@@ -92,7 +93,14 @@ row() {
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 # clamp CHARSET MAX — stdin's first line reduced to CHARSET, at most MAX chars.
-clamp() { head -1 | tr -cd "$1" | cut -c1-"$2"; }
+# Builtins only, bytewise like tr and cut: every caller feeds it stdin, and on
+# Windows a head | tr | cut chain costs three process starts (~60 ms).
+clamp() { local LC_ALL=C line pat="[^$1]"; IFS= read -r line; line=${line//$pat/}; printf '%s' "${line:0:$2}"; }
+
+# cfg KEY DEFAULT — sets _cfg to KEY as `gstack-config get` reads it, or DEFAULT
+# (gstack-config's own default) when unset. In-process through
+# gstack-state-root.sh, sourced below: a gstack-config start costs ~200 ms on Windows.
+cfg() { local sr_var=${_gstack_sr_var-}; gstack_config_select "$1" 2>/dev/null; _gstack_sr_var=$sr_var; _cfg="${_gstack_cfg_value:-$2}"; }
 
 # epoch_of VALUE — epoch seconds for an epoch or an ISO-8601 UTC time; "" otherwise.
 epoch_of() {
@@ -201,7 +209,7 @@ check_hooks() {
 check_codex() {
   local reviews probe="$BIN/gstack-codex-probe" sel rc model src
   CODEX_READY=0
-  reviews=$("$BIN/gstack-config" get codex_reviews 2>/dev/null || echo enabled)
+  cfg codex_reviews enabled; reviews=$_cfg
   if [ "$reviews" = disabled ]; then
     row "not configured" codex "codex_reviews disabled; $CODEX_FEATURES skip Codex" "$BIN/gstack-config set codex_reviews enabled"
     return
@@ -267,8 +275,8 @@ check_codex_probe() {
 }
 
 check_sync() {
-  local mode file json status held drainable drain push queue=0 now f detail case_names fix="$BIN/gstack-brain-sync --status"
-  mode=$("$BIN/gstack-config" get artifacts_sync_mode 2>/dev/null || echo off)
+  local mode file json json_held status held drainable drain push queue=0 now f detail case_names fix="$BIN/gstack-brain-sync --status"
+  cfg artifacts_sync_mode off; mode=$_cfg
   if [ ! -d "$STATE_ROOT/.git" ]; then
     row "not configured" "artifacts sync" "off; cross-machine artifacts sync is unavailable" "$BIN/gstack-artifacts-init"
     return
@@ -277,6 +285,11 @@ check_sync() {
     row "not configured" "artifacts sync" "artifacts_sync_mode off; cross-machine artifacts sync is unavailable" "$BIN/gstack-config set artifacts_sync_mode artifacts-only"
     return
   fi
+  for f in "$STATE_ROOT/developer-profile.json" "$STATE_ROOT"/projects/*/decisions.active.json; do
+    [ -f "$f" ] && grep -qE '^(<{7}|>{7})( |$)' "$f" 2>/dev/null || continue
+    row warn "artifacts sync" "${f#"$STATE_ROOT"/} holds git conflict markers and does not parse" "repair the file, or restore it from git -C $STATE_ROOT log -- ${f#"$STATE_ROOT"/}"
+    return
+  done
   for f in "$STATE_ROOT/.brain-queue.d"/*.json; do [ -f "$f" ] && queue=$((queue + 1)); done
   for f in "$STATE_ROOT/.brain-queue.jsonl" "$STATE_ROOT/.brain-queue.jsonl.migrating"; do
     [ -f "$f" ] && queue=$((queue + $(wc -l < "$f" | tr -d ' ')))
@@ -298,8 +311,15 @@ check_sync() {
   [ -n "$push" ] || push=$(epoch_of "$(head -1 "$STATE_ROOT/.brain-last-push" 2>/dev/null)")
   now=$(date +%s)
   case "$status" in
-    held) row warn "artifacts sync" "status held${held:+ ($held file(s) held by the secret scanner)}" "$fix"; return ;;
-    blocked) row warn "artifacts sync" "status blocked (a re-scan still flags staged content)" "$fix"; return ;;
+    held)
+      json_held=$(printf '%s' "$json" | grep -o '"rule": *"invalid-json"' | wc -l | tr -d ' ')
+      if [ "${json_held:-0}" -gt 0 ]; then
+        row warn "artifacts sync" "status held ($json_held synced file(s) are not valid JSON${held:+; $held held in all})" "$fix"
+      else
+        row warn "artifacts sync" "status held${held:+ ($held file(s) held by the secret scanner)}" "$fix"
+      fi
+      return ;;
+    blocked) row warn "artifacts sync" "status blocked (nothing was committed; --status names the cause)" "$fix"; return ;;
     push_failed|error|unknown) row warn "artifacts sync" "status $status" "$fix"; return ;;
   esac
   if [ -n "$case_names" ]; then
@@ -372,7 +392,7 @@ check_binaries() {
 check_cso() {
   local file="$SRC/bin/.gstack-cso-build-result" result stage reason installed diag usable=0
   [ -x "$SRC/bin/gstack-cso-launcher$EXE" ] && [ -x "$SRC/bin/gstack-cso-core$EXE" ] && usable=1
-  cso_field() { sed -n "s/^$1=//p" "$file" 2>/dev/null | head -1 | clamp ' -~' 200; }
+  cso_field() { sed -n "s/^$1=//p" "$file" 2>/dev/null | clamp ' -~' 200; }
   result=$(cso_field result) stage=$(cso_field stage) reason=$(cso_field reason) installed=$(cso_field installed) diag=$(cso_field diagnostic)
   case "$result" in
     ok) if [ "$usable" -eq 1 ]; then row ok cso "native helper $installed"
@@ -512,7 +532,7 @@ check_windows_bash() {
     row warn "windows bash" "not checked: bun not found" "install Bun (see the bun row), then rerun $BIN/gstack-doctor"
     return
   fi
-  out=$(bun "$BIN/gstack-windows-bash.ts" ${GSTACK_DOCTOR_BASH_PROBE:+--probe "$GSTACK_DOCTOR_BASH_PROBE"} </dev/null 2>&1)
+  out=$(bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$BIN/gstack-windows-bash.ts" ${GSTACK_DOCTOR_BASH_PROBE:+--probe "$GSTACK_DOCTOR_BASH_PROBE"} </dev/null 2>&1)
   rc=$?
   out=$(printf '%s\n' "$out" | tr -d '\000-\010\013-\037')
   bash=$(printf '%s\n' "$out" | sed -n 's/^WINDOWS_BASH: //p' | head -1)
@@ -602,7 +622,7 @@ if [ "$CHECK" -eq 1 ]; then
   exit $?
 fi
 
-echo "gstack doctor $(head -1 "$ROOT/VERSION" 2>/dev/null | clamp '0-9A-Za-z.+-' 40)"
+echo "gstack doctor $(clamp '0-9A-Za-z.+-' 40 2>/dev/null <"$ROOT/VERSION")"
 check_install
 check_rescue_refs
 check_state_root

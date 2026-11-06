@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fixtureDocs } from './helpers/docsync-fixture';
 import { docsCommandAllowed, docsNativeInterface, docsPreambleCommands, docsToolFailures } from './helpers/docsync-observer';
+import { docsCapsCommand } from './helpers/docsync-interface';
 import { parseNDJSON, type SkillTestResult } from './helpers/session-runner';
 
 let fixture: ReturnType<typeof fixtureDocs>;
@@ -213,6 +214,39 @@ describe.skipIf(process.platform === 'win32')('candidate call at a missing binar
     } finally { fs.rmSync(missing, { recursive: true, force: true }); }
   });
 
+  // Gate 40323989742 slice 3 (ship-docsync-store): the parent read the usage at the
+  // declared path, mistyped the shard-rooted path on a second --help (exit 127), and
+  // went straight on to compare at the declared path. A help probe reads nothing the
+  // agent still has to recover, so the declared --help may precede the slip.
+  describe('captured run 40323989742 ship-docsync-store: a mistyped --help after the declared usage was read', () => {
+    const store = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-help-not-found-public.json'), 'utf8')) as
+      { calls: SkillTestResult['toolCalls'] };
+    const storeFailures = (calls: SkillTestResult['toolCalls']) => docsToolFailures(replay(calls), current, [publish], true);
+    const slip = () => store.calls.findIndex(call => call.output.startsWith('Exit code 127'));
+    const declaredHelp = () => store.calls.findIndex(call => /gstack-docs-candidate --help$/.test(call.input.command ?? '') && call.output.startsWith('usage'));
+
+    test('the capture passes; the mistyped --help alone is outside the interface', () => {
+      expect(slip()).toBeGreaterThan(declaredHelp());
+      expect(fill(store.calls[slip()].input.command)).toBe(`${missing}/.claude/skills/gstack/bin/gstack-docs-candidate --help`);
+      expect(docsCommandAllowed(fill(store.calls[slip()].input.command), current, [publish])).toBe(false);
+      expect(storeFailures(store.calls)).toEqual([]);
+    });
+
+    test('without any declared --help run, or with a failed one, the slip still fails', () => {
+      expect(storeFailures(store.calls.filter((_, index) => index !== declaredHelp()))).toContain('command outside declared docs observation interface');
+      const failed = store.calls.map((call, index) => index === declaredHelp() ? { ...call, output: 'Exit code 1\nboom' } : call);
+      expect(storeFailures(failed)).toContain('command outside declared docs observation interface');
+    });
+
+    test('an earlier declared run excuses only --help, never snapshot or compare', () => {
+      const compare = store.calls.findIndex(call => / compare /.test(call.input.command ?? '') && !call.output.startsWith('Exit code'));
+      const wrongCompare = { tool: 'Bash', input: { command: store.calls[compare].input.command.replace('{home}/.claude', '{shard}/.claude') },
+        output: notFound('{shard}/.claude/skills/gstack/bin/gstack-docs-candidate') };
+      expect(storeFailures([...store.calls, wrongCompare])).toContain('command outside declared docs observation interface');
+      expect(storeFailures([...store.calls.slice(0, compare), wrongCompare, ...store.calls.slice(compare)])).toEqual([]);
+    });
+  });
+
   test('only a candidate binary at an absolute literal path qualifies', () => {
     const declared = current.skills.split(path.sep).join('/');
     const skillEnd = `${missing}/.claude/skills/gstack/bin/gstack-skill-start --help`;
@@ -221,5 +255,58 @@ describe.skipIf(process.platform === 'win32')('candidate call at a missing binar
     const relative = 'missing/gstack-docs-candidate --help';
     expect(failures(replay([{ tool: 'Bash', input: { command: relative }, output: notFound('missing/gstack-docs-candidate') },
       { tool: 'Bash', input: { command: `${declared}/bin/gstack-docs-candidate --help` }, output: 'usage' }]))).toContain('command outside declared docs observation interface');
+  });
+});
+
+// Screen 40749421675 slice 13 (ship-docsync-stale-after, red on its call 16, green on the in-run rerun): the parent typed the
+// cap gate at the shard root ({shard}/.claude/..., exit 127), then ran it at the declared path, the slip the candidate excuses.
+describe.skipIf(process.platform === 'win32')('captured run 40749421675 ship-docsync-stale-after: the cap gate typed at the shard root', () => {
+  const captured = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-ship-receipt-not-found-public.json'), 'utf8')) as
+    { calls: SkillTestResult['toolCalls'] };
+  const actor = path.join(import.meta.dir, 'helpers/docsync-fault-actor.ts');
+  let current: ReturnType<typeof fixtureDocs>;
+  let missing: string;
+  beforeAll(() => {
+    current = fixtureDocs('current');
+    missing = path.join(current.home, 'missing-shard');
+  });
+  afterAll(() => current?.clean());
+  const fill = (text: string) => text.replaceAll('{shard}', missing).replaceAll('{home}', current.home).replaceAll('{actor}', actor);
+  const failures = (calls: SkillTestResult['toolCalls']) => docsToolFailures({ toolCalls: calls.map(call => ({ tool: call.tool, output: fill(call.output),
+    input: Object.fromEntries(Object.entries(call.input).map(([key, value]) => [key, typeof value === 'string' ? fill(value) : value])) })) } as SkillTestResult,
+  current, [actor]);
+  const slip = () => captured.calls.findIndex(call => call.output.startsWith('Exit code 127'));
+  const declared = () => captured.calls.findIndex(call => call.input.command === '{home}/.claude/skills/gstack/bin/gstack-ship-receipt docs-caps --base main');
+  const notFound = (binary: string) => `Exit code 127\n(eval):1: no such file or directory: ${binary}`;
+  const outside = 'command outside declared docs observation interface';
+
+  test('the capture passes; the mistyped cap gate alone is outside the interface', () => {
+    expect(declared()).toBe(slip() + 1);
+    expect(fill(captured.calls[slip()].input.command)).toBe(`${missing}/.claude/skills/gstack/bin/gstack-ship-receipt docs-caps --base main`);
+    expect(fill(captured.calls[declared()].input.command)).toBe(docsCapsCommand(current.skills.split(path.sep).join('/')));
+    expect(docsCommandAllowed(fill(captured.calls[slip()].input.command), current, [actor])).toBe(false);
+    expect(failures(captured.calls)).toEqual([]);
+  });
+
+  test('without a later successful declared cap gate the slip still fails', () => {
+    const rest = captured.calls.filter((_, index) => index !== declared());
+    expect(failures(rest)).toContain(outside);
+    expect(failures([captured.calls[declared()], ...rest])).toContain(outside);
+    expect(failures(captured.calls.map((call, index) => index === declared() ? { ...call, output: 'Exit code 1\nboom' } : call))).toContain(outside);
+  });
+
+  test('another subcommand, another shell message or a binary that exists at the wrong path still fails', () => {
+    const wrong = captured.calls[slip()];
+    const json = (call: SkillTestResult['toolCalls'][number]) => ({ ...call, input: { command: `${call.input.command} --json` } });
+    expect(failures(captured.calls.map((call, index) => index === slip() || index === declared() ? json(call) : call))).toEqual([outside, outside]);
+    for (const output of [`Exit code 127\n(eval):1: command not found: {shard}/.claude/skills/gstack/bin/gstack-ship-receipt`, 'Exit code 1\nerror',
+      notFound('{shard}/.claude/skills/gstack/bin/gstack-docs-candidate'), `${wrong.output}\nextra`])
+      expect(failures(captured.calls.map((call, index) => index === slip() ? { ...call, output } : call)), output).toContain(outside);
+    const binary = fill(wrong.input.command.split(' ')[0]);
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, 'cap gate stand-in\n');
+    try {
+      expect(failures(captured.calls)).toContain(outside);
+    } finally { fs.rmSync(missing, { recursive: true, force: true }); }
   });
 });

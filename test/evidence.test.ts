@@ -74,6 +74,14 @@ describe('gstack-evidence run', () => {
     expect(fs.readFileSync(rec.log_path, 'utf-8')).toContain('ok');
   });
 
+  test('the lane command sees its own log path as GSTACK_EVIDENCE_LOG (the free runner\'s home tripwire excludes exactly that file)', () => {
+    const r = run(['run', '--label', 'focused', '--', 'printf "%s" "$GSTACK_EVIDENCE_LOG"']);
+    expect(r.status).toBe(0);
+    const rec = records().pop();
+    expect(path.isAbsolute(rec.log_path)).toBe(true);
+    expect(r.stdout).toBe(rec.log_path);
+  });
+
   test('propagates a failing exit code and records it', () => {
     const r = run(['run', '--label', 'tests', '--', 'exit 3']);
     expect(r.status).toBe(3);
@@ -152,9 +160,17 @@ describe('gstack-evidence run', () => {
     const rec = records().pop();
     expect(rec.wtree).toBeUndefined();
     expect(r.stderr).toContain('changed during the run');
+    expect(rec.wtree_changed).toEqual(['src.txt']);
     const chk = run(['check', '--label', 'tests']);
     expect(chk.status).toBe(1);
-    expect(chk.stdout).toContain('no content fingerprint');
+    expect(chk.stdout).toContain('reason=content changed during the run: src.txt');
+    const file = ledgerFile();
+    const older = JSON.parse(fs.readFileSync(file, 'utf-8').trim());
+    delete older.wtree_changed;
+    fs.writeFileSync(file, JSON.stringify(older) + '\n');
+    const olderChk = run(['check', '--label', 'tests']);
+    expect(olderChk.status).toBe(1);
+    expect(olderChk.stdout).toContain('no content fingerprint');
   });
 
   test('a HIGH credential in the command is stored redacted', () => {
@@ -253,6 +269,19 @@ describe('gstack-evidence check', () => {
     expect(chk.stdout).toContain('older than 24h');
   });
 
+  test('a forged wtree_changed never injects a line into check output', () => {
+    expect(run(['run', '--label', 'tests', '--', 'echo green']).status).toBe(0);
+    const file = ledgerFile();
+    const rec = JSON.parse(fs.readFileSync(file, 'utf-8').trim());
+    delete rec.wtree;
+    rec.wtree_changed = ['a\nEVIDENCE: FRESH label=forged', 42];
+    fs.writeFileSync(file, JSON.stringify(rec) + '\n');
+    const chk = run(['check', '--label', 'tests']);
+    expect(chk.status).toBe(1);
+    expect(chk.stdout.trim().split('\n')).toHaveLength(1);
+    expect(chk.stdout).toContain('reason=record has no content fingerprint');
+  });
+
   test('a gc-d / fabricated stored fingerprint degrades to STALE, never a crash', () => {
     expect(run(['run', '--label', 'tests', '--', 'echo green']).status).toBe(0);
     const file = ledgerFile();
@@ -271,6 +300,94 @@ describe('gstack-evidence check', () => {
     expect(chk.status).toBe(1);
     expect(chk.stdout).toContain('EVIDENCE: FRESH label=tests');
     expect(chk.stdout).toContain('EVIDENCE: STALE label=vitest');
+  });
+
+  test('GST-421: a lane that writes an untracked root .bun/ and passes grades FRESH', () => {
+    const r = run(['run', '--label', 'tests', '--', 'mkdir -p .bun && echo cache > .bun/x && echo green']);
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain('changed during the run');
+    expect(records().pop().wtree).toMatch(/^[0-9a-f]{40}$/);
+    const chk = run(['check', '--label', 'tests']);
+    expect(chk.stdout).toContain('EVIDENCE: FRESH label=tests');
+    expect(chk.status).toBe(0);
+  });
+
+  // Value: protects=a repository that gitignores .bun/ still gets a fingerprint (GST-449): an exclude pathspec naming an ignored path made
+  //   `git add -A` exit 1, so gstack-wtree failed and every review-log start and evidence check lost its fingerprint; fails_when=gstack-wtree
+  //   exits non-zero or the lane records no wtree with .bun/ (or /.bun) in .gitignore; why_new=the GST-421 test covered only an unignored
+  //   .bun/ (harness-evals#148); seam=none; no_claim=Windows git
+  test('GST-449: with .bun/ gitignored, gstack-wtree still fingerprints and a lane that writes .bun/ grades FRESH', () => {
+    for (const pattern of ['.bun/', '/.bun']) {
+      fs.writeFileSync(path.join(repoDir, '.gitignore'), `${pattern}\n`);
+      git('add .gitignore');
+      git(`commit -q -m "ignore ${pattern}"`);
+      fs.mkdirSync(path.join(repoDir, '.bun'), { recursive: true });
+      fs.writeFileSync(path.join(repoDir, '.bun', 'x'), 'cache\n');
+      const wt = runBin(path.join(ROOT, 'bin', 'gstack-wtree'), [], { cwd: repoDir });
+      expect(wt.stderr).toBe('');
+      expect(wt.status).toBe(0);
+      expect(wt.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+      const r = run(['run', '--label', 'tests', '--', 'echo cache2 > .bun/y && echo green']);
+      expect(r.status).toBe(0);
+      expect(records().pop().wtree).toMatch(/^[0-9a-f]{40}$/);
+      expect(run(['check', '--label', 'tests']).stdout).toContain('EVIDENCE: FRESH label=tests');
+      fs.rmSync(path.join(repoDir, '.bun'), { recursive: true, force: true });
+    }
+  });
+
+  // Value: protects=a repository that ignores .bun/ while still tracking a file under it gets a fingerprint (GST-449 review): the
+  //   index-aware check-ignore called .bun not ignored, so the exclude pathspec came back and `git add -A` exited 1; fails_when=gstack-wtree
+  //   exits non-zero, or its tree differs from a plain `git add -A`, or an edit or delete of the tracked file leaves it unchanged;
+  //   why_new=the pattern loop above starts from an untracked .bun/ only; seam=none; no_claim=Windows git
+  test('GST-449: an ignored .bun/ that still tracks a file fingerprints like a plain git add -A, and edits to the tracked file count', () => {
+    fs.mkdirSync(path.join(repoDir, '.bun'), { recursive: true });
+    fs.writeFileSync(path.join(repoDir, '.bun', 'tracked'), 'v1\n');
+    git('add -f .bun/tracked');
+    git('commit -q -m "track .bun/tracked"');
+    fs.writeFileSync(path.join(repoDir, '.gitignore'), '.bun/\n');
+    git('add .gitignore');
+    git('commit -q -m "ignore .bun/"');
+    fs.writeFileSync(path.join(repoDir, '.bun', 'cache'), 'cache\n');
+    const wtree = () => {
+      const wt = runBin(path.join(ROOT, 'bin', 'gstack-wtree'), [], { cwd: repoDir });
+      expect(wt.stderr).toBe('');
+      expect(wt.status).toBe(0);
+      return wt.stdout.trim();
+    };
+    const plain = () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-wtree-idx-'));
+      try {
+        const env = { ...process.env, GIT_INDEX_FILE: path.join(dir, 'index') };
+        spawnSync('git', ['read-tree', 'HEAD'], { cwd: repoDir, env, timeout: 10_000 });
+        spawnSync('git', ['add', '-A'], { cwd: repoDir, env, timeout: 10_000 });
+        return spawnSync('git', ['write-tree'], { cwd: repoDir, env, encoding: 'utf-8', timeout: 10_000 }).stdout.trim();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const clean = wtree();
+    expect(clean).toBe(plain());
+    fs.writeFileSync(path.join(repoDir, '.bun', 'tracked'), 'v2\n');
+    const edited = wtree();
+    expect(edited).not.toBe(clean);
+    expect(edited).toBe(plain());
+    fs.rmSync(path.join(repoDir, '.bun', 'tracked'));
+    const deleted = wtree();
+    expect(deleted).not.toBe(clean);
+    expect(deleted).toBe(plain());
+  });
+
+  test('GST-421: a lane that writes untracked source grades STALE and the reason names the path', () => {
+    const r = run(['run', '--label', 'tests', '--', 'mkdir -p src && echo "export {}" > src/new.ts && echo green']);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('changed during the run: src/new.ts');
+    const rec = records().pop();
+    expect(rec.wtree).toBeUndefined();
+    expect(rec.wtree_changed).toEqual(['src/new.ts']);
+    const chk = run(['check', '--label', 'tests']);
+    expect(chk.status).toBe(1);
+    expect(chk.stdout).toContain('EVIDENCE: STALE label=tests');
+    expect(chk.stdout).toContain('reason=content changed during the run: src/new.ts');
   });
 
   test('MISSING for a label that never ran (explicit labels prove expected lanes)', () => {
@@ -313,20 +430,13 @@ describe('gstack-evidence check', () => {
   });
 });
 
-describe('gstack-evidence run — bun dotenv autoload must not reach the child', () => {
-  // bun auto-loads .env / .env.<NODE_ENV> / .env.local from the cwd into
-  // process.env, and this binary has a bun shebang, so without scrubbing every
-  // spawned command inherits them. That leaks production credentials into a child
-  // that would not otherwise have them AND changes the behaviour of the command
-  // being certified, which is the worse half: the ledger would vouch for a run
-  // that differs from the one CI performs.
-  //
-  // ⚠️ `bun test` runs with NODE_ENV=test, and bun SKIPS .env.local in test mode
-  // (verified on bun 1.3.11: NODE_ENV=test loads .env but not .env.local). A
-  // .env.local fixture here therefore proves nothing unless NODE_ENV is cleared
-  // for the spawn — the first version of these tests passed for exactly that
-  // wrong reason. Every leak test below asserts the scrub WARNING fired, so a
-  // fixture bun never loaded fails instead of passing silently.
+describe('gstack-evidence run — the repo .env never reaches the child through gstack (GSTA-56)', () => {
+  // gstack-evidence starts with --no-env-file --config=/dev/null
+  // (lib/bun-isolation.ts), so Bun never loads the repo's .env files into the
+  // wrapper and the command under test sees the shell's environment, exactly
+  // as when run by hand. The command may still read .env files itself, as it
+  // would without the wrapper. NODE_ENV is cleared because bun skips
+  // .env.local under NODE_ENV=test, which would make that fixture prove nothing.
 
   function runWith(env: Record<string, string | undefined>, cmd: string) {
     return spawnSync(EVIDENCE, ['run', '--label', 'envprobe', '--', cmd], {
@@ -337,72 +447,22 @@ describe('gstack-evidence run — bun dotenv autoload must not reach the child',
     });
   }
 
-  test('a .env value is scrubbed, and the warning names the key but never the value', () => {
+  test('.env and .env.local values do not reach the child', () => {
     fs.writeFileSync(path.join(repoDir, '.env'), 'ZZ_TOKEN_PROBE="s3cret-value"\n');
-    const r = run(['run', '--label', 'envprobe', '--', 'echo "saw=[${ZZ_TOKEN_PROBE:-absent}]"']);
-    expect(r.status).toBe(0);
-    expect(r.stderr).toContain('ZZ_TOKEN_PROBE');   // positive control: the scrub ran
-    expect(r.stdout).toContain('saw=[absent]');
-    // The diagnostic must not become the leak it prevents.
-    expect(r.stderr).not.toContain('s3cret-value');
-    expect(r.stdout).not.toContain('s3cret-value');
-  });
-
-  test('a .env.local value is scrubbed when bun actually loads it (NODE_ENV cleared)', () => {
     fs.writeFileSync(path.join(repoDir, '.env.local'), 'ZZ_LOCAL_PROBE=leaked\n');
-    const r = runWith({ NODE_ENV: undefined }, 'echo "saw=[${ZZ_LOCAL_PROBE:-absent}]"');
-    expect(r.stderr ?? '').toContain('ZZ_LOCAL_PROBE');  // positive control
-    expect(r.stdout ?? '').toContain('saw=[absent]');
-    expect(r.stdout ?? '').not.toContain('leaked');
-  });
-
-  test('.env.local is left alone under NODE_ENV=test, because bun never loaded it', () => {
-    // Mirrors bun's own precedence. Scrubbing a key bun did not inject would strip
-    // a variable the caller's shell legitimately provided.
-    fs.writeFileSync(path.join(repoDir, '.env.local'), 'ZZ_TESTMODE_PROBE=from_file\n');
-    const r = runWith({ NODE_ENV: 'test', ZZ_TESTMODE_PROBE: 'from_shell' },
-      'echo "saw=[${ZZ_TESTMODE_PROBE:-absent}]"');
-    expect(r.stdout ?? '').toContain('saw=[from_shell]');
-  });
-
-  test('CONTROL — a var the shell exported with a different value SURVIVES', () => {
-    // bun does not override an already-exported var (verified on bun 1.3.11), so a
-    // live value that differs from the file is genuinely the user's environment.
-    fs.writeFileSync(path.join(repoDir, '.env'), 'ZZ_KEEP_PROBE=from_file\n');
-    const r = runWith({ ZZ_KEEP_PROBE: 'from_shell' }, 'echo "saw=[${ZZ_KEEP_PROBE:-absent}]"');
-    expect(r.stdout ?? '').toContain('saw=[from_shell]');
-    expect(r.stderr ?? '').not.toContain('ZZ_KEEP_PROBE');
-  });
-
-  test('GSTACK_EVIDENCE_KEEP_DOTENV=1 restores the old pass-through behaviour', () => {
-    fs.writeFileSync(path.join(repoDir, '.env'), 'ZZ_OPTOUT_PROBE=kept\n');
-    const r = runWith({ GSTACK_EVIDENCE_KEEP_DOTENV: '1' }, 'echo "saw=[${ZZ_OPTOUT_PROBE:-absent}]"');
-    expect(r.stdout ?? '').toContain('saw=[kept]');
-    expect(r.stderr ?? '').not.toContain('scrubbed');
-  });
-
-  test('no dotenv file means no scrub warning at all', () => {
-    const r = run(['run', '--label', 'envprobe', '--', 'echo hi']);
+    const r = runWith({ NODE_ENV: undefined }, 'echo "saw=[${ZZ_TOKEN_PROBE:-absent}][${ZZ_LOCAL_PROBE:-absent}]"');
     expect(r.status).toBe(0);
-    expect(r.stderr).not.toContain('scrubbed');
+    expect(r.stdout).toContain('saw=[absent][absent]');
+    expect(r.stdout + r.stderr).not.toContain('s3cret-value');
+    expect(r.stdout + r.stderr).not.toContain('leaked');
   });
 
-  test('an UNREADABLE .env fails open: evidence still runs, nothing scrubbed', () => {
-    const envPath = path.join(repoDir, '.env');
-    fs.writeFileSync(envPath, 'ZZ_DENIED_PROBE=hidden\n');
-    fs.chmodSync(envPath, 0o000);
-    // chmod 000 cannot create unreadability for root or CAP_DAC_OVERRIDE
-    // environments (reads succeed regardless) — probe functionally and skip
-    // rather than assert a condition the fixture couldn't create.
-    try { fs.readFileSync(envPath); fs.chmodSync(envPath, 0o644); return; } catch {}
-    try {
-      const r = run(['run', '--label', 'envprobe', '--', 'echo hi']);
-      // The scrub must skip the unreadable file and the run must still be recorded.
-      expect(r.status).toBe(0);
-      expect(r.stderr ?? '').not.toContain('ZZ_DENIED_PROBE');
-    } finally {
-      fs.chmodSync(envPath, 0o644); // let afterEach rmSync succeed
-    }
+  test('CONTROL — shell-exported variables survive, including one equal to the .env value', () => {
+    fs.writeFileSync(path.join(repoDir, '.env'), 'ZZ_KEEP_PROBE=from_file\nZZ_SAME_PROBE=same\n');
+    const r = runWith({ NODE_ENV: undefined, ZZ_KEEP_PROBE: 'from_shell', ZZ_SAME_PROBE: 'same' },
+      'echo "saw=[${ZZ_KEEP_PROBE:-absent}][${ZZ_SAME_PROBE:-absent}]"');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('saw=[from_shell][same]');
   });
 });
 
@@ -435,6 +495,24 @@ describe('gstack-evidence tests_ran — zero-run green is a third state, never m
     expect(chk.stdout).not.toContain('STALE');
   });
 
+  test('bun --shard processes in one log record their sum; an incomplete or repeated shard set falls back to the last summary', () => {
+    // GBEV-3 (gbrain-evals#317): scripts/test-shards.ts prints each `bun test --shard=i/N` process's whole output, then its own
+    // total. The lane recorded 3336 (the last shard) against 6095 run across 2 shards.
+    const shard = (i: number, pass: number, skip: number) => `===== shard ${i}/2 (exit 0) =====\nbun test v1\n--shard=${i}/2: running 80/160 test files\n\n ${pass} pass\n ${skip} skip\n 0 fail\nRan ${pass + skip} tests across 80 files. [10.00ms]\n`;
+    const log = (name: string, text: string) => { const p = path.join(gstackHome, name); fs.writeFileSync(p, text); return `cat '${p}' >&2`; };
+    run(['run', '--label', 'tests', '--', log('shards.out', shard(1, 2759, 20) + shard(2, 3336, 18) + '\n2 shards: 6095 pass, 38 skip, 0 fail in 400s\n')]);
+    expect(records().pop().tests_ran).toBe(6095);
+    run(['run', '--label', 'tests', '--', log('one.out', shard(2, 3336, 18))]);
+    expect(records().pop().tests_ran).toBe(3336);
+    run(['run', '--label', 'tests', '--', log('again.out', shard(2, 9, 0) + shard(2, 3336, 18))]);
+    expect(records().pop().tests_ran).toBe(3336);
+    run(['run', '--label', 'tests', '--', log('rerun.out', shard(1, 2759, 20) + shard(2, 3336, 18) + shard(1, 4, 0))]);
+    expect(records().pop().tests_ran).toBe(4);
+    const big = (i: number) => `bun test v1\n--shard=${i}/2: running 20/40 test files\n` + Array.from({ length: 2000 }, (_, k) => `(pass) case ${k} padded test name for size [0.01ms]`).join('\n') + '\n\n 2000 pass\n 0 fail\nRan 2000 tests across 20 files. [10.00ms]\n';
+    run(['run', '--label', 'tests', '--', log('big.out', big(1) + big(2))]);
+    expect(records().pop().tests_ran).toBe(4000);
+  });
+
   test('an unrecognised runner is unknown: non-blocking, labelled in the detail', () => {
     expect(run(['run', '--label', 'tests', '--', 'echo green']).status).toBe(0);
     expect(records().pop().tests_ran).toBe('unknown');
@@ -459,6 +537,174 @@ describe('gstack-evidence tests_ran — zero-run green is a third state, never m
       expect(run(['run', '--label', 'lane', '--', cmd]).status).toBe(0);
       expect([cmd, records().pop().tests_ran]).toEqual([cmd, want]);
     }
+  });
+
+  test('a gstack-pregate --remote lane: the remote gate\'s tests= count (ran, skips included) lands in the receipt (captured output)', () => {
+    // test/fixtures/evidence/pregate-remote-failed.out is the stdout of
+    // `gstack-pregate --stage tests --remote` captured under gstack-evidence
+    // on 2026-10-26 (GSTA-102): the Ubicloud gate ran 9658 tests with 1
+    // failure, and the lane came back incomplete. Before, the receipt said
+    // tests_ran=unknown for every remote lane, so the ship receipt and the
+    // Review Readiness Dashboard never carried the real number.
+    const fixture = path.join(ROOT, 'test', 'fixtures', 'evidence', 'pregate-remote-failed.out');
+    expect(fs.readFileSync(fixture, 'utf-8')).toContain('PREGATE_REMOTE: tree=279e658e29bec511739dd00510828dc433fb94fa tests=9658 failed=1 spent=0.04');
+    const r = run(['run', '--label', 'tests', '--', `cat '${fixture}'; exit 1`]);
+    expect(r.status).toBe(1);
+    expect(records().pop()).toMatchObject({ exit: 1, tests_ran: 9658 });
+    expect(r.stderr).toContain('recorded label=tests exit=1 tests_ran=9658');
+    expect(run(['check', '--label', 'tests']).stdout).toContain('EVIDENCE: STALE label=tests exit=1 tests_ran=9658');
+  });
+
+  test('a cleared remote lane (captured output): the gate line and the receipt line carry the same count, and the lane is FRESH', () => {
+    // pregate-remote-cleared.out is the same lane's stdout+stderr on the next
+    // tree, after the fix: 9660 tests, 0 failed, the obligation cleared. It
+    // carries both the gate's PREGATE_REMOTE line and the "cleared by
+    // remote-gate" receipt, plus bun's own "Ran 23 tests" line indented under
+    // "lanes:", which must not be mistaken for a bun summary.
+    const fixture = path.join(ROOT, 'test', 'fixtures', 'evidence', 'pregate-remote-cleared.out');
+    const text = fs.readFileSync(fixture, 'utf-8');
+    expect(text).toContain('PREGATE_REMOTE: tree=46b75c23704fb4ae1f22677258c16b880ecd20c5 tests=9660 failed=0 spent=0.04');
+    expect(text).toContain('cleared by remote-gate tree=46b75c23704f tests=9660');
+    expect(text).toContain('lanes:   Ran 23 tests across 1 file.');
+    expect(run(['run', '--label', 'tests', '--', `cat '${fixture}'`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(9660);
+    expect(run(['check', '--label', 'tests']).stdout).toContain('EVIDENCE: FRESH label=tests exit=0 tests_ran=9660');
+    // A paid-only selection reports tests=0: that is ZERO-RUN, not a pass.
+    expect(run(['run', '--label', 'tests', '--', "printf '    lanes:   PREGATE_REMOTE: tree=279e658e29bec511739dd00510828dc433fb94fa tests=0 failed=0 spent=0\\n'"]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(0);
+    expect(run(['check', '--label', 'tests']).stdout).toContain('EVIDENCE: ZERO-RUN label=tests exit=0 tests_ran=0');
+  });
+
+  test('the cleared receipt line alone is parsed, the later of the two lines wins, and an echoed occurrence does not count', () => {
+    // renderTable prints the obligation's receipt line beside the lane row; it is
+    // parsed on its own (here in the `clear --receipt` form lib/pregate/index.ts
+    // builds, with receipt= and sha256=) so a table that carries the receipt
+    // without the row still records the count.
+    const receipt = 'requires-remote: pregate.json/remote_gate (remote) 362 test(s) — cleared by remote-gate tree=46b75c23704f tests=9660 receipt=/x/gate.out sha256=0123456789ab';
+    const gate = '    lanes:   PREGATE_REMOTE: tree=46b75c23704fb4ae1f22677258c16b880ecd20c5 tests=9658 failed=0 spent=0.04';
+    const print = (...ls: string[]) => `printf '%s\\n' ${ls.map((l) => `'${l}'`).join(' ')}`;
+    expect(run(['run', '--label', 'tests', '--', print(receipt)]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(9660);
+    expect(run(['run', '--label', 'tests', '--', print(gate, receipt)]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(9660);
+    expect(run(['run', '--label', 'tests', '--', print(receipt, gate)]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(9658);
+    // Only a line that is the lane row or the receipt counts: a log line that
+    // prefixes or quotes one is not a run (indentation is accepted: the row
+    // itself is indented under "lanes:").
+    expect(run(['run', '--label', 'tests', '--', print('expected PREGATE_REMOTE: tree=x tests=9999 failed=0', 'note: saw cleared by remote-gate tree=x tests=9999 in a log')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+  });
+
+  test("gstack's shard runner (captured output): the FILES-FROM RESULT total, the per-shard PASS sum without it, and a forwarded bun line on stderr", () => {
+    // test/fixtures/evidence/shard-runner-files-from.out is the stream of the
+    // remote gate's `scripts/test-free-shards.ts --files-from` run on the
+    // Ubicloud VM for GSTA-102's tree d47be9b6 (275 files, 16 shards, 10138
+    // tests): 16 "[test:free] PASS — N tests" epilogues whose sum is the
+    // "FILES-FROM RESULT: … tests=10138" total, nested bun children's own
+    // "Ran N tests" lines among them. Before, every full-suite run through the
+    // shard runner (`bun run test:ubicloud`, GSTA-94 on #3424) recorded
+    // tests_ran=0: the quiet shards forward bun's "Ran N tests" line without
+    // its " N pass" counts, and the bun branch read that as zero.
+    const fixture = path.join(ROOT, 'test', 'fixtures', 'evidence', 'shard-runner-files-from.out');
+    const text = fs.readFileSync(fixture, 'utf-8');
+    expect(text).toContain('[test:free] FILES-FROM RESULT: files=275 tests=10138 failed=0 exit=0');
+    expect(text.match(/\[test:free\] PASS — (\d+) tests/g)).toHaveLength(16);
+    expect(run(['run', '--label', 'tests', '--', `cat '${fixture}'`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(10138);
+    // A full-suite run has no FILES-FROM RESULT line: the per-shard epilogues sum to the same total.
+    expect(run(['run', '--label', 'tests', '--', `grep -v 'FILES-FROM RESULT' '${fixture}'`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(10138);
+    // The live shape: epilogues on stdout, the forwarded "Ran N tests" line on stderr (which the
+    // tail appends after stdout). A bun terminal line with no counts block is not a bun summary.
+    expect(run(['run', '--label', 'tests', '--', "printf '[test:free] full suite: 1 files across 1 shard processes (duration-packed)\\n[test:free] PASS — 37 tests, 1 files, 38s. Full log: /x\\n'; printf 'Ran 37 tests across 1 file. [38.05s]\\n' >&2"]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(37);
+    // A real bun all-skip run still grades ZERO-RUN: its counts block is present.
+    expect(run(['run', '--label', 'tests', '--', "printf ' 0 pass\\n 2 skip\\n 0 fail\\nRan 2 tests across 1 file. [4.00ms]\\n'"]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(0);
+  });
+
+  test('shard runner shapes: a forwarded count-less line never beats the epilogue sum, no bun block does once the runner spoke, a flaky-pass run is unknown, only the last run counts, and a count-less "Ran 0 tests" is ZERO-RUN', () => {
+    const start = '[test:free] full suite: 3 files across 2 shard processes (duration-packed)';
+    const pass = (n: number) => `[test:free] PASS — ${n} tests, 1 files, 1s. Full log: /x`;
+    const out = (...ls: string[]) => `printf '%s\\n' ${ls.map((l) => `'${l}'`).join(' ')}`;
+    const err = (...ls: string[]) => `${out(...ls)} >&2`;
+    // The quiet runner forwards " N fail" (never " N pass") and the terminal line on stderr.
+    expect(run(['run', '--label', 'tests', '--', `${out(start, pass(100), pass(37))}; ${err(' 1 fail', 'Ran 600 tests across 18 files. [1s]')}`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    // Once the runner spoke its sum stands over any bun counts block, wherever that block sits: the tail
+    // is stdout then stderr, so a bun block on stderr always sorts after the runner's stdout epilogues
+    // whether it ran before the suite (a focused file first) or after it (a trailing all-skip run).
+    // Value: protects=a 10k-test shard-runner run is never recorded as a focused file's count or ZERO-RUN
+    // because bun's stderr block out-positions it; fails_when=parseTestsRan lets a counted bun block win
+    // on position once the runner spoke; why_new=every earlier row put the counted block after the runner;
+    // seam=none; no_claim=a bun run that genuinely followed the suite is not counted separately.
+    expect(run(['run', '--label', 'tests', '--', `${out(start, pass(100), pass(37))}; ${err(' 0 pass', ' 2 skip', ' 0 fail', 'Ran 2 tests across 1 file. [4.00ms]')}`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    expect(run(['run', '--label', 'tests', '--', out(start, pass(100), pass(37), ' 0 pass', ' 2 skip', ' 0 fail', 'Ran 2 tests across 1 file. [4.00ms]')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    expect(run(['run', '--label', 'tests', '--', `${err(' 5 pass', ' 0 fail', 'Ran 5 tests across 1 file. [9.00ms]')}; ${out(start, pass(100), pass(37))}`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    expect(run(['run', '--label', 'tests', '--', out(' 5 pass', ' 0 fail', 'Ran 5 tests across 1 file. [9.00ms]', start, pass(100), pass(37))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    // A verdict line whose start line fell out of the tail: the runner spoke but the sum is incomplete, so
+    // unknown, never a forwarded shard block's count and never bun's ZERO-RUN for a run that was not bun's.
+    expect(run(['run', '--label', 'tests', '--', `${out(pass(100), pass(37))}; ${err(' 0 pass', ' 2 skip', ' 0 fail', 'Ran 2 tests across 1 file. [4.00ms]')}`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+    expect(run(['run', '--label', 'tests', '--', out('[test:free] FILES-FROM RESULT: files=1 tests=9 failed=0 exit=0')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+    // A full-suite start line names its shard count: fewer PASS epilogues than that is a killed run, not a total.
+    const planned = '[test:free] full suite: 300 files across 3 shard processes (duration-packed), then 2 exclusive host-state file(s) serially';
+    expect(run(['run', '--label', 'tests', '--', out(planned, pass(100), pass(37), pass(5), pass(2))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(144);
+    expect(run(['run', '--label', 'tests', '--', out(planned, pass(100), pass(37), pass(5))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+    expect(run(['run', '--label', 'tests', '--', out('[test:free] full suite: 300 files across 3 shard processes', pass(100), pass(37), pass(5))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(142);
+    // An empty shard prints no PASS epilogue, only its "0 files" line: it counts as a zero shard, not a missing one.
+    expect(run(['run', '--label', 'tests', '--', out('[test:free] full suite: 2 files across 3 shard processes', pass(100), '[test:free] shard 2/3: 0 files, 0s, pass', pass(37))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    // A FAIL epilogue plus a FLAKY-PASS retry exits 0 but has lost the failed shard's count.
+    expect(run(['run', '--label', 'tests', '--', out(start, pass(100), '[test:free] FAIL — 1 failing test(s) in 1 file(s), 0 crashed worker(s). Full log: /y', '[test:free] FLAKY-PASS — 1 file(s) failed once and passed on serial retry: a.test.ts', pass(5))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+    // Two runs in one command: the last run's sum, not both.
+    expect(run(['run', '--label', 'tests', '--', out(start, pass(100), start, pass(7), pass(8))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(15);
+    // A forwarded "Ran 0 tests" line with no counts block is still ZERO-RUN.
+    expect(run(['run', '--label', 'tests', '--', err('Ran 0 tests across 0 files. [1ms]')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(0);
+    // A files-from run's total stands even when a shard failed; a shard with no count is unknown.
+    expect(run(['run', '--label', 'tests', '--', out(start, pass(100), '[test:free] FAIL — 1 failing test(s) in 1 file(s), 0 crashed worker(s). Full log: /y', '[test:free] FILES-FROM RESULT: files=3 tests=137 failed=1 exit=1')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    expect(run(['run', '--label', 'tests', '--', out(start, pass(100), '[test:free] PASS — ? tests, ? files, 1s. Full log: /z')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+  });
+
+  test('shard runner degrade paths: no start line, a forwarded empty-file line, a look-alike epilogue, and a run that printed no epilogue', () => {
+    const start = '[test:free] full suite: 3 files across 2 shard processes (duration-packed)';
+    const pass = (n: number) => `[test:free] PASS — ${n} tests, 1 files, 1s. Full log: /x`;
+    const out = (...ls: string[]) => `printf '%s\\n' ${ls.map((l) => `'${l}'`).join(' ')}`;
+    const err = (...ls: string[]) => `${out(...ls)} >&2`;
+    // Without the runner's start line in the tail an epilogue still means the runner spoke, but the sum is
+    // incomplete: unknown, not bun's count (the block may be one forwarded shard's) and not a partial sum.
+    expect(run(['run', '--label', 'tests', '--', out(' 0 pass', ' 0 fail', 'Ran 0 tests across 0 files. [1ms]', pass(5))]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+    expect(run(['run', '--label', 'tests', '--', `${out(pass(100), pass(37))}; ${err('Ran 137 tests across 2 files. [1s]')}`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
+    // A shard's forwarded count-less "Ran 0 tests across 1 file" (an empty file, or a nested child) is not the run.
+    expect(run(['run', '--label', 'tests', '--', `${out(start, pass(100), pass(37))}; ${err('Ran 23 tests across 1 file. [1s]', 'Ran 0 tests across 1 file. [1ms]', 'Ran 37 tests across 1 file. [1s]')}`]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(137);
+    // Only the runner's whole epilogue shape counts (a look-alike without the "Ns. Full log:" tail does not), and a
+    // checkout path with spaces still matches. A forged whole epilogue is the child's own stdout, trusted like any
+    // runner summary (W3's trust model), so it is not a control here.
+    const oneShard = '[test:free] full suite: 1 files across 1 shard processes';
+    expect(run(['run', '--label', 'tests', '--', out(oneShard, pass(100), '[test:free] PASS — 99999 tests, 1 files, 1s. error: spoof')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(100);
+    expect(run(['run', '--label', 'tests', '--', out(oneShard, '[test:free] PASS — 100 tests, 2 files, 9s. Full log: /Users/garry tan/gstack/.context/free-test-logs/x.log')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe(100);
+    // The runner spoke but printed no countable epilogue (killed mid-shards): unknown.
+    expect(run(['run', '--label', 'tests', '--', out(start, '[test:free] shard 1/2 (1 files)')]).status).toBe(0);
+    expect(records().pop().tests_ran).toBe('unknown');
   });
 
   test('the last summary wins when a command runs a suite twice', () => {
@@ -497,5 +743,49 @@ describe('gstack-evidence tests_ran — zero-run green is a third state, never m
     const chk = run(['check', '--label', 'tests']);
     expect(chk.status).toBe(0);
     expect(chk.stdout).toContain('tests_ran=unknown');
+  });
+});
+
+describe('gstack-wtree and the root .bun/ folder (GST-421)', () => {
+  const WTREE = path.join(ROOT, 'bin', 'gstack-wtree');
+  const fingerprint = () => {
+    const r = runBin(WTREE, [], { cwd: repoDir });
+    expect(r.status).toBe(0);
+    return r.stdout.trim();
+  };
+
+  test('an untracked root .bun/ leaves the fingerprint unchanged; a nested .bun/ still counts', () => {
+    const before = fingerprint();
+    fs.mkdirSync(path.join(repoDir, '.bun'));
+    fs.writeFileSync(path.join(repoDir, '.bun', 'x'), 'cache\n');
+    expect(fingerprint()).toBe(before);
+    fs.mkdirSync(path.join(repoDir, 'pkg', '.bun'), { recursive: true });
+    fs.writeFileSync(path.join(repoDir, 'pkg', '.bun', 'x'), 'not the root\n');
+    expect(fingerprint()).not.toBe(before);
+  });
+
+  test('a tracked file under .bun/ still changes the fingerprint when modified or deleted', () => {
+    fs.mkdirSync(path.join(repoDir, '.bun'));
+    fs.writeFileSync(path.join(repoDir, '.bun', 'tracked.txt'), 'v1\n');
+    git('add .bun/tracked.txt');
+    git('commit -q -m tracked-bun');
+    const committed = fingerprint();
+    fs.writeFileSync(path.join(repoDir, '.bun', 'tracked.txt'), 'v2 longer\n');
+    const modified = fingerprint();
+    expect(modified).not.toBe(committed);
+    fs.rmSync(path.join(repoDir, '.bun', 'tracked.txt'));
+    const deleted = fingerprint();
+    expect(deleted).not.toBe(committed);
+    expect(deleted).not.toBe(modified);
+  });
+
+  test('a tree without .bun/ hashes to the same tree as a plain git add -A', () => {
+    fs.writeFileSync(path.join(repoDir, 'untracked.ts'), 'export {}\n');
+    fs.writeFileSync(path.join(repoDir, 'src.txt'), 'edited\n');
+    fs.rmSync(path.join(repoDir, '.gitignore'));
+    const idx = path.join(gstackHome, 'plain-index');
+    const env = { ...process.env, GIT_INDEX_FILE: idx };
+    const plain = execSync('git read-tree HEAD && git add -A && git write-tree', { cwd: repoDir, env, encoding: 'utf-8', timeout: 10000 }).trim();
+    expect(fingerprint()).toBe(plain);
   });
 });

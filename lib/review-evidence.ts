@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deriveReviewStatus, readJsonl } from './headless-artifacts';
+import { deriveReviewStatus, isCriticalFinding, isOpenByAction, readJsonl } from './headless-artifacts';
 import { resultLine, type ResultCodeName } from './result-codes';
 
-const DIFF_REVIEWS = new Set(['review', 'adversarial-review', 'codex-review', 'design-review-lite', 'ship']);
+const DIFF_REVIEWS = new Set(['review', 'review-fix-check', 'adversarial-review', 'codex-review', 'design-review-lite', 'ship']);
 const SHARED_LIBS_COVERAGE_VERSION = 1;
+const HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 function record(value: unknown): value is Record<string, any> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -163,18 +164,54 @@ export function checkSharedLibsReuse(finding: unknown, token: string, env = proc
   return result;
 }
 
-export function captureReviewStart(skill: string, env = process.env): string {
+/**
+ * #3339: a fix-range repeat reviews only what changed since the latest pass of
+ * the same skill, and only when that pass completed and made fixes on this
+ * branch, no Step 11 review followed it, and the content it started from is
+ * exactly its commit's tree. That commit, held in the review log rather than
+ * the working tree, is the base; it must still be an ancestor of HEAD, so
+ * `git diff <base>` holds every fix. Anything else needs a full pass.
+ */
+function fixRangeBase(skill: string, env: NodeJS.ProcessEnv): string {
+  const refuse = (reason: string): never => {
+    throw new Error(`gstack-review-log: fix-range refused: ${reason}; run a full pass (gstack-review-log --start ${skill})`);
+  };
+  let rows: Record<string, any>[] = [];
+  try {
+    rows = readFileSync(env.GSTACK_REVIEW_LOG!, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+      try { const row = JSON.parse(line); return record(row) ? [row] : []; } catch { return []; }
+    });
+  } catch {}
+  const at = rows.findLastIndex(row => row.skill === skill);
+  if (at < 0) refuse('no earlier pass on this branch');
+  if (rows.slice(at + 1).some(row => row.skill === 'adversarial-review' || row.skill === 'codex-review')) refuse('a Step 11 review followed the latest pass');
+  const prior = rows[at]!, binding = prior.review_binding;
+  if (prior.completed !== true) refuse('the latest pass did not complete');
+  if (prior.converged !== false) refuse('the latest pass made no fixes');
+  if (!record(binding) || (binding.state !== 'changed' && binding.state !== 'incomplete') || typeof binding.start_wtree !== 'string') refuse('the latest pass has no captured start');
+  if (binding.branch_id !== sha256(env.GSTACK_REVIEW_BRANCH ?? '')) refuse('the latest pass is from another branch');
+  const base = prior.commit_full;
+  const git = (...args: string[]) => spawnSync('git', args, { cwd: env.GSTACK_REVIEW_REPO, encoding: 'utf8', timeout: 10_000 });
+  if (typeof base !== 'string' || !HASH.test(base) || git('cat-file', '-e', `${base}^{commit}`).status !== 0) refuse('the latest pass has no resolvable commit');
+  if (git('rev-parse', `${base}^{tree}`).stdout.trim() !== binding.start_wtree) refuse('the latest pass started from uncommitted content, so no commit marks what it read');
+  if (git('merge-base', '--is-ancestor', base, 'HEAD').status !== 0) refuse(`${base} is not an ancestor of HEAD`);
+  return base;
+}
+
+export function captureReviewStart(skill: string, env = process.env, fixRange = false): string {
   if (!DIFF_REVIEWS.has(skill) || !env.GSTACK_STAMP_WTREE || !env.GSTACK_REVIEW_REPO) {
     throw new Error('cannot capture a diff review without a working-tree fingerprint');
   }
+  const fixBase = fixRange ? fixRangeBase(skill, env) : undefined;
   const dir = join(env.GSTACK_REVIEW_DIR!, '.review-starts');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const token = crypto.randomUUID();
   writeFileSync(join(dir, `${token}.json`), JSON.stringify({
     skill, repo: env.GSTACK_REVIEW_REPO, branch: env.GSTACK_REVIEW_BRANCH,
     wtree: env.GSTACK_STAMP_WTREE, started_at: new Date().toISOString(),
+    ...(fixBase ? { scope: 'fix-range', fix_base: fixBase } : {}),
   }), { mode: 0o600, flag: 'wx' });
-  return token;
+  return fixBase ? `${token}\nFIX_BASE=${fixBase}` : token;
 }
 
 const GATE_ACTIONS = new Set(['kept', 'restored', 'open']);
@@ -211,11 +248,12 @@ const DERIVED_KEYS = ['status', 'unresolved', 'issues_found', 'critical_gaps'] a
  * severity + disposition/action). A claimed value that disagrees rejects the
  * row with REVIEW_STATUS_MISMATCH; the file is the record, never the claim.
  */
-export function deriveFromFindings(rec: Record<string, any>, findingsPath: string): Record<string, any> {
+export function deriveFromFindings(rec: Record<string, any>, findingsPath: string, sessionKind?: string): Record<string, any> {
   let read;
   try { read = readJsonl(findingsPath); }
   catch (e: any) { throw new ReviewLogError('ARTIFACT_MISSING', resultLine('review-log', 'ARTIFACT_MISSING', `${findingsPath}: ${e.message}`)); }
   if (read.errors.length) throw new ReviewLogError('ARTIFACT_MALFORMED_JSONL', resultLine('review-log', 'ARTIFACT_MALFORMED_JSONL', `${read.errors[0]!.path}: ${read.errors[0]!.message}`));
+  stampGateFindings(read.rows, sessionKind);
   const derived = deriveReviewStatus(read.rows);
   const mismatches = DERIVED_KEYS.filter(key => rec[key] !== undefined && rec[key] !== derived[key])
     .map(key => `claimed ${key} ${JSON.stringify(rec[key])}, findings file has ${JSON.stringify(derived[key])}`);
@@ -226,14 +264,26 @@ export function deriveFromFindings(rec: Record<string, any>, findingsPath: strin
 }
 
 export function bindReview(rec: Record<string, any>, token: string, env = process.env, findingsPath?: string): Record<string, any> {
-  for (const key of ['commit_full', 'tree', 'wtree', 'dirty', 'review_binding', 'review_freshness', 'shared_libs_coverage_version', 'status_source', 'findings_total', 'findings_open', 'findings_resolved', 'findings_file']) delete rec[key];
+  for (const key of ['commit_full', 'tree', 'wtree', 'dirty', 'review_binding', 'review_freshness', 'shared_libs_coverage_version', 'status_source', 'findings_total', 'findings_open', 'findings_resolved', 'findings_file', 'scope', 'fix_base']) delete rec[key];
   // The findings file is validated BEFORE the start token is consumed below:
   // a rejected row must leave the token for the retry.
-  rec = findingsPath ? deriveFromFindings(rec, findingsPath) : { ...rec, status_source: 'claimed' };
+  rec = findingsPath ? deriveFromFindings(rec, findingsPath, env.GSTACK_STAMP_SESSION_KIND) : { ...rec, status_source: 'claimed' };
   if (env.GSTACK_STAMP_COMMIT_FULL) rec.commit_full = env.GSTACK_STAMP_COMMIT_FULL;
   if (env.GSTACK_STAMP_TREE) rec.tree = env.GSTACK_STAMP_TREE;
   if (env.GSTACK_STAMP_DIRTY) rec.dirty = env.GSTACK_STAMP_DIRTY === 'true';
   stampGateFindings(rec.findings, env.GSTACK_STAMP_SESSION_KIND);
+  if (rec.skill === 'review-fix-check' && (typeof rec.completed !== 'boolean' || typeof rec.converged !== 'boolean')) {
+    throw new Error('review-log: a review-fix-check row must carry completed and converged as true or false (review-army item 6 fields; without them gstack-review-read marks the row UNVERIFIED and finish cannot count it)');
+  }
+  // A /ship pass whose findings were all fixed, or deferred or noted below the floor, left no open defect (review-army
+  // item 6), so a claimed issues_found is recorded clean with zero counts and Step 11.5 can bind it (GST-430). Only the
+  // logger-stamped action counts (never a caller's status), and the findings must account for every claimed issue.
+  if (!findingsPath && (rec.skill === 'review' || rec.skill === 'review-fix-check') && rec.status === 'issues_found' && rec.completed === true &&
+      Array.isArray(rec.findings) && rec.findings.length > 0 && rec.findings.length >= Number(rec.issues_found ?? 0) &&
+      rec.findings.filter(f => record(f) && isCriticalFinding(f)).length >= Number(rec.critical ?? 0) &&
+      rec.findings.every(f => record(f) && typeof f.action === 'string' && !isOpenByAction(f))) {
+    Object.assign(rec, { status: 'clean', issues_found: 0, critical: 0, informational: 0 });
+  }
   if (!DIFF_REVIEWS.has(rec.skill)) {
     if (env.GSTACK_STAMP_WTREE) rec.wtree = env.GSTACK_STAMP_WTREE;
     return rec;
@@ -256,11 +306,19 @@ export function bindReview(rec: Record<string, any>, token: string, env = proces
   const state = !start || !end ? 'uncaptured'
     : start.wtree !== end ? 'changed'
     : rec.completed !== true || rec.converged !== true ? 'incomplete' : 'verified';
-  rec.review_binding = {
-    state, start_wtree: start?.wtree, end_wtree: end, started_at: start?.started_at,
-    ...(typeof start?.branch === 'string' && start.branch.length > 0 ? { branch_id: sha256(start.branch) } : {}),
-  };
-  if (state === 'verified') rec.wtree = end;
+  const branchId = typeof start?.branch === 'string' && start.branch.length > 0 ? { branch_id: sha256(start.branch) } : {};
+  const narrowed = start?.scope === 'fix-range' || start?.fix_base !== undefined;
+  if (narrowed) {
+    rec.scope = 'fix-range';
+    if (typeof start.fix_base === 'string' && HASH.test(start.fix_base)) rec.fix_base = start.fix_base;
+  }
+  // A narrowed pass on unchanged content never carries start_wtree/end_wtree,
+  // so Step 11.5 cannot bind it and it never becomes CURRENT; only a later full pass can.
+  rec.review_binding = narrowed && (state === 'incomplete' || state === 'verified')
+    ? { state: 'fix-range', fix_base: rec.fix_base, range_start_wtree: start.wtree, range_end_wtree: end, started_at: start.started_at, ...branchId }
+    : { state, start_wtree: start?.wtree, end_wtree: end, started_at: start?.started_at, ...branchId };
+  const verified = rec.review_binding.state === 'verified';
+  if (verified) rec.wtree = end;
   if (rec.skill === 'review' && Array.isArray(rec.findings)) {
     rec.shared_libs_coverage_version = SHARED_LIBS_COVERAGE_VERSION;
     for (const finding of rec.findings) {
@@ -270,18 +328,41 @@ export function bindReview(rec: Record<string, any>, token: string, env = proces
       const fingerprint = sharedLibsFingerprint(finding);
       if (!fingerprint) continue;
       finding.fingerprint = fingerprint;
-      finding.snapshot_covered_paths = state === 'verified' && finding.action === 'skipped'
+      finding.snapshot_covered_paths = verified && finding.action === 'skipped'
         ? sharedLibsSnapshotCoverage(env.GSTACK_REVIEW_REPO!, end!, finding.evidence_paths, env) : [];
     }
   }
   return rec;
 }
 
-export function reviewFreshness(rec: Record<string, any>, currentWtree: string): { status: string; reason: string } | undefined {
+const unresolvedFinding = (f: unknown) => record(f) && (f.action === 'open' ||
+  ((f.action === 'deferred' || f.action === 'noted') && (f.blocking === true || isCriticalFinding(f))) ||
+  (!f.gate && isCriticalFinding(f) && isOpenByAction(f)));
+const RULABLE = new Set(['skipped', 'noted', 'deferred']);
+
+/**
+ * GST-1537: the claimed row with each finding the owner ruled a disclosed note (`ruled`: fingerprints from approved
+ * `gstack-approvals rule` rows, lib/ruled-notes.ts, never from the row itself) taken out, and recorded clean when the
+ * rest leave nothing unresolved and the findings account for every claimed issue and critical; otherwise unchanged.
+ */
+function withoutRuledNotes(rec: Record<string, any>, ruled: ReadonlySet<string>): Record<string, any> {
+  const isRuled = (f: unknown) => record(f) && !f.gate && RULABLE.has(f.action) && typeof f.fingerprint === 'string' && ruled.has(f.fingerprint);
+  if (!ruled.size || rec.status_source === 'derived' || rec.completed !== true || !Array.isArray(rec.findings) ||
+      !rec.findings.some(isRuled) || rec.findings.length < Number(rec.issues_found ?? 0) ||
+      rec.findings.filter(f => record(f) && isCriticalFinding(f)).length < Number(rec.critical ?? 0) ||
+      rec.findings.some(f => !isRuled(f) && (!record(f) || unresolvedFinding(f)))) return rec;
+  return { ...rec, status: 'clean', issues_found: 0, critical: 0, informational: 0, findings: rec.findings.filter(f => !isRuled(f)) };
+}
+
+export function reviewFreshness(rec: Record<string, any>, currentWtree: string, ruled: ReadonlySet<string> = new Set()): { status: string; reason: string } | undefined {
   if (!DIFF_REVIEWS.has(rec.skill)) return;
   if (rec.skill === 'ship') return { status: 'UNVERIFIED', reason: 'ship telemetry is not a review pass' };
   const binding = rec.review_binding;
-  if (binding?.state === 'changed') return { status: 'STALE', reason: 'content changed during review' };
+  if (binding?.state === 'changed') {
+    const short = (w: unknown) => typeof w === 'string' ? w.slice(0, 12) : 'unknown';
+    return { status: 'STALE', reason: `content changed during review: the tree moved from ${short(binding.start_wtree)} to ${short(binding.end_wtree)} while ${rec.skill} ran (an edit, commit or merge landed before its row was logged), so the record cannot bind. Repair: freeze the checkout until every reviewer returns, then rerun the steps 11.5 names on the frozen tree; when the edit was your own fix, log it as a fix so gstack-review-plan picks the repeat depth (docs/troubleshooting.md#review-content-changed)` };
+  }
+  if (rec.scope === 'fix-range') return { status: 'UNVERIFIED', reason: 'fix-range pass; only a later full pass can clear review' };
   if (binding?.state !== 'verified' || rec.completed !== true || rec.converged !== true ||
       !rec.wtree || binding.start_wtree !== rec.wtree || binding.end_wtree !== rec.wtree) {
     return { status: 'UNVERIFIED', reason: 'missing start capture or incomplete/nonconverged pass' };
@@ -292,9 +373,11 @@ export function reviewFreshness(rec: Record<string, any>, currentWtree: string):
   // B7: a derived row carries findings_open; a resolved critical finding no
   // longer counts against it. Claimed rows keep the conservative reading of
   // issues_found, and the legacy `critical` and Codex counters stay as they were.
+  rec = withoutRuledNotes(rec, ruled);
   const open = typeof rec.findings_open === 'number' ? rec.findings_open : rec.issues_found;
   if (rec.status !== 'clean' || open > 0 || rec.critical > 0 ||
-      (rec.skill === 'codex-review' && rec.findings > (rec.findings_fixed ?? 0))) {
+      (rec.skill === 'codex-review' && rec.findings > (rec.findings_fixed ?? 0)) ||
+      (Array.isArray(rec.findings) && rec.findings.some(unresolvedFinding))) {
     return { status: 'UNVERIFIED', reason: 'review has unresolved findings or did not finish clean' };
   }
   return { status: 'CURRENT', reason: 'completed clean pass on unchanged content' };

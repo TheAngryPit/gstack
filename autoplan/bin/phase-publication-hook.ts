@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /** A native parent publication barrier at Autoplan's exact Read boundaries. */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -10,7 +10,7 @@ import { extractImplementationPlan, checkPhaseImplementation, acceptedBlocks, ca
 import { autoplanPhaseCompletions } from '../../lib/autoplan-phase-publication';
 import { nativePathSpelling, ownedNativePath, sameNativePath, type ClaudeParentPublicEvent } from '../../lib/claude-journal-records';
 import { ownedRecordLimit, ownedRetainedLimit, type JournalPrefix, type OwnedRead, type OwnedReadMeasure } from '../../lib/claude-owned-journal';
-import { readGuardJournal, textResult, DEDUP_REPLY } from './guard-journal';
+import { bashJson, readGuardJournal, textResult, DEDUP_REPLY } from './guard-journal';
 import { REASONS, reasonCode, reasonText, type Detail, type ReasonCode } from './guard-reasons';
 import { logGuardDecision } from './guard-log';
 import { approveOwnedRead, renderSectionBase, userRenderRoot } from './owned-read';
@@ -227,7 +227,7 @@ function checkpointResult(result: Event, tools: Tools, init: Invocation): { phas
   if (use?.name !== 'Bash' || use.order >= result.order) return;
   const text = textResult(result);
   if (text === undefined) return;
-  const output = JSON.parse(text);
+  const output = bashJson(text);
   if (!object(output) || !['ceo', 'design', 'dx', 'eng'].includes(output.phase) ||
       !ownPath(output.snapshotPath) || typeof output.nativePrompt !== 'string' || !object(output.baselineEdits)) return;
   const { nativePrompt, baselineEdits, ...identity } = output;
@@ -260,6 +260,7 @@ function initArguments(command: unknown, root: string): string[] | undefined {
 
 const INIT_MISMATCH_CAUSE = 'Snapshot init returned paths that do not match the canonical form of its own command arguments';
 const INIT_FAILED_CAUSE = 'The most recent snapshot init call failed; re-run the same init command with the same three paths';
+const INIT_UNPARSEABLE_CAUSE = 'The most recent snapshot init printed something other than its JSON result; re-run the same init command with the same three paths, without a leading cd';
 
 /** Diagnostic only, never binds: a Bash call that ran snapshot init in a shape the guard cannot bind (#3045). */
 const UNBINDABLE_INIT = /(?:gstack-autoplan-snapshot|SNAPSHOT_TOOL|\$\{?[A-Z_]+\}?"?)\S*\s+init\s/;
@@ -268,8 +269,8 @@ function invocation(events: Event[], root: string): Invocation {
   let bound: Invocation | undefined;
   let chosen: Record<string, any> | undefined;
   let unbindable = false;
-  // True while the most recent bindable init use errored (a later success clears it).
-  let lastErrored = false;
+  // The cause while the most recent bindable init use failed (a later success clears it).
+  let lastFailure: string | undefined;
   const tools = byTool(events);
   for (const use of events) {
     if (use.kind !== 'use' || use.name !== 'Bash') continue;
@@ -278,10 +279,12 @@ function invocation(events: Event[], root: string): Invocation {
     const results = tools.results(use.toolUseId).filter(x => x.order > use.order);
     if (results.length !== 1) fail('init_mismatch');
     // An errored init published nothing; a later correct init may still bind.
-    if (results[0]!.isError === true) { lastErrored = true; continue; }
+    if (results[0]!.isError === true) { lastFailure = INIT_FAILED_CAUSE; continue; }
     const text = textResult(results[0]!);
-    if (text === undefined) fail('init_failed');
-    const result = JSON.parse(text);
+    if (text === undefined) { lastFailure = INIT_FAILED_CAUSE; continue; }
+    let result: any;
+    // Output that is not the init's JSON bound nothing; a later correct init may still bind.
+    try { result = bashJson(text); } catch { lastFailure = INIT_UNPARSEABLE_CAUSE; continue; }
     // init reports canonical destinations (macOS /tmp is /private/tmp); canonicalize the argv the same way.
     let active: string, restore: string;
     try { active = canonicalDestination(args[1]!); restore = canonicalDestination(args[2]!); }
@@ -289,13 +292,13 @@ function invocation(events: Event[], root: string): Invocation {
     if (!object(result) || !samePath(result.sourcePlan, fs.realpathSync(args[0]!)) || !samePath(result.activePlan, active) ||
         !samePath(result.restorePath, restore) || typeof result.reused !== 'boolean' || !positive(result.originalBytes) ||
         !/^[a-f0-9]{64}$/.test(result.originalSha256)) fail('init_mismatch', { cause: INIT_MISMATCH_CAUSE });
-    lastErrored = false;
+    lastFailure = undefined;
     if (result.reused && bound && bound.activePlan === result.activePlan && bound.restorePath === result.restorePath) continue;
     chosen = result;
     bound = { activePlan: result.activePlan, restorePath: result.restorePath,
       originalSha256: result.originalSha256, start: results[0]!.order };
   }
-  if (lastErrored) fail('init_failed', { cause: INIT_FAILED_CAUSE });
+  if (lastFailure) fail('init_failed', { cause: lastFailure });
   if ((!chosen || !bound) && unbindable) fail('init_unbindable');
   if (!chosen || !bound) fail('init_required');
   const restore = read(bound.restorePath, true), active = read(bound.activePlan);
@@ -627,12 +630,21 @@ function phaseDecision(input: PublicationHookInput, root: string, before: Event[
  * A worktree session gets the repository root as CLAUDE_PROJECT_DIR while its
  * journal is rooted in the linked worktree. Only git's own two-way link makes
  * a directory that worktree: <root>/.git/worktrees/<name>/gitdir names
- * <worktree>/.git, and that file names the same admin entry back.
+ * <worktree>/.git, and that file names the same admin entry back. A project
+ * directory below the root (#3296) uses the first .git found walking up; a
+ * .git file there means a linked worktree or submodule, which has no registry.
  */
 export function linkedWorktrees(projectDir: string): string[] {
-  let entries: fs.Dirent[];
-  const admin = path.join(projectDir, '.git', 'worktrees');
-  try { entries = fs.readdirSync(admin, { withFileTypes: true }); } catch { return []; }
+  let entries: fs.Dirent[], admin: string | undefined;
+  try {
+    for (let dir = path.resolve(projectDir); ; dir = path.dirname(dir)) {
+      const dotGit = fs.statSync(path.join(dir, '.git'), { throwIfNoEntry: false });
+      if (dotGit) { if (dotGit.isDirectory()) admin = path.join(dir, '.git', 'worktrees'); break; }
+      if (path.dirname(dir) === dir) break;
+    }
+    if (!admin) return [];
+    entries = fs.readdirSync(admin, { withFileTypes: true });
+  } catch { return []; }
   return entries.filter(entry => entry.isDirectory()).slice(0, 256).flatMap(entry => {
     try {
       const link = path.join(admin, entry.name);
@@ -697,8 +709,11 @@ export function ownedRead(journal: string, owners: string[], input: PublicationH
  * A ready journal holding the current call takes the journal path; one that
  * lacks it takes the payload path at once (Claude Code may write the record only
  * with its result). The 2-second window remains for a journal that does not exist
- * yet, a journal lagging more than one message, and the unrecognized-shape double
- * read. Claude Code's appends never fail a read; a changed prefix is `rewritten`.
+ * yet, a journal lagging more than one message, a journal with no public event or
+ * none after its latest human turn (Claude Code 2.1.292 can flush the turn's
+ * earlier calls after this one's hook; at expiry an empty journal is journal lag
+ * and a human-turn tail takes the payload path), and the unrecognized-shape
+ * double read. Claude Code's appends never fail a read; a changed prefix is `rewritten`.
  */
 export async function runPublicationHook(value: unknown, root: string): Promise<object> {
   return approveOwnedRead(value, await guardOutput(value, root), root);
@@ -731,7 +746,9 @@ async function guardOutput(value: unknown, root: string): Promise<object> {
       if (read.transcript.status === 'ready') {
         if (read.events.some(e => e.kind === 'use' && e.toolUseId === input.tool_use_id))
           return decided(journalDecision(input, root, read.events, version), 'journal', version);
-        if (!journalLagged(read.events)) return decided(payloadDecision(input, root, read.events), 'payload', version);
+        const tail = read.events.at(-1)?.kind;
+        if (tail && !journalLagged(read.events) && (tail !== 'user_turn' || expired))
+          return decided(payloadDecision(input, root, read.events), 'payload', version);
         if (expired) return unverifiedOutput('journal_lag', {}, version, 'payload');
       } else if (code === 'too_large') {
         return unverifiedOutput('too_large', { size: measure.recordBytes ? mib(measure.recordBytes) : undefined, limit: mib(ownedRecordLimit()) },

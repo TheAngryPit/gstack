@@ -94,7 +94,7 @@ describe('per-axis provenance, --no-dx and the plan marker', () => {
     const out = path.join(host.base, 'run-pin');
     const r = next(['--out', out, '--plan', file, '--no-ui', '--developer-tool']);
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toMatch(/^SCOPE: ui=no \(terms: component×1, screen×1, form×1; visual: none; files: none\) dx=yes \(detected: [^)]*flag×2[^)]*\) source=ui:flag,dx:flag$/m);
+    expect(r.stdout).toMatch(/^SCOPE: ui=no \(terms: component×1, screen×1, form×1; visual: none; files: none\) dx=yes \(detected: [^)]*flag×2[^)]*\) docs_only=no \(detected\) source=ui:flag,dx:flag$/m);
     expect(r.stdout).toContain(`SCOPE_PIN: add <!-- gstack-autoplan-scope: --no-ui --developer-tool --> as the first line of ${file} to keep these flags`);
     expect(fs.readFileSync(file).equals(before)).toBe(true);
     expect(readRun(out).scope).toMatchObject({ cli_flags: ['--no-ui', '--developer-tool'], marker: null, sources: { ui: 'flag', dx: 'flag' } });

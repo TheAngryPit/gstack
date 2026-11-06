@@ -13,7 +13,7 @@ import {
   type PreparationSandboxRunner, type OfflinePreparationRequest, preparedIdentityEntry } from '../lib/cso/preparation-executor';
 import { CSO_HELPER_ABI } from '../lib/cso/runtime-catalog';
 import { DockerPreparationSandboxRunner, isBlockedRegistryAddress, RegistryEgressBroker } from '../lib/cso/preparation-docker';
-import { completeRuntimeCatalogFixture, qualifiedRuntimeFixture } from './helpers/cso-runtime-catalog';
+import { completeRuntimeCatalogFixture, qualifiedRuntimeFixture, unqualifiedRuntimeCatalog } from './helpers/cso-runtime-catalog';
 
 const roots: string[] = [];
 const digest = 'a'.repeat(64);
@@ -138,9 +138,9 @@ function errorCode(error: unknown): string | undefined { return error instanceof
 afterEach(() => { for (const value of roots.splice(0)) fs.rmSync(value, { recursive: true, force: true }); });
 
 describe('CSO constrained dependency preparation executor', () => {
-  test('the unqualified default catalog and forged admissions fail closed', async () => {
+  test('an unqualified catalog and forged admissions fail closed', async () => {
     const source = snapshot('node'), plan = inspectPreparation(source, 'node'), runner = new FakeRunner(), cache = cacheFixture();
-    expect(() => admitPreparationRuntime({ plan, platform: 'linux/amd64' })).toThrow('MISSING_QUALIFIED_RUNTIME');
+    expect(() => admitPreparationRuntime({ plan, platform: 'linux/amd64', catalog: unqualifiedRuntimeCatalog() })).toThrow('MISSING_QUALIFIED_RUNTIME');
     const executor = new PreparationExecutor({ cache, runner });
     try {
       await executor.acquire({ plan, admission: { schemaVersion: 1, catalogRevision: 'forged', runtime: runtime('node') },

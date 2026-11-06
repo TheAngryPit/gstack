@@ -9,6 +9,8 @@ import {createPlanCountPermissionGuard,countingCapture,type CountingRun} from '.
 import {createPlanCountSnapshotWriter} from './helpers/plan-count-artifacts';
 import captured from './fixtures/plan-create-prepublication-491.json';
 import toolOnlyCreate from './fixtures/plan-ceo-floor-toolonly-create.json';
+import quoteWrapCreate from './fixtures/plan-ceo-floor-create-quote-wrap.json';
+import ruleCropCreate from './fixtures/plan-design-floor-create-rule-crop.json';
 
 function fixture(){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gstack-prewrite-'));const cwd=path.join(root,'owned'),config=path.join(root,'config');fs.mkdirSync(cwd);
@@ -217,5 +219,66 @@ test('a tool-only session gets no credit for a changed preview or a foreign crea
  const f=toolOnlyFixture();try{
   expect(f.read(toolOnlyCreate.screen.replace('Validate first (recommended)','Validate later (recommended)'))).toBeNull();
   expect(f.read(toolOnlyCreate.screen.replaceAll(toolOnlyCreate.basename,'foreign-plan.md'))).toBeUndefined();
+ }finally{f.close();}
+});
+
+// Focused trial t3 (2026-10-20): a soft-wrapped table row continued with '>activation->paid)' and the
+// blockquote guard refused the owned Create menu until permission_unanswered.
+type CapturedCreate={basename:string;sessionId:string;toolUseId:string;writeContent:string;screen:string};
+function quoteWrap(capture:CapturedCreate=quoteWrapCreate){
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gstack-quote-wrap-')),cwd=path.join(root,'owned'),config=path.join(root,'config');fs.mkdirSync(cwd);
+ const expected=path.join(cwd,capture.basename),sid=capture.sessionId,id=capture.toolUseId;
+ const journal=path.join(config,'projects','owned',sid+'.jsonl');fs.mkdirSync(path.dirname(journal),{recursive:true});
+ const startedAt=Date.now()-1000,recorder=createFilePermissionRecorder(cwd,config,expected)!,input={file_path:expected,content:capture.writeContent};
+ fs.writeFileSync(journal,JSON.stringify({cwd,sessionId:sid,isSidechain:false,timestamp:new Date().toISOString(),message:{role:'assistant',content:[{type:'text',text:'Writing the working plan.'}]}})+'\n');
+ recordFilePermission(JSON.stringify({hook_event_name:'PreToolUse',tool_name:'Write',session_id:sid,tool_use_id:id,cwd,transcript_path:journal,tool_input:input}),recorder.file,cwd,config,expected);
+ const read=(screen=capture.screen)=>currentFilePermissionEpoch(recorder.file,expected,cwd,config,startedAt,readPlanCountTranscript(config,cwd),screen);
+ return {sid,id,read,close(){recorder.dispose();fs.rmSync(root,{recursive:true,force:true});}};
+}
+
+test('t3: a wrapped preview row that continues with ">" still binds the owned Create once',()=>{
+ const f=quoteWrap();try{
+  expect(createHash('sha256').update(quoteWrapCreate.screen).digest('hex')).toBe(quoteWrapCreate.screenSha256);
+  expect(quoteWrapCreate.screen).toContain('\n     >activation->paid) | yes\n');
+  expect(f.read()?.pendingId).toBe(`${f.sid}:${f.id}`);
+  const guard=createPlanCountPermissionGuard();expect(guard(quoteWrapCreate.screen,'',f.read())).toBe('grant');expect(guard(quoteWrapCreate.screen,'',f.read())).toBe('handled');
+ }finally{f.close();}
+});
+
+test.each(['quoted-row','fenced-row','checkbox','changed-continuation'])('t3 negative control: %s above the Create menu is refused',mode=>{
+ const f=quoteWrap();try{
+  const row='  54 Success metric',screen=quoteWrapCreate.screen;
+  const changed=mode==='quoted-row'?screen.replace(row,'  > Question: D1 approve the tier?\n'+row)
+   :mode==='fenced-row'?screen.replace(row,'    ```\n'+row)
+   :mode==='checkbox'?screen.replace(row,'  ☐ Premise\n'+row)
+   :screen.replace('     >activation->paid) | yes','     >activation->retained) | yes');
+  expect(changed).not.toBe(screen);
+  expect(f.read(changed)).toBeNull();
+  expect(createPlanCountPermissionGuard()(changed,'',f.read(changed))).not.toBe('grant');
+ }finally{f.close();}
+});
+
+// Periodic run 39209106033 (plan-design-finding-floor, issue #2756): the owned Create menu's title and file row
+// scrolled away, so the crop starts on the native rule above the preview. The menu sat until the 610 s timeout.
+test('39209106033: a Create crop that starts on the rule above the preview binds the owned Write once',()=>{
+ const f=quoteWrap(ruleCropCreate);try{
+  expect(createHash('sha256').update(ruleCropCreate.screen).digest('hex')).toBe(ruleCropCreate.screenSha256);
+  expect(ruleCropCreate.screen).toMatch(/^╌{3,}\n   1 # Plan: Marketing landing page\n/);
+  expect(f.read()?.pendingId).toBe(`${f.sid}:${f.id}`);
+  const guard=createPlanCountPermissionGuard();expect(guard(ruleCropCreate.screen,'',f.read())).toBe('grant');expect(guard(ruleCropCreate.screen,'',f.read())).toBe('handled');
+ }finally{f.close();}
+});
+
+test.each(['two-rules','text-above-rule','quoted-row','changed-row','foreign-basename'])('39209106033 negative control: %s is refused',mode=>{
+ const f=quoteWrap(ruleCropCreate);try{
+  const screen=ruleCropCreate.screen,rule=screen.slice(0,screen.indexOf('\n')+1),row='  12 No DESIGN.md exists in this repo';
+  const changed=mode==='two-rules'?rule+screen
+   :mode==='text-above-rule'?'Writing the plan now\n'+screen
+   :mode==='quoted-row'?screen.replace(row,'  > Question: D1 approve the layout?\n'+row)
+   :mode==='changed-row'?screen.replace(row,'  12 A DESIGN.md exists in this repo')
+   :screen.replace('Do you want to create gstack-test-plan-design-floor.md?','Do you want to create other-plan.md?');
+  expect(changed).not.toBe(screen);
+  // No owned epoch, so the floor and count runners never reach the guard's grant.
+  expect(f.read(changed) ?? null).toBeNull();
  }finally{f.close();}
 });

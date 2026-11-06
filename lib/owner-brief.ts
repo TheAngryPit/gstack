@@ -12,6 +12,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { gateCost, gateCostSentence } from './autoplan-gate-cost';
 import { decisionId, PAGE_SIZE, renderGate, type GateList } from './gate-list';
 import { readJsonl, renderUrgentBlock, type DecisionRow } from './headless-artifacts';
 import type { ResultCodeName } from './result-codes';
@@ -85,12 +86,13 @@ export function renderBrief(inputs: BriefInputs, o: { page?: number; summary?: s
     '### Summary',
     '',
     plainSummary(inputs, o.summary),
+    ...(o.outDir && inputs.run ? ['', gateCostSentence(gateCost(o.outDir, inputs.gate, { phase_order: inputs.run.phase_order ?? [], outside_enabled: inputs.run.outside_enabled !== false, spend_cap_usd: inputs.run.spend_cap_usd ?? null, scope_flags: inputs.run.scope_flags, lean: inputs.run.lean }))] : []),
     '',
     '### Decisions',
     '',
     renderDecisions(inputs, page).trimEnd(),
     '',
-    `Full review: ${record}${recordNote}. Answer with \`gstack-autoplan answer --out <dir> --gate-rev ${inputs.gate.gate_rev} --reply "<all | d3b uc1a | all except d3b>" --by human\`.`,
+    `Full review: ${record}${recordNote}. Answer with \`gstack-autoplan answer --out <dir> --gate-rev ${inputs.gate.gate_rev} --reply "<rec | rec except d3b | d3b uc1a | as-is>" --by human\`.`,
     '',
   ].join('\n');
 }

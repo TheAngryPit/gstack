@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * memorable-user-prompt-hook — gstack-mediated bridge from Claude Code's
  * UserPromptSubmit event to the third-party `memorable` CLI (memorable.sh).
@@ -10,7 +10,8 @@
  * and clean removal. This file is that mediation.
  *
  *   stdin JSON -> cap 1 MiB -> parse -> MEMORABLE=0? -> gate memorable_recall == on?
- *      -> win32? -> trust policy (deny / read-only veto, by session cwd; fail-closed)
+ *      -> win32? -> trust policy (deny / read-only veto, by session cwd; fail-closed;
+ *                  a read-only remote's explicit per-remote opt-in lifts it, deny never)
  *      -> HIGH-tier secret scan (raw bytes AND decoded string leaves, each admitted by the clock)
  *      -> resolve vendor -> budget >= 500 ms? -> gate re-check
  *      -> receipt (fail-closed: no receipt, no send)
@@ -57,7 +58,7 @@ import {
 } from '../../../lib/egress-receipt';
 import { wrapUntrustedTrackerContent } from '../../../lib/tracker-guard';
 import { scan } from '../../../lib/redact-engine';
-import { hasRepoPolicyStore, repoPolicyTier } from '../../../lib/gbrain-repo-policy-client';
+import { hasRepoPolicyStore, memorableRecallPolicy } from '../../../lib/gbrain-repo-policy-client';
 import { LOG_RATE_LIMIT_MS, logHookError as sharedLogHookError } from './hook-log';
 
 export { LOG_RATE_LIMIT_MS };
@@ -393,13 +394,30 @@ async function policyVeto(cwd: string, timeoutMs: number, remaining: () => numbe
   if (git.status === GIT_NO_REMOTE) return 'ok';
   if (git.status === GIT_FATAL && NOT_A_REPO_RE.test(git.stderrTail.trim())) return 'ok';
   if (git.status !== 0) return 'error';
-  const url = git.stdout.toString('utf8').trim();
-  if (!url) return 'ok';
-  const res = repoPolicyTier(url, process.env, Math.max(1, Math.min(STAGE_CAP_MS, remaining())));
-  if (res.error) return 'error';
-  // `deny` and `read-only` are the tiers a user picks so a repo's content
-  // never lands in a shared store; a third-party memory service is one.
-  return res.tier === 'deny' || res.tier === 'read-only' ? 'skip' : 'ok';
+  if (!git.stdout.toString('utf8').trim()) return 'ok';
+  // The store is keyed by the configured URLs (what `gstack-gbrain-repo-policy
+  // get` and /sync-gbrain read), not the url.*.insteadOf rewrite that
+  // `remote get-url` applies, and every configured origin URL is checked:
+  // neither a rewrite nor an added URL may dodge a deny.
+  const raw = await runExternal('git', ['config', '--null', '--get-all', 'remote.origin.url'], {
+    cwd, timeoutMs: Math.max(1, Math.min(timeoutMs, remaining())), maxBuffer: GIT_MAX_BUFFER, env: gitEnv(process.env),
+    onSpawn: (kill) => { killInflight = kill; },
+  });
+  killInflight = null;
+  if (raw.timedOut || raw.error || raw.status !== 0) return 'error';
+  const urls = raw.stdout.toString('utf8').split('\0').filter((u) => u !== '');
+  if (urls.length === 0) return 'error';
+  for (const url of urls) {
+    const res = memorableRecallPolicy(url, process.env, Math.max(1, Math.min(STAGE_CAP_MS, remaining())));
+    if (res.error) return 'error';
+    // `deny` and `read-only` are the tiers a user picks so a repo's content
+    // never lands in a shared store; a third-party memory service is one.
+    // Only an explicit per-remote opt-in (`gstack-gbrain-repo-policy memorable
+    // set <url> allow`) lifts the read-only veto; nothing lifts deny.
+    if (res.tier === 'deny') return 'skip';
+    if (res.tier === 'read-only' && !res.memorableOptIn) return 'skip';
+  }
+  return 'ok';
 }
 
 function writeStdout(text: string): Promise<void> {
@@ -446,7 +464,7 @@ export async function main(): Promise<void> {
   const payloadCwd = (payload as { cwd?: unknown }).cwd;
   const cwd = typeof payloadCwd === 'string' && isDirectory(payloadCwd) ? payloadCwd : process.cwd();
   const veto = await policyVeto(cwd, Math.min(STAGE_CAP_MS, remaining()), remaining);
-  if (veto === 'skip') { logHookError(`trust policy for ${cwd} is deny or read-only, recall skipped`, Date.now(), 'trust policy skip'); return; }
+  if (veto === 'skip') { logHookError(`trust policy for ${cwd} is deny or read-only, recall skipped (a read-only remote can opt in: gstack-gbrain-repo-policy memorable set <origin-url> allow)`, Date.now(), 'trust policy skip'); return; }
   if (veto === 'error') { logHookError('trust policy lookup failed (store or repository unreadable), recall skipped (fail-closed)'); return; }
 
   // HIGH-tier pre-scan over the raw text and the decoded string leaves (a JSON

@@ -14,6 +14,7 @@ import {
   runFreeShard,
   FreeRunReporter,
   buildRunEpilogue,
+  failureExcerpt,
   FREE_TEST_TIMEOUT_MS,
   DEFAULT_WALL_TIMEOUT_MS,
   PER_FILE_WALL_MS,
@@ -28,6 +29,9 @@ import {
   loadFreeTestDurations,
   packShardsByDuration,
   wallTimeoutForPackedShard,
+  ciShardJobTimeoutMinutes,
+  ciPlanMatrix,
+  MAX_CI_JOB_TIMEOUT_MINUTES,
   createFreeCiPlan,
   validateFreeCiPlan,
   verifyFreeCiResults,
@@ -195,7 +199,7 @@ describe('test-free-shards: exclusive host-state phase', () => {
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
-      for (const file of ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts', 'scripts/lib/shard-engine.ts', 'scripts/lib/free-home-guard.ts', 'scripts/lib/free-ci-health.ts', 'scripts/lib/windows-curation.ts', 'lib/state-root.ts',
+      for (const file of ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts', 'scripts/lib/shard-engine.ts', 'scripts/lib/free-home-guard.ts', 'scripts/lib/free-ci-health.ts', 'scripts/lib/windows-curation.ts', 'scripts/lib/shard-jobs.ts', 'lib/state-root.ts',
         'test/helpers/paid-test-set.ts', 'test/helpers/touchfiles.ts', 'test/helpers/touchfiles-data.ts', 'test/helpers/test-selection.ts']) {
         const target = path.join(directory, file);
         fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -272,6 +276,12 @@ describe('test-free-shards: exclusive host-state phase', () => {
         expect(counts).toEqual(mode === 'retry-reader' ? [2, 1, 1] : mode === 'retry-exclusive' ? [1, 1, 2] : [1, 1, 1]);
         if (mode.startsWith('retry-')) {
           expect(output).toContain('FLAKY-PASS');
+          expect(output).toContain('      Expected: 2');
+          const [flake] = fs.readFileSync(path.join(directory, 'flakes.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+          expect(flake.file).toBe(selected[mode === 'retry-reader' ? 0 : 2]);
+          expect(flake.tests).toHaveLength(1);
+          expect(flake.tests[0].name).toBe('selected fixture');
+          expect(flake.tests[0].excerpt.slice(0, 3)).toEqual(['error: expect(received).toBe(expected)', 'Expected: 2', 'Received: 1']);
           expect(events[6]).toEqual({ file: selected[mode === 'retry-reader' ? 0 : 2], event: 'start' });
         } else if (mode === 'truncated-exclusive') {
           expect(output).toContain('flaky-retry skipped');
@@ -826,6 +836,38 @@ describe('test-free-shards: output contract (log capture, quiet console, failure
     expect(lines.some((l) => l.includes('2 planned file(s) produced no output'))).toBe(true);
   });
 
+  // Windows run 39448730953 attempt 1, windows-free-shard (6): the team-init PowerShell case as bun printed it.
+  test('a failure keeps the assertion bun printed before its (fail) line, and the epilogue shows it', () => {
+    const reporter = new FreeRunReporter(['test/team-init-hook-shell-neutral.test.ts']);
+    reporter.write([
+      '::group::test\\team-init-hook-shell-neutral.test.ts:',
+      '(pass) required team hook: shell-neutral registration > through the default shell: deny with exit 2 when no install resolves, {} when one does [211.85ms]',
+      'killed 1 dangling process',
+      '66 |       const denied = runner(hookEnv({ HOME: home, USERPROFILE: home }));',
+      '67 |       expect(denied.status).toBe(denyStatus);',
+      '                                 ^',
+      'error: expect(received).toBe(expected)',
+      '',
+      'Expected: 1',
+      'Received: null',
+      '',
+      '      at <anonymous> (D:\\a\\gstack\\gstack\\test\\team-init-hook-shell-neutral.test.ts:67:29)',
+      '',
+      '::error file=test\\team-init-hook-shell-neutral.test.ts,line=67,col=29,title=error: expect(received).toBe(expected)::Expected: 1',
+      '(fail) required team hook: shell-neutral registration > through PowerShell: deny with exit 2 when no install resolves, {} when one does [30108.20ms]',
+      '  ^ this test timed out after 30000ms.',
+      '',
+    ].join('\n'), 'stderr');
+    reporter.end();
+    const [failure] = reporter.report().failures;
+    expect(failure.excerpt).toEqual(['error: expect(received).toBe(expected)', 'Expected: 1', 'Received: null',
+      '      at <anonymous> (D:\\a\\gstack\\gstack\\test\\team-init-hook-shell-neutral.test.ts:67:29)']);
+    const lines = buildRunEpilogue('failed', reporter.report(), 30_000, '/tmp/x.log');
+    expect(lines).toContain('      Received: null');
+    expect(failureExcerpt(['noise', 'one', 'two', 'three'])).toEqual(['one', 'two', 'three']);
+    expect(failureExcerpt(['error: x'.padEnd(300, 'y'), ...Array.from({ length: 10 }, (_, i) => 'line ' + i)])).toHaveLength(8);
+  });
+
   test('duplicate fail lines dedupe; pre-header failures are labeled unattributed', () => {
     const reporter = new FreeRunReporter(['test/a.test.ts']);
     reporter.write(`${failLine('early unattributed')}\n`, 'stderr');
@@ -1061,5 +1103,31 @@ describe('test-free-shards: duration-aware packing (full-suite LPT)', () => {
     expect(wallTimeoutForPackedShard(242_000, WALL_BASE_MS, 253)).toBe(253 * 5_000);
     // When the prediction is the larger bound, it still wins.
     expect(wallTimeoutForPackedShard(600_000, WALL_BASE_MS, 10)).toBe(1_800_000);
+  });
+
+  test('a shard\'s job timeout is its runner wall plus the flaky-retry wall plus setup, rounded up (#3850)', () => {
+    // 750 s predicted -> 2250 s wall, + 360 s retry, + 300 s setup = 2910 s -> 49 min.
+    expect(ciShardJobTimeoutMinutes({ shard: 1, files: ['a'], predictedMs: 750_000 }, 300)).toBe(49);
+    // A tiny shard still covers the 6-minute base wall and the retry pass.
+    expect(ciShardJobTimeoutMinutes({ shard: 2, files: ['a'], predictedMs: 1_000 }, 60)).toBe(13);
+  });
+
+  test('a shard that would need a job over the cap fails the plan instead of being truncated', () => {
+    const predictedMs = MAX_CI_JOB_TIMEOUT_MINUTES * 60_000 / 3;
+    expect(() => ciShardJobTimeoutMinutes({ shard: 4, files: ['a'], predictedMs }, 300)).toThrow(/FREE_JOB_TIMEOUT_OVER_CAP: CI shard 4 needs a 101-minute job/);
+  });
+
+  test('the matrix carries per-shard timeouts only when the plan is given a setup margin', () => {
+    const plan = createFreeCiPlan(['a.test.ts', 'b.test.ts'], 2, { 'a.test.ts': 750_000, 'b.test.ts': 1_000 }, 'rev');
+    expect(ciPlanMatrix(plan)).toEqual({ shard: [1, 2] });
+    expect(ciPlanMatrix(plan, 300)).toEqual({ include: [{ shard: 1, timeout_minutes: 49 }, { shard: 2, timeout_minutes: 17 }] });
+  });
+
+  test('--job-setup-seconds is a --ci-plan flag with whole seconds from 1 to 3600', () => {
+    expect(parseCliOptions(['--ci-plan', 'p.json', '--job-setup-seconds', '300']).jobSetupSeconds).toBe(300);
+    expect(() => parseCliOptions(['--shards', '2', '--job-setup-seconds', '300'])).toThrow('--job-setup-seconds applies only to --ci-plan');
+    for (const bad of ['0', '3601', '1.5', 'x']) {
+      expect(() => parseCliOptions(['--ci-plan', 'p.json', '--job-setup-seconds', bad])).toThrow('--job-setup-seconds needs a whole number of seconds from 1 to 3600');
+    }
   });
 });

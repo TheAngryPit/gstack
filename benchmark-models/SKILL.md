@@ -16,18 +16,6 @@ allowed-tools:
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
 
-
-## When to invoke this skill
-
-Runs the same prompt through Claude,
-GPT (via Codex CLI), and Gemini side-by-side — compares latency, tokens, cost,
-and optionally quality via LLM judge. Answers "which model is actually best
-for this skill?" with data instead of vibes. Separate from /benchmark, which
-measures web page performance. Use when: "benchmark models", "compare models",
-"which model is best for X", "cross-model comparison", "model shootout".
-
-Voice triggers (speech-to-text aliases): "compare models", "model shootout", "which model is best".
-
 ## Preamble (run first)
 
 ```bash
@@ -61,9 +49,9 @@ Host and system plan-mode restrictions and the user's current scope take precede
 
 If the user invokes a skill in plan mode, run its workflow within the host's plan-mode limits. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; any AskUserQuestion the skill fires is the workflow operating within plan mode, not a violation of it — and a skill whose instructions resolve a question themselves (e.g. a plan-mode auto-select) may legitimately not ask it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" run only where the host permits them. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
-If `PROACTIVE` is `false`, do not auto-invoke or suggest skills, including by asking whether to run one. Only run skills the user explicitly invokes.
+If `PROACTIVE` is `off`: suggest no skills unasked, nor ask. `core`: only /office-hours, /review, /qa, /ship. `all`: any. Skills the user names or this one invokes run.
 
-If `SKILL_PREFIX` is `"true"`, suggest/invoke `/gstack-*` names. Disk paths stay `~/.claude/skills/gstack/[skill-name]/SKILL.md`.
+If `SKILL_PREFIX` is `true` use `/gstack-*` names; paths stay `~/.claude/skills/gstack/[skill-name]/SKILL.md`.
 
 ## Artifacts Sync (skill start)
 
@@ -208,12 +196,14 @@ If C: ask for the path. Verify it exists. Use as positional argument.
 ## Step 2: Choose providers
 
 ```bash
-"$BIN" --prompt "unused, dry-run" --models claude,gpt,gemini --dry-run
+"$BIN" --prompt "unused, dry-run" --models claude,gpt,gemini,particle,deepseek --dry-run
 ```
 
 Show the dry-run output. The "Adapter availability" section tells the user which providers will actually run (OK) vs skip (NOT READY — remediation hint included).
 
-If ALL three show NOT READY: stop with a clear message — benchmark can't run without at least one authed provider. Suggest `claude login`, `codex login`, or `gemini login` / `export GOOGLE_API_KEY`.
+If every provider shows NOT READY: stop with a clear message — benchmark can't run without at least one authed provider. Suggest `claude login`, `codex login`, `gemini login` / `export GOOGLE_API_KEY`, or `export OPENROUTER_API_KEY` for particle and deepseek (they run in Claude Code, so they also need the `claude` CLI).
+
+particle and deepseek send the prompt and the working directory's files the model reads to OpenRouter and the model vendor. They load no Claude Code settings files (so a key in a settings.json `env` block is never sent) and run with the user's environment minus Anthropic credentials. Say so before including them.
 
 If at least one is OK: AskUserQuestion:
 - **Simplify:** "Which models should we include? The dry-run above showed which are authed. Unauthed ones will be skipped cleanly — they won't abort the batch."

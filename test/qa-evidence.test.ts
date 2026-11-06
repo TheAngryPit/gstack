@@ -495,7 +495,8 @@ test('every capture after an input change names the commands still to rerun, unt
   const materialized = f.run('materialize', f.root, 'annotations.json');
   expect(materialized.status, materialized.stderr).toBe(0);
   expect(receipt(materialized.stdout).verdict).toEqual({ status: 'pass', open: [] });
-  expect(receipt(materialized.stdout).next).toContain('this verdict is final for this report root');
+  expect(receipt(materialized.stdout).next).toContain('this verdict is final. Next, write the Markdown report beside evidence.json.');
+  expect(receipt(materialized.stdout).next).not.toContain('report root');
 });
 
 test('a descriptive classification is rejected before publication, so the corrected label can still materialize', () => {

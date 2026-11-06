@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * PostToolUse hook for AskUserQuestion — runtime reliability layer for the
  * AUQ-failure prose fallback (OV3:B).
@@ -152,8 +152,11 @@ export function directiveFor(kind: SessionKind): string {
         'SESSION_KIND=unattended — auto-choose the `(recommended)` option and append it to decisions.jsonl ' +
         'with kind "auto"; do not emit prose, do not BLOCK. A question with no recommendation, a consent, ' +
         'a destructive or irreversible option, or an approval gate is appended with kind "approval" and status ' +
-        '"pending" — never chosen, never approved — and the skill ends at its next gate with ' +
-        'GSTACK_RESULT status=gate_pending (Unattended session block).'
+        '"pending" — never chosen, never approved — and the skill ends at its next gate. Only /autoplan and ' +
+        '/eval-plan print `GSTACK_RESULT: skill=<name> status=gate_pending run=<dir>` there, and /ship prints its ' +
+        'own line at Step 22 (`gstack-ship-receipt result`); every other skill prints no GSTACK_RESULT line of its own ' +
+        '(only a refused install check prints `status=refused run=-` for any skill), so do not invent one ' +
+        '(docs/unattended.md names each skill\'s record).'
       );
     case 'headless':
       // #2733 review (multi-specialist): a spawned-marked subagent under a

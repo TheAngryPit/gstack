@@ -1,0 +1,206 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+// gstack-motion-encode — checks and exports for a /design-motion capture.
+//
+//   gstack-motion-encode check <capture-dir> [--dissolve-at <s>] [--empty-from <s>] [--intro-end <s>]
+//                              [--layout app|cards] [--mask-grow <px>] [--min-db <dB>]
+//   gstack-motion-encode export <capture-dir> --name <name> [--formats mp4,loop,800]
+//                              [--crop w:h:x:y] [--pad <#hex>] [--gif-fps <n>] [--small-fps <n>]
+//   gstack-motion-encode compare <a.png> <b.png> [--blur <sigma>] [--crop w:h:x:y]
+//
+// <capture-dir> is what gstack-motion-capture.ts wrote (capture.json, frames/,
+// still.png, mask.png). check runs the seam, empty-beat and rest checks, and
+// the overflow check when the capture has a mask, through ffmpeg's psnr
+// filter; it prints one "MOTION_CHECK: <id> pass|fail ..." line each, writes
+// contact-sheet.png, prints "MOTION_SETTINGS: ..." naming any threshold or
+// phase override, and ends with "MOTION_RESULT: clean" (exit 0; "clean
+// (overflow not checked)" for a capture without a mask, or an app frame whose
+// surfaces cover more than 90% of the frame; in cards, or after --mask-grow,
+// such coverage fails overflow) or
+// "MOTION_RESULT: <n> failed" (exit 1). Defaults follow the 12 s cycle:
+// dissolve at cycle - 1.0, empty beat from cycle - 0.4, intro landed at 2.4.
+// export writes <name>-x.mp4, <name>-loop.gif and <name>-800x500.gif into the
+// capture dir and prints "EXPORT_OK <file> <bytes>" per file. compare prints
+// "PSNR <dB|inf> dB (...)" for two same-size images (the still-fidelity check).
+// Exit 2: usage or an unreadable capture. Exit 3: FFMPEG_MISSING (ffmpeg is an
+// optional dependency; the line says how to install it).
+//
+// Adapted from Elaya's design-to-motion (MIT, (c) 2026 Elaya). See NOTICE.md.
+
+import { spawnSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import {
+  compareArgs, contactSheetArgs, cropError, framePath, judgeCheck, loopGifArgs, manifestError, maskCoverageArgs, mp4Args, padError, parseMaskCoverage, parsePsnrStats, planChecks, resolveFfmpeg,
+  smallGifArgs, FFMPEG_MISSING, type CaptureManifest,
+} from '../lib/motion-encode';
+
+const MAX_MASK_COVERAGE = 0.9;
+const USAGE = 'Usage: gstack-motion-encode check <capture-dir> [options] | export <capture-dir> --name <name> [options] | compare <a.png> <b.png> [--blur <sigma>] [--crop w:h:x:y]';
+
+function die(code: number, line: string): never {
+  console.error(line);
+  process.exit(code);
+}
+
+const [cmd, ...args] = process.argv.slice(2);
+const firstFlag = args.findIndex(a => a.startsWith('--'));
+const positional = firstFlag === -1 ? args : args.slice(0, firstFlag);
+const rest = firstFlag === -1 ? [] : args.slice(firstFlag);
+const wanted = cmd === 'compare' ? 2 : 1;
+if (!['check', 'export', 'compare'].includes(cmd ?? '') || positional.length !== wanted) die(2, USAGE);
+const KNOWN: Record<string, string[]> = {
+  check: ['--dissolve-at', '--empty-from', '--intro-end', '--layout', '--mask-grow', '--min-db'],
+  export: ['--name', '--formats', '--crop', '--pad', '--gif-fps', '--small-fps'],
+  compare: ['--blur', '--crop'],
+};
+const flags = new Map<string, string>();
+for (let i = 0; i < rest.length; i += 2) {
+  const value = rest[i + 1];
+  if (!rest[i]!.startsWith('--') || value === undefined) die(2, `gstack-motion-encode: bad option '${rest[i]}'\n${USAGE}`);
+  if (!KNOWN[cmd!]!.includes(rest[i]!)) die(2, `gstack-motion-encode: unknown option '${rest[i]}' for ${cmd}\n${USAGE}`);
+  flags.set(rest[i]!, value);
+}
+const cropFlag = flags.get('--crop');
+if (cropFlag) {
+  const err = cropError(cropFlag, { ratio: cmd === 'export' });
+  if (err) die(2, `gstack-motion-encode: ${err}`);
+}
+
+const ffmpeg = resolveFfmpeg(process.env, bin => Bun.which(bin), p => fs.existsSync(p));
+if (!ffmpeg) {
+  const override = process.env.GSTACK_FFMPEG?.trim();
+  if (override) console.error(`gstack-motion-encode: GSTACK_FFMPEG=${override} does not exist; unset it or point it at an ffmpeg binary`);
+  console.log(FFMPEG_MISSING);
+  process.exit(3);
+}
+
+function run(args: string[]) {
+  return spawnSync(ffmpeg!, args, { encoding: 'utf-8', timeout: 600_000, maxBuffer: 64 * 1024 * 1024 });
+}
+
+function num(flag: string, fallback: number): number {
+  const raw = flags.get(flag);
+  if (raw === undefined) return fallback;
+  const v = raw.trim() === '' ? NaN : Number(raw);
+  if (!Number.isFinite(v) || v < 0) die(2, `gstack-motion-encode: ${flag} must be a non-negative number, got '${raw}'`);
+  return v;
+}
+
+if (cmd === 'compare') {
+  const [a, b] = positional.map(p => path.resolve(p)) as [string, string];
+  const r = run(compareArgs(a, b, { blur: num('--blur', 0) || undefined, crop: flags.get('--crop') }));
+  const frame = parsePsnrStats(String(r.stdout))[0];
+  if (r.status !== 0 || !frame) die(1, `COMPARE_FAILED ${String(r.stderr).trim().split('\n').pop() || 'no PSNR line'} (same pixel size required)`);
+  console.log(`PSNR ${frame.psnr === Infinity ? 'inf' : frame.psnr.toFixed(2)} dB (${a} vs ${b}${flags.has('--crop') ? `, crop ${flags.get('--crop')}` : ''}${flags.has('--blur') ? `, blur ${flags.get('--blur')}` : ''})`);
+  process.exit(0);
+}
+
+const dir = path.resolve(positional[0]!);
+let manifest: CaptureManifest;
+try {
+  manifest = JSON.parse(fs.readFileSync(path.join(dir, 'capture.json'), 'utf-8'));
+} catch (err) {
+  die(2, `gstack-motion-encode: cannot read ${path.join(dir, 'capture.json')}: ${(err as Error).message}; capture first with gstack-motion-capture.ts`);
+}
+const manifestProblem = manifestError(manifest);
+if (manifestProblem) die(2, `gstack-motion-encode: ${manifestProblem}; capture again with gstack-motion-capture.ts`);
+
+if (cmd === 'check') {
+  const layout = flags.get('--layout') ?? 'cards';
+  if (layout !== 'app' && layout !== 'cards') die(2, '--layout must be app or cards');
+  const maskGrow = num('--mask-grow', 2);
+  if (!Number.isInteger(maskGrow) || maskGrow > 32) die(2, `gstack-motion-encode: --mask-grow must be a whole number of pixels from 0 to 32, got '${flags.get('--mask-grow')}'`);
+  const jobs = planChecks(manifest, dir, {
+    dissolveAt: num('--dissolve-at', manifest.cycle - 1.0),
+    emptyFrom: num('--empty-from', manifest.cycle - 0.4),
+    introEnd: num('--intro-end', 2.4),
+    layout,
+    maskGrow,
+  });
+  if ('error' in jobs) die(2, `gstack-motion-encode: ${jobs.error}`);
+  const minDb = flags.has('--min-db') ? num('--min-db', 0) : Infinity;
+  let failed = 0;
+  let overflowChecked = manifest.mask !== undefined;
+  for (const job of jobs) {
+    if (job.id === 'overflow') {
+      const coverage = (grow: number) => parseMaskCoverage(String(run(maskCoverageArgs(path.join(dir, manifest.mask!), grow)).stdout));
+      const own = coverage(0);
+      const grown = coverage(maskGrow);
+      if (own === null || grown === null) {
+        failed++;
+        console.log('MOTION_CHECK: overflow fail the mask coverage could not be measured');
+        continue;
+      }
+      if (own > MAX_MASK_COVERAGE && layout === 'app') {
+        overflowChecked = false;
+        console.log(`MOTION_CHECK: overflow skipped (the app frame's surfaces cover ${Math.round(own * 100)}% of the frame; nothing outside them to compare)`);
+        continue;
+      }
+      if (grown > MAX_MASK_COVERAGE) {
+        failed++;
+        console.log(own > MAX_MASK_COVERAGE
+          ? `MOTION_CHECK: overflow fail the mask covers ${Math.round(own * 100)}% of the frame; in a cards layout mark only the card containers with data-motion-clip`
+          : `MOTION_CHECK: overflow fail --mask-grow ${maskGrow} grows the mask over ${Math.round(grown * 100)}% of the frame, which hides overflow; lower it`);
+        continue;
+      }
+    }
+    const r = run(job.args);
+    if (r.status !== 0) {
+      failed++;
+      console.log(`MOTION_CHECK: ${job.id} fail ffmpeg exited ${r.status ?? r.signal}: ${String(r.stderr).trim().split('\n').pop()}`);
+      continue;
+    }
+    const verdict = judgeCheck(job, parsePsnrStats(String(r.stdout)), minDb);
+    if (!verdict.pass) failed++;
+    console.log(verdict.line);
+  }
+  if (manifest.mask === undefined) console.log('MOTION_CHECK: overflow skipped (no mask; recapture with --mask "<container selector>")');
+  const sheet = path.join(dir, 'contact-sheet.png');
+  const s = run(contactSheetArgs(manifest, dir, sheet));
+  console.log(s.status === 0 ? `CONTACT_SHEET ${sheet}` : `CONTACT_SHEET unavailable: ${String(s.stderr).trim().split('\n').pop()}`);
+  const overrides = KNOWN.check!.filter(f => f !== '--layout' && flags.has(f)).map(f => `${f} ${flags.get(f)}`);
+  if (overrides.length > 0) console.log(`MOTION_SETTINGS: ${overrides.join(', ')}; defaults otherwise`);
+  console.log(failed > 0 ? `MOTION_RESULT: ${failed} failed` : overflowChecked ? 'MOTION_RESULT: clean' : 'MOTION_RESULT: clean (overflow not checked)');
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+const name = flags.get('--name');
+if (!name || !/^[a-z0-9][a-z0-9-]*$/.test(name)) die(2, '--name <kebab-case-name> is required for export');
+const pad = flags.get('--pad');
+if (pad) {
+  const err = padError(pad);
+  if (err) die(2, `gstack-motion-encode: ${err}`);
+}
+const formats = (flags.get('--formats') ?? 'mp4,loop,800').split(',');
+const unknownFormat = formats.find(f => !['mp4', 'loop', '800'].includes(f));
+if (unknownFormat !== undefined) die(2, `gstack-motion-encode: --formats takes mp4, loop and 800, comma separated; got '${unknownFormat}'`);
+const missing = Array.from({ length: manifest.windowFrames }, (_, k) => framePath(dir, manifest.windowStart + k)).find(f => !fs.existsSync(f));
+if (missing) die(2, `gstack-motion-encode: ${missing} is missing; the capture is incomplete, so capture and check again before exporting`);
+function gifFps(flag: string): number {
+  const fps = num(flag, 20);
+  const perCycle = manifest.cycle * fps;
+  if (!Number.isInteger(fps) || fps < 1 || fps > 50 || Math.abs(perCycle - Math.round(perCycle)) > 1e-6) {
+    die(2, `gstack-motion-encode: ${flag} ${flags.get(flag)} must be a whole fps from 1 to 50 (GIF delays are in 1/100 s) that gives a whole number of frames per ${manifest.cycle} s cycle; 20 always does`);
+  }
+  return fps;
+}
+const partial = (file: string) => path.join(dir, `.partial-${file}`);
+const jobs: Array<[string, string[]]> = [];
+if (formats.includes('mp4')) jobs.push([`${name}-x.mp4`, mp4Args(manifest, dir, partial(`${name}-x.mp4`))]);
+if (formats.includes('loop')) jobs.push([`${name}-loop.gif`, loopGifArgs(manifest, dir, partial(`${name}-loop.gif`), { fps: gifFps('--gif-fps') })]);
+if (formats.includes('800')) {
+  jobs.push([`${name}-800x500.gif`, smallGifArgs(manifest, dir, partial(`${name}-800x500.gif`), { fps: gifFps('--small-fps'), crop: cropFlag, pad })]);
+}
+let failed = 0;
+for (const [file, args] of jobs) {
+  const r = run(args);
+  if (r.status !== 0) {
+    failed++;
+    fs.rmSync(partial(file), { force: true });
+    console.log(`EXPORT_FAILED ${file}: ${String(r.stderr).trim().split('\n').pop()}`);
+    continue;
+  }
+  fs.renameSync(partial(file), path.join(dir, file));
+  console.log(`EXPORT_OK ${path.join(dir, file)} ${fs.statSync(path.join(dir, file)).size}`);
+}
+process.exit(failed === 0 ? 0 : 1);

@@ -65,7 +65,7 @@
         "## Step 1: Check branch",
         "## Step 1.5: Scope Drift Detection",
         "## Step 2: Read the checklist",
-        "## Step 2.5: Check for Greptile review comments",
+        "## Step 2.5: Check for review bot comments",
         "## Step 3: Get the diff",
         "## Step 3.4: Workspace-aware queue status (advisory)",
         "## Step 3.5: Diff scans",
@@ -91,10 +91,11 @@
         "#### 1. Parse outputs",
         "#### 2. Validate severity",
         "#### 3. Identify and merge",
-        "#### 4. Apply specialist confidence gates",
-        "#### 5. Score and present specialists",
-        "#### 6. Save specialist activity",
-        "#### 7. Hand off to Fix-First"
+        "#### 4. Lead judgment",
+        "#### 5. Apply specialist confidence gates",
+        "#### 6. Score and present specialists",
+        "#### 7. Save specialist activity",
+        "#### 8. Hand off to Fix-First"
       ]
     },
     "ship": {
@@ -118,10 +119,11 @@
         "## Step 17: Push",
         "## Step 18: Prepare publication metadata",
         "## Step 20: Persist ship metrics",
-        "## Step 21: Plan-tune discoverability nudge (first-successful-ship only)"
+        "## Step 21: Plan-tune discoverability nudge (first-successful-ship only)",
+        "## Step 22: Terminal line (every run)"
       ],
       "sections/adversarial.md": [
-        "## Step 11: Adversarial review (always-on)"
+        "## Step 11: Adversarial review"
       ],
       "sections/changelog.md": [
         "## Step 13: CHANGELOG (auto-generate)"
@@ -130,7 +132,7 @@
         "## Step 6.5: Early Greptile PR (after the free tests pass)"
       ],
       "sections/greptile.md": [
-        "## Step 10: Address Greptile review comments (if PR exists)"
+        "## Step 10: Address review bot comments (if PR exists)"
       ],
       "sections/plan-completion.md": [
         "## Step 8: Plan Completion Audit",
@@ -147,10 +149,11 @@
         "#### 1. Parse outputs",
         "#### 2. Validate severity",
         "#### 3. Identify and merge",
-        "#### 4. Apply specialist confidence gates",
-        "#### 5. Score and present specialists",
-        "#### 6. Save specialist activity",
-        "#### 7. Hand off to Fix-First",
+        "#### 4. Lead judgment",
+        "#### 5. Apply specialist confidence gates",
+        "#### 6. Score and present specialists",
+        "#### 7. Save specialist activity",
+        "#### 8. Hand off to Fix-First",
         "### Step 9.2.1: Exploratory QA (before Fix-First)",
         "### Step 9.3: Cross-review finding dedup",
         "## Step 9.4: Fix-First and persistence"

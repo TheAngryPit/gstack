@@ -19,7 +19,7 @@ test('QA-only fixture helpers and owned sections select the no-fix consumer', ()
 });
 
 test.each(['success', 'max-turns', 'dependencies', 'metadata', 'edit', 'source-write', 'source-delete', 'source-add', 'setup', 'runner', 'recording', 'runner-recording', 'artifact-error',
-  'process-error', 'slow-setup', 'exhausted-setup', 'late-timeout', 'late-retry', 'late-failure-retry', 'unknown-timeout',
+  'process-error', 'slow-setup', 'exhausted-setup', 'late-timeout', 'late-retry', 'late-slow-retry', 'late-failure-retry', 'unknown-timeout',
   'cleanup', 'cleanup-retry', 'runner-cleanup', 'cleanup-recording', 'remove-error', 'server-stop',
   'missing-deadline', 'unguarded-probe', 'forged-receipt', 'deadline-write', 'reset-deadline',
   'preparation-missing', 'preparation-failed', 'preparation-unacknowledged', 'preparation-wrong-path', 'preparation-late',
@@ -47,11 +47,12 @@ if (scenario === 'remove-error') spyOn(fs, 'rmSync').mockImplementation((target,
   return originalRm(target, options);
 });
 mock.module(path.join(root, 'test/helpers/eval-store.ts'), () => ({ getProjectEvalDir: () => ${JSON.stringify(path.join(dir, 'evals'))} }));
-const late = scenario.startsWith('late-'), workMs = 1000, drainMs = 80;
+const late = scenario.startsWith('late-'), lateRetry = ['late-retry', 'late-slow-retry'].includes(scenario), workMs = 1000, drainMs = 80;
 const realNow = Date.now, controlledClock = ['slow-setup', 'exhausted-setup'].includes(scenario);
 const clockStart = realNow();
-let clock = clockStart;
+let clock = clockStart, frozenAt;
 if (controlledClock) Date.now = () => clock;
+else if (late) Date.now = () => frozenAt ?? realNow();
 let finalized = false, outerMs;
 const collector = { addTest: row => {
   const cwd = directories.at(-1);
@@ -77,8 +78,7 @@ mock.module(path.join(root, 'test/helpers/e2e-helpers.ts'), () => ({
   testConcurrentIfSelected: (id, body, budget) => {
     if (id !== 'qa-only-no-fix') return;
     outerMs = budget;
-    const deadline = late ? (budget >= workMs + 5000 ? budget - 5000 + 500 : budget) : 5000;
-    test(id, body, deadline);
+    test(id, late ? () => { frozenAt = realNow(); return body(); } : body, late ? budget : 5000);
   },
   copyDirSync: (source, target) => {
     if (scenario === 'setup') throw new Error('QA-only setup failed');
@@ -87,6 +87,7 @@ mock.module(path.join(root, 'test/helpers/e2e-helpers.ts'), () => ({
   setupBrowseShims: cwd => {
     directories.push(cwd); fs.mkdirSync(path.join(cwd, 'browse/bin'), { recursive: true });
     if (controlledClock) clock += scenario === 'slow-setup' ? 295000 : 300000;
+    if (scenario === 'late-slow-retry') Bun.sleepSync(workMs + 100);
   },
   logCost() {}, createEvalCollector: () => collector, finalizeEvalCollector: async () => { finalized = true; },
   recordE2E: (_collector, name, suite, result, extra) => collector.addTest({ name, suite,
@@ -96,6 +97,7 @@ mock.module(path.join(root, 'test/helpers/e2e-helpers.ts'), () => ({
 mock.module(path.join(root, 'test/helpers/session-runner.ts'), () => ({
   SESSION_DRAIN_GRACE_MS: late ? drainMs : 5000,
   runSkillTest: async options => {
+    frozenAt = undefined;
     const cwd = options.workingDirectory;
     const fact = { cwd, exists: fs.existsSync(cwd), recordedBeforeCapture: records.length,
       reportBefore: fs.existsSync(path.join(cwd, 'qa-reports/qa-only-report.md')), captureMs: options.timeout,
@@ -145,7 +147,7 @@ mock.module(path.join(root, 'test/helpers/session-runner.ts'), () => ({
       fact.existsAfterDrain = fs.existsSync(cwd);
       return { ...result, exitReason: 'timeout' };
     }
-    if (late && (scenario !== 'late-retry' || attempts.length === 1)) {
+    if (late && (!lateRetry || attempts.length === 1)) {
       await new Promise(resolve => setTimeout(resolve, options.timeout + drainMs));
       fact.existsAfterDrain = fs.existsSync(cwd);
       return { ...result, exitReason: 'timeout' };
@@ -237,7 +239,7 @@ await import(path.join(root, 'test/skill-e2e-qa-workflow.test.ts'));
       expect(records[index].cleanupDone).toBe(true);
       expect(cleanups[index].budget).toBeGreaterThan(0);
       expect(cleanups[index].budget).toBeLessThanOrEqual(4000);
-      expect(records[index].passed).toBe(scenario === 'recording' || !shouldFail && !(['late-retry', 'cleanup-retry'].includes(scenario) && index === 0));
+      expect(records[index].passed).toBe(scenario === 'recording' || !shouldFail && !(['late-retry', 'late-slow-retry', 'cleanup-retry'].includes(scenario) && index === 0));
       if (scenario.includes('cleanup') && !(scenario === 'cleanup-retry' && index === 1)) expect(records[index].error).toContain('QA-only browser cleanup: invalid daemon identity');
     }
     for (const [index, attempt] of attempts.entries()) {
@@ -257,6 +259,7 @@ await import(path.join(root, 'test/skill-e2e-qa-workflow.test.ts'));
     }
     if (scenario.startsWith('late-')) {
       expect(outerMs).toBe(1000 + 80 + 5000);
+      for (const attempt of attempts) expect(attempt.captureMs).toBe(1000);
       expect(records[0]).toMatchObject({ passed: false, exit_reason: 'timeout', cost_usd: 0.25 });
       expect(records[0].error).toContain('timeout');
       if (count === 2) expect(directories[0]).not.toBe(directories[1]);

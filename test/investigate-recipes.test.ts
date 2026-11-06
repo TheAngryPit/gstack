@@ -13,18 +13,18 @@ import { CARVE_GUARDS } from './helpers/carve-guards';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
-const RECIPES = ['flake', 'polluter', 'race', 'eval-bisect', 'backlog'] as const;
+const RECIPES = ['flake', 'polluter', 'race', 'eval-bisect', 'backlog', 'blast-radius'] as const;
 const manifest = JSON.parse(read('investigate/sections/manifest.json')) as { skill: string; sections: Array<{ id: string; file: string; trigger: string }> };
 
 describe('investigate carve', () => {
   const skeleton = read('investigate/SKILL.md');
-  test('manifest lists the five recipes and the registry guards them', () => {
+  test('manifest lists the six recipes and the registry guards them', () => {
     expect(manifest.skill).toBe('investigate');
     expect(manifest.sections.map(s => s.id)).toEqual([...RECIPES]);
     expect(CARVE_GUARDS.investigate!.expectedSections).toEqual(manifest.sections.map(s => s.file));
     for (const s of manifest.sections) expect(fs.existsSync(path.join(ROOT, 'investigate', 'sections', `${s.file}.tmpl`))).toBe(true);
   });
-  test('the skeleton routes: Arguments table with --backlog before the first STOP, one STOP per recipe, recipes after the Phase 2 pattern table', () => {
+  test('the skeleton routes: Arguments table with --backlog before the first STOP, one STOP per recipe, recipes between the Scope Lock and the Report', () => {
     const args = skeleton.indexOf('## Arguments');
     const firstStop = skeleton.indexOf('> **STOP.**');
     expect(args).toBeGreaterThan(0);
@@ -32,15 +32,15 @@ describe('investigate carve', () => {
     expect(skeleton).toMatch(/\| `\/investigate --backlog \[<issue numbers or gh query>\]` \| Read-only triage/);
     for (const id of RECIPES) expect(skeleton).toContain(`sections/${id}.md`);
     expect(skeleton.match(/> \*\*STOP\.\*\*/g)!.length).toBe(RECIPES.length);
-    const recipes = skeleton.indexOf('### Recipes');
-    expect(recipes).toBeGreaterThan(skeleton.indexOf('## Phase 2: Pattern Analysis'));
-    expect(recipes).toBeLessThan(skeleton.indexOf('## Phase 3: Hypothesis Testing'));
+    const recipes = skeleton.indexOf('## Recipes');
+    expect(recipes).toBeGreaterThan(skeleton.indexOf('## Scope Lock'));
+    expect(recipes).toBeLessThan(skeleton.indexOf('## Report'));
     expect(skeleton).not.toContain('## Flake recipe');
   });
-  test('Phase 1 additions: call sites before calling two queries duplicates; update-index before timing git in a worktree (investigate and benchmark)', () => {
-    const phase1 = skeleton.slice(skeleton.indexOf('## Phase 1: Root Cause Investigation'), skeleton.indexOf('## Scope Lock'));
-    expect(phase1).toMatch(/Before calling two queries, helpers or code paths duplicates, read their call sites/);
-    expect(phase1).toContain('`git update-index --refresh`');
+  test('How to work lessons: call sites before calling two queries duplicates; update-index before timing git in a worktree (investigate and benchmark)', () => {
+    const how = skeleton.slice(skeleton.indexOf('## How to work'), skeleton.indexOf('## Scope Lock'));
+    expect(how).toMatch(/Before calling two queries, helpers or code paths duplicates, read their call sites/);
+    expect(how).toContain('`git update-index --refresh`');
     const benchmark = read('benchmark/SKILL.md');
     expect(benchmark).toContain('git update-index --refresh >/dev/null 2>&1 || true');
     expect(benchmark).toMatch(/before timing anything that spawns git/);
@@ -65,7 +65,7 @@ describe('recipe tokens', () => {
   });
   test('polluter: CI file order, ship-measure free --files bisect, the leak list, the POLLUTER report line', () => {
     const polluter = read('investigate/sections/polluter.md');
-    expect(polluter).toContain('bun run scripts/ship-measure.ts free --shard <I>');
+    expect(polluter).toContain('bun --no-env-file --config=/dev/null run scripts/ship-measure.ts free --shard <I>');
     expect(polluter).toContain('--files <affected-files> --reruns 3');
     expect(polluter).toContain('**Bisect the earlier files.**');
     expect(polluter).toContain('POLLUTER: <file> leaked <what> into <victim>; fixed by <change>');
@@ -95,6 +95,21 @@ describe('recipe tokens', () => {
     expect(backlog).toMatch(/no `gh issue close`/);
     expect(backlog).not.toMatch(/gh issue close <n>/);
   });
+  test('blast-radius: the one safety fact, the five-rung ladder, look where grep stops, confirmed and cleared risks apart, the Recipes pointer and the shared-premise red flag', () => {
+    const blast = read('investigate/sections/blast-radius.md');
+    expect(blast).toContain('## Blast radius');
+    expect(blast).toContain('**Name the one fact it is safe because of.**');
+    expect(blast).toContain('**Look where grep stops.**');
+    expect(blast).toMatch(/1\. You said so\.[\s\S]*5\. You reproduced it in the running app\./);
+    expect(blast).toContain('**Keep confirmed risks and cleared risks apart.**');
+    expect(blast).toContain('the word "unproven"');
+    const skeleton = read('investigate/SKILL.md');
+    const recipes = skeleton.slice(skeleton.indexOf('## Recipes'), skeleton.indexOf('## Report'));
+    expect(recipes).toContain('sections/blast-radius.md');
+    const how = skeleton.slice(skeleton.indexOf('## How to work'), skeleton.indexOf('## Scope Lock'));
+    expect(how).toMatch(/search the generic error class, library and version, never the raw error text, hostnames, IPs, file paths, SQL, customer data or secrets/);
+    expect(how).toMatch(/Two fixes that shared one premise failed the same gate — write the premise down in one sentence and test it before a third fix/);
+  });
 });
 
 describe('installed Codex recipe sections', () => {
@@ -105,7 +120,7 @@ describe('installed Codex recipe sections', () => {
     for (const { id, file } of manifest.sections) {
       expect(text).toContain(`Read \`sections/${file}\` relative to the installed \`gstack-investigate\` SKILL.md directory`);
       const section = fs.readFileSync(path.join(codexSections, file), 'utf8');
-      const title = id === 'backlog' ? 'Backlog mode' : `${id === 'eval-bisect' ? 'Eval bisect' : id[0].toUpperCase() + id.slice(1)} recipe`;
+      const title = id === 'backlog' ? 'Backlog mode' : id === 'blast-radius' ? 'Blast radius' : `${id === 'eval-bisect' ? 'Eval bisect' : id[0].toUpperCase() + id.slice(1)} recipe`;
       expect(section).toContain(`## ${title}`);
     }
   });

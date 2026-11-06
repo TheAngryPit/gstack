@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MARKER, setup, config, defaultRender, record, served } from './helpers/claude-overlay-fixture';
 import { cleanupFixtures, cleanupSeed, makeFixture, makeSource, runSetup } from './helpers/install-fixture';
+import { readSkillStartup } from './helpers/skill-startup';
 
 afterEach(cleanupFixtures);
 afterAll(cleanupSeed);
@@ -21,7 +22,7 @@ describe.skipIf(process.platform === 'win32')('./setup --claude-model (default i
     expect(existsSync(defaultRender(f))).toBe(false);
     expect(existsSync(`${defaultRender(f)}.overlay`)).toBe(false);
     expect(config(f, src, 'has', 'claude_overlay_model').status).not.toBe(0);
-    expect(served(join(f.home, '.claude/skills'))).toBe(readFileSync(join(src, 'autoplan/SKILL.md'), 'utf8'));
+    expect(served(join(f.home, '.claude/skills'))).toBe(readSkillStartup(join(src, 'autoplan/SKILL.md')));
     expect(r.out).not.toContain('Claude skill overlay:');
     const status = setup(f, src, ['--status']);
     expect(status.stdout).toContain('~/.claude/skills: claude (default, committed render)');

@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {spawnSync} from 'node:child_process';
 const ROOT = path.resolve(import.meta.dir, '..');
-test.each(['complete-control', 'captured-omission', 'claimed-only', 'background', 'missing-report', 'unrelated-report', 'captured-timeout', 'performance-omitted', 'performance-background'])
+test.each(['complete-control', 'captured-omission', 'claimed-only', 'background', 'missing-report', 'unrelated-report', 'captured-timeout', 'performance-omitted', 'performance-background', 'informational-not-activated', 'informational-claimed'])
   ('N+1 registered completion contract: %s', scenario => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'n1-contract-'));
     const facts = path.join(dir, 'facts.json');
@@ -20,6 +20,7 @@ const data=structuredClone(['captured-omission','claimed-only'].includes(scenari
 if(scenario==='background')data.events[1].message.content[0].input.run_in_background=true;
 if(scenario==='performance-background')data.events[0].message.content[0].input.run_in_background=true;
 if(scenario==='performance-omitted')data.events.shift();
+if(['informational-not-activated','informational-claimed'].includes(scenario))data.events.splice(1,1);
 const parsed=actual.parseNDJSON(data.events.map(e=>JSON.stringify(e)));
 let prompt='';
 mock.module(path.join(root,'test/helpers/e2e-helpers.ts'),()=>({
@@ -35,7 +36,10 @@ mock.module(path.join(root,'test/helpers/session-runner.ts'),()=>({...actual,run
   expect(options.timeout).toBe(300000);expect(options.maxTurns).toBe(20);
   prompt=options.prompt;
   if(scenario!=='missing-report')fs.writeFileSync(path.join(options.workingDirectory,'review-output.md'),
-    scenario==='unrelated-report'?'No relevant evidence':'N+1 queries at posts_controller.rb:7 and :9.'+
+    scenario==='unrelated-report'?'No relevant evidence':
+    scenario==='informational-not-activated'?'SPECIALIST REVIEW: 2 findings (0 critical, 2 informational) from 1 specialist\\nN+1 queries at posts_controller.rb:7 and :9.\\nRed Team: not activated — no specialist produced a CRITICAL finding.':
+    scenario==='informational-claimed'?'SPECIALIST REVIEW: 2 findings (0 critical, 2 informational) from 1 specialist\\nN+1 queries at posts_controller.rb:7 and :9.\\nRed Team completed.':
+    'SPECIALIST REVIEW: 1 findings (1 critical, 0 informational) from 1 specialist\\nN+1 queries at posts_controller.rb:7 and :9.'+
       (scenario==='claimed-only'?' Red Team completed.':''));
   return {exitReason:scenario==='captured-timeout'?'timeout':'success',browseErrors:[],toolCalls:parsed.toolCalls,
     transcript:parsed.transcript,output:data.publicAcknowledgement??'Synthetic successful completion control.'};
@@ -47,11 +51,12 @@ await import(path.join(root,'test/skill-e2e-review-army.test.ts'));
         cwd: dir, encoding: 'utf8', timeout: 10_000,
         env: {PATH: process.env.PATH ?? '', HOME: dir, TMPDIR: dir, NO_COLOR: '1'},
       });
-      expect(child.status, child.stdout + child.stderr).toBe(scenario === 'complete-control' ? 0 : 1);
+      const passes = scenario === 'complete-control' || scenario === 'informational-not-activated';
+      expect(child.status, child.stdout + child.stderr).toBe(passes ? 0 : 1);
       expect(child.stderr).not.toContain('Unhandled error between tests');
       expect(fs.existsSync(facts), child.stdout + child.stderr).toBe(true);
       const observed = JSON.parse(fs.readFileSync(facts, 'utf8'));
-      expect(observed.passed).toBe(scenario === 'complete-control');
+      expect(observed.passed).toBe(passes);
       expect(observed.exitReason).toBe(scenario === 'captured-timeout' ? 'timeout' : 'success');
       expect(observed.prompt).toContain('conditional Red Team dispatch');
       expect(observed.prompt).toContain('separate foreground Red Team subagent');

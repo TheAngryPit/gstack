@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import {
   buildPaidShardArgs, buildRunManifest, parseRunManifest, planPaidShards,
   DEFAULT_JOBS, parseCliOptions, paidShardWallUpperBoundMs, resolvePaidShardBudget, retriesForFiles, verifySliceResults, collectPaidTestFiles, selectPaidTestFiles,
-  shardFile, sliceExecutionOrder, sliceSupervisedWallMs, CASE_SHARDED_FILES, sliceCiTimeoutMinutes, resolvePaidShardTimeoutMs,
+  shardFile, shardCaseId, shardTrial, sliceExecutionOrder, sliceSupervisedWallMs, CASE_SHARDED_FILES, sliceCiTimeoutMinutes, resolvePaidShardTimeoutMs,
 } from '../scripts/test-paid-shards';
 import {
   ALL_TIERS, AUQ_CONSISTENCY_RETRY_BUDGET, FILE_RETRY_BUDGETS,
@@ -21,7 +21,6 @@ const expectedWalls = {
   'test/skill-e2e-qa-callers.test.ts': 1_695_000,
   'test/skill-e2e-shared-libs-paths.test.ts': 1_920_000,
   'test/skill-e2e-ship-docsync.test.ts': 4_920_000,
-  'test/skill-llm-eval.test.ts': 3_170_000,
   'test/skill-e2e-auq-consistency.test.ts': 1_080_000,
   'test/skill-e2e-auq-matrix.test.ts': 1_920_000,
   'test/skill-e2e-plan-format.test.ts': 1_360_000,
@@ -51,9 +50,9 @@ test('paid evals never retry: every paid file and registered row runs once', () 
   }
 });
 
-test('registration covers exactly the seventeen demonstrated full-file retry gaps', () => {
+test('registration covers exactly the sixteen demonstrated full-file retry gaps', () => {
   expect(Object.fromEntries(newBudgets.map(row => [row.file, row.shardMs]))).toEqual(expectedWalls);
-  expect(new Set(FILE_RETRY_BUDGETS.map(row => row.file)).size).toBe(19);
+  expect(new Set(FILE_RETRY_BUDGETS.map(row => row.file)).size).toBe(18);
   expect(STRICT_RETRY_CASE_BUDGETS.map(row => row.file)).toEqual([
     ...FINDING_RETRY_BUDGETS.map(row => row.file), AUQ_CONSISTENCY_RETRY_BUDGET.file,
   ]);
@@ -170,19 +169,8 @@ test('fixed AUQ count remains strict while mixed-tier files keep ordinary case h
   }
 });
 
-test('quality judge supervision includes the added judge without changing ordinary tiers or finding registrations', () => {
+test('supervision rows leave the ordinary tiers and finding registrations unchanged', () => {
   expect(ALL_TIERS).toEqual({ JUDGE_MS: 120000, CAPTURE_MS: 300000, CAPTURE_LONG_MS: 600000, PTY_MS: 900000, PTY_LONG_MS: 1200000 });
-  const quality = 'test/skill-llm-eval.test.ts';
-  const qualityBudget = FILE_RETRY_BUDGETS.find(row => row.file === quality)!;
-  expect(resolvePaidShardBudget([quality])).toEqual({ timeoutMs: 3_170_000, source: 'registered', policyId: qualityBudget.id });
-  expect(retriesForFiles([quality])).toBe(0);
-  const qualitySource = read(quality);
-  const judgeTimeouts = [...qualitySource.matchAll(/}\s*,\s*(JUDGE_MS|WORKFLOW_JUDGE_TEST_MS)\s*\);/g)].map(match => match[1]);
-  expect(judgeTimeouts.filter(timeout => timeout === 'JUDGE_MS')).toHaveLength(7);
-  expect(judgeTimeouts.filter(timeout => timeout === 'WORKFLOW_JUDGE_TEST_MS')).toHaveLength(17);
-  expect(qualitySource).toContain('WORKFLOW_JUDGE_TEST_MS = JUDGE_MS + 10_000');
-  expect(qualitySource).toContain('const workDeadline = started + JUDGE_MS');
-  expect(qualityBudget.shardMs).toBe(7 * ALL_TIERS.JUDGE_MS + 17 * (ALL_TIERS.JUDGE_MS + 10_000) + 120_000);
   expect(FINDING_RETRY_BUDGETS.map(row => [row.cases, row.testMs, row.shardMs])).toEqual([
     ...Array(2).fill([1, 1500000, 1620000]),
   ]);
@@ -217,8 +205,9 @@ test('eval:bg runs the PR and release commands with their declared workers (cap:
 const cliOptions = (step: { run: string; env?: Record<string, string> }) => {
   const prefix = /\bbun(?: --no-install)? run scripts\/test-paid-shards\.ts /.exec(step.run);
   expect(prefix).not.toBeNull();
-  const args = step.run.slice(prefix!.index + prefix![0].length)
-    .replace(/\$\{\{\s*matrix\.slice\s*\}\}/g, '1').trim().split(/\s+/);
+  // One command line: a census arm loop continues past it.
+  const args = step.run.slice(prefix!.index + prefix![0].length).split('\n')[0]!
+    .replace(/\$\{\{\s*matrix\.slice\s*\}\}/g, '1').replace(/\$\{\{\s*matrix\.arm\s*\}\}/g, 'claude-opus').trim().split(/\s+/);
   return parseCliOptions(args, step.env ?? {});
 };
 
@@ -242,10 +231,16 @@ test('both gate executors plan the complete census and supervise every planned s
     expect(planned.skipJudges).toBe(skipJudges);
     expect(execute[0].env.EVALS_CONCURRENCY).toBe('2');
     expect(executor.strategy['fail-fast']).toBe(false);
-    expect(executor.strategy.matrix.slice).toBe(`\${{ fromJSON(needs.plan-slices.outputs.${prefix}slices) }}`);
-    // Per-slice ceilings (W2c/ENG-2), or the largest of them as one job cap.
-    expect([`\${{ fromJSON(needs.plan-slices.outputs.${prefix}slice_timeouts)[matrix.slice] }}`,
-      `\${{ fromJSON(needs.plan-slices.outputs.${prefix}timeout_minutes) }}`]).toContain(executor['timeout-minutes']);
+    if (jobName === 'gate-census') {
+      // One row per census arm and planned slice, each with its arm's planned slice ceiling (scripts/census-arms.ts).
+      expect(executor.strategy.matrix.include).toBe('${{ fromJSON(needs.plan-slices.outputs.gate_matrix) }}');
+      expect(executor['timeout-minutes']).toBe('${{ matrix.timeout }}');
+    } else {
+      expect(executor.strategy.matrix.slice).toBe(`\${{ fromJSON(needs.plan-slices.outputs.${prefix}slices) }}`);
+      // Per-slice ceilings (W2c/ENG-2), or the largest of them as one job cap.
+      expect([`\${{ fromJSON(needs.plan-slices.outputs.${prefix}slice_timeouts)[matrix.slice] }}`,
+        `\${{ fromJSON(needs.plan-slices.outputs.${prefix}timeout_minutes) }}`]).toContain(executor['timeout-minutes']);
+    }
     const manifest = buildRunManifest({ tier: 'gate', sliceBudgetMs: planned.sliceBudgetMs!, jobs: planned.jobs, evalsAll: true, env: { EVALS_ALL: '1' }, skipJudges });
     const files = [...new Set(manifest.entries.filter(row => row.status === 'planned').map(row => shardFile(row.file)))];
     expect(files).toContain('test/skill-e2e-ship-skip.test.ts');
@@ -262,8 +257,8 @@ test('both gate executors plan the complete census and supervise every planned s
     expect(manifest.sliceCount).toBeLessThanOrEqual(executor.strategy['max-parallel']);
     if (jobName === 'gate-census') {
       expect(emit[0].env.EVALS_ALL).toBe('1');
-      expect(emit[0].run).toContain('--emit-plan /tmp/gate-census-plan/manifest.json');
-      expect(execute[0].run).toContain('--plan /tmp/gate-census-plan/manifest.json --slice ${{ matrix.slice }}');
+      expect(emit[0].run).toContain('--emit-plan "/tmp/gate-census-plan/$arm/manifest.json"');
+      expect(execute[0].run).toContain('--plan /tmp/gate-census-plan/${{ matrix.arm }}/manifest.json --slice ${{ matrix.slice }}');
       expect(executor.steps.some((step: any) => step.with?.name === 'gate-census-plan')).toBe(true);
       expect(executor.steps.filter((step: any) => step.run?.includes('--emit-plan '))).toHaveLength(0);
     }
@@ -287,7 +282,6 @@ test('the periodic executor supervises every actual case within its planned CI w
     evalsAll: true, env: { EVALS_ALL: '1' } });
   const census = manifest.entries.filter(row => row.status === 'planned');
   expect(new Set(census.map(row => shardFile(row.file)))).toEqual(new Set(selectPaidTestFiles(collectPaidTestFiles(), 'periodic').selected));
-  expect(census.find(row => row.file === 'test/skill-llm-eval.test.ts')?.budget?.timeoutMs).toBe(3_170_000);
   // W2c/ENG-2: each slice's job ceiling covers its longest single shard (and the serialized overlay
     // envelope) plus setup; the in-process slice deadline turns work that cannot start into not_run.
     const sliceFiles = Array.from({ length: manifest.sliceCount }, (_, i) => sliceExecutionOrder(
@@ -305,8 +299,10 @@ test('gate census requires all seven distinct slice results and its own reconcil
   const reconcile = report.steps.find((step: any) => step.id === 'gate-reconcile');
   expect(report.needs).toContain('gate-census');
   expect(reconcile.if).toBe('always()');
-  expect(reconcile.run).toContain('EVALS_TIER=gate bun run scripts/test-paid-shards.ts --tier gate --report /tmp/gate-census-report');
-  expect(reconcile.run).toContain('exit=${PIPESTATUS[0]}');
+  // One reconciliation per census arm, each against its own plan and slices.
+  expect(reconcile.run).toContain('dir="/tmp/gate-census-report/$arm"');
+  expect(reconcile.run).toContain('EVALS_TIER=gate bun run scripts/test-paid-shards.ts --tier gate --report "$dir"');
+  expect(reconcile.run).toContain('code=${PIPESTATUS[0]}');
   const failureGuards = report.steps.filter((step: any) => /Upsert tracking|Fail the workflow/.test(step.name ?? ''));
   expect(failureGuards).toHaveLength(2);
   for (const step of failureGuards) {
@@ -322,6 +318,7 @@ test('gate census requires all seven distinct slice results and its own reconcil
       files: [row.file], status: 'passed' as const, exitCode: 0, elapsedMs: 1, skippedTests: 0,
       executedTests: STRICT_RETRY_CASE_BUDGETS.find(budget => budget.file === row.file)?.cases ?? 1,
       ...(row.budget ? { budget: row.budget } : {}),
+      ...(row.trial ? { trial: { case: shardCaseId(row.file)!, trial: shardTrial(row.file)!, ...row.trial, outcome: 'passed' as const, cost_usd: 0, duration_ms: 1 } } : {}),
     })),
   }));
   expect(verifySliceResults(manifest, results)).toEqual({ ok: true, problems: [] });

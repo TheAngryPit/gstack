@@ -132,8 +132,7 @@ describe('per-kind batches decided by the measurement bar, with fake runners (EN
     expect(wrongCount).toMatchObject({ passes: 0, decision: 'BELOW' });
   });
 
-  test('standalone judge ids resolve to the one paid file that names them', () => {
-    expect(judgeFile('review/SKILL.md workflow')).toBe('test/skill-llm-eval.test.ts');
+  test('a standalone judge id that no paid file names is refused', () => {
     expect(() => judgeFile('no-such-judge-id')).toThrow('no paid file names it');
   });
 });
@@ -326,7 +325,7 @@ describe('free-suite shard reruns (CEO-1)', () => {
     const args = diagnostic.stdout.split('\n');
     expect(args).toContain('GSTACK_FREE_RETRY_FLAKY=0');
     expect(args).not.toContain('GSTACK_FREE_RETRY_FLAKY=1');
-    expect(args).toContain('xvfb-run -a bun run scripts/ship-measure.ts free --backend local --files test/a.test.ts,test/b.test.ts --reruns 10');
+    expect(args).toContain('xvfb-run -a bun --no-env-file --config=/dev/null run scripts/ship-measure.ts free --backend local --files test/a.test.ts,test/b.test.ts --reruns 10');
     expect(args.some(a => a.startsWith('work/') && a.includes('/.context/ship-measure:'))).toBe(true);
     const normal = launch().stdout.split('\n');
     expect(normal).toContain('GSTACK_FREE_RETRY_FLAKY=1');

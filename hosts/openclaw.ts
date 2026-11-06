@@ -3,7 +3,7 @@ import { defineHost, CROSS_MODEL_RESOLVERS, GBRAIN_RESOLVERS, EXEC_STYLE_TOOL_RE
 const openclaw = defineHost({
   name: 'openclaw',
   displayName: 'OpenClaw',
-  tier: 'instruction-only',
+  tier: 'experimental',
   capabilities: { toolExecution: true, questions: 'prose', planMode: false, delegation: true, browser: true, safetyHooks: 'advisory' },
 
   extraPathRewrites: [
@@ -14,11 +14,13 @@ const openclaw = defineHost({
   // Suppress Claude-specific preamble sections that don't apply to OpenClaw
   suppressedResolvers: [...CROSS_MODEL_RESOLVERS, ...GBRAIN_RESOLVERS],
 
-  // No full install arm — users can hand-copy the instruction-only digest
-  // (setup's explainer arm prints this path; never auto-copied).
+  // ./setup --host openclaw (and setup run inside OpenClaw) registers through
+  // gstack-harness: the task skills plus one gstack router skill for the rest in
+  // $OPENCLAW_STATE_DIR/skills (hybrid), or --skills router|all. OpenClaw's ACP
+  // route (docs/OPENCLAW.md) stays.
   install: {
     linkingStrategy: 'symlink-generated',
-    instructionTier: { rulesFile: 'agents-digest/gstack-AGENTS.md' },
+    registration: 'harness',
   },
 
   coAuthorTrailer: 'Co-Authored-By: OpenClaw Agent <agent@openclaw.ai>',

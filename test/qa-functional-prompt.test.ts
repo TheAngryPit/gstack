@@ -195,6 +195,23 @@ test('declared examples respect the existing closed native grammar', () => {
   }
 });
 
+// Gate 40290033102 slice 9 (qa-functional-webhook-fix): the agent ran `bun run probe -- --help`
+// bare, outside a capture, before its first capture. The grammar refuses it, and the only
+// --help the interface grants is the helper's own, which the prompt now says in so many words.
+test('the prompt grants --help to the evidence helper alone, and a bare probe --help stays outside the grammar', () => {
+  for (const entry of QA_FUNCTIONAL_CASES) {
+    const prompt = qaFunctionalPrompt(entry);
+    const helper = prompt.indexOf('`bun bin/gstack-qa-evidence --help` prints its usage');
+    expect(helper).toBeGreaterThan(-1);
+    expect(prompt.slice(helper)).toContain("That is the only --help here: the probe's contract is README.md, so a bare bun run probe (with --help or any argument) outside a capture is a bypass, not a read.");
+    expect(prompt.indexOf('That is the only --help here')).toBeLessThan(prompt.indexOf('observation form'));
+  }
+  for (const command of ['bun run probe -- --help', 'bun run probe --help', 'bun run probe', 'bun run probe -- help']) {
+    expect(qaCommandAllowed(command), command).toBe(false);
+  }
+  expect(qaCommandAllowed('bun bin/gstack-qa-evidence --help')).toBe(true);
+});
+
 test('artifact completion preserves exact evidence before concise linked reporting', () => {
   for (const entry of QA_FUNCTIONAL_CASES) {
     const prompt = qaFunctionalPrompt(entry);

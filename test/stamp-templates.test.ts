@@ -45,7 +45,9 @@ describe('stamp templates (pure)', () => {
     expect(rewriteStamps('"version": "1.2.3.0",', '1.2.3.0', '1.2.4.0', ['"version": "{version}"']).count).toBe(1);
     expect(rewriteStamps('<!-- x-plugin-tree-stamp: 1.2.3.0 -->', '1.2.3.0', '1.2.4.0', ['<!-- x-plugin-tree-stamp: {version} -->']).text).toBe('<!-- x-plugin-tree-stamp: 1.2.4.0 -->');
     expect(rewriteStamps("since: '1.2.3.01'", '1.2.3.0', '1.2.4.0', ["since: '{version}'"]).count).toBe(0);
-    expect(rewriteStamps("since: '1.2.3.0'", '1.2.3.0', '1.2.4.0').count).toBe(0);
+    // A quoted since: row is a built-in form too (gbrain #7640): the template and the built-in count it once.
+    expect(rewriteStamps("since: '1.2.3.0'", '1.2.3.0', '1.2.4.0')).toEqual({ text: "since: '1.2.4.0'", count: 1 });
+    expect(rewriteStamps("since: '1.2.3.0'", '1.2.3.0', '1.2.4.0', ["since: '{version}'"]).count).toBe(1);
   });
 
   test('policy: stamp_patterns are bounded literal templates with exactly one {version}; stamp_files are contained globs', () => {

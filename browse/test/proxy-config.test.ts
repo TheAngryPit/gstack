@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { parseProxyConfig, computeConfigHash, ProxyConfigError } from '../src/proxy-config';
+import { parseProxyConfig, computeConfigHash, directProxyLogLine, explicitDirect, forcesDirect, serverProxyEnv, ProxyConfigError } from '../src/proxy-config';
 import { extractGlobalFlags } from '../src/cli';
 
 describe('parseProxyConfig', () => {
@@ -185,5 +185,67 @@ describe('extractGlobalFlags', () => {
       ENV_EMPTY,
     );
     expect(a.configHash).not.toBe(b.configHash);
+  });
+});
+
+describe('forcesDirect (#3440 item 8)', () => {
+  test('Linux always makes a direct connection explicit, because Chromium reads the proxy variables there', () => {
+    expect(forcesDirect({}, 'linux')).toBe(true);
+    expect(forcesDirect({ HTTPS_PROXY: 'http://b:2' }, 'linux')).toBe(true);
+  });
+
+  test('macOS and Windows keep the system proxy settings unless the user chose direct', () => {
+    for (const platform of ['darwin', 'win32'] as const) {
+      expect(forcesDirect({}, platform)).toBe(false);
+      expect(forcesDirect({ HTTPS_PROXY: 'http://b:2' }, platform)).toBe(false);
+      expect(forcesDirect({ BROWSE_PROXY_URL: 'direct' }, platform)).toBe(true);
+    }
+  });
+});
+
+describe('explicitDirect (#3440 item 8)', () => {
+  test('is the opt-out on macOS and Windows and nothing on Linux, where direct is already explicit', () => {
+    expect(explicitDirect({ BROWSE_PROXY_URL: 'direct' }, 'darwin')).toBe(true);
+    expect(explicitDirect({ BROWSE_PROXY_URL: 'direct' }, 'win32')).toBe(true);
+    expect(explicitDirect({ BROWSE_PROXY_URL: 'direct' }, 'linux')).toBe(false);
+    expect(explicitDirect({ BROWSE_PROXY_URL: 'http://p:1' }, 'darwin')).toBe(false);
+    expect(explicitDirect({}, 'darwin')).toBe(false);
+  });
+
+  test('the config hash separates an explicit direct from no proxy, and ignores it beside a proxy', () => {
+    const plain = computeConfigHash({ proxyUrl: null, headed: false });
+    expect(computeConfigHash({ proxyUrl: null, headed: false, explicitDirect: false })).toBe(plain);
+    expect(computeConfigHash({ proxyUrl: null, headed: false, explicitDirect: true })).not.toBe(plain);
+    expect(computeConfigHash({ proxyUrl: 'http://p:1', headed: false, explicitDirect: true }))
+      .toBe(computeConfigHash({ proxyUrl: 'http://p:1', headed: false }));
+  });
+
+  test('the daemon reads the opt-out from its own environment for the state file, on the platforms where it matters', () => {
+    expect(serverProxyEnv({ BROWSE_PROXY_URL: 'direct' }, 'darwin').direct).toBe(true);
+    expect(serverProxyEnv({ BROWSE_PROXY_URL: 'direct' }, 'win32').direct).toBe(true);
+    expect(serverProxyEnv({ BROWSE_PROXY_URL: 'direct' }, 'linux').direct).toBe(false);
+    expect(serverProxyEnv({}, 'darwin').direct).toBe(false);
+    expect(serverProxyEnv({ BROWSE_PROXY_URL: 'http://p:1' }, 'darwin').direct).toBe(false);
+  });
+});
+
+describe('directProxyLogLine (#3440 item 8)', () => {
+  test('names the switch alone when no standard variable is set', () => {
+    expect(directProxyLogLine({}, 'linux')).toBe('[browse] [proxy] none: direct connection (--proxy-server=direct://)');
+  });
+
+  test('names every set standard variable in precedence order, and nothing else', () => {
+    const line = directProxyLogLine({ all_proxy: 'socks5://a:1', HTTPS_PROXY: 'http://b:2', BROWSE_PROXY_URL: 'direct', NO_PROXY: 'x', PATH: '/bin' }, 'linux');
+    expect(line).toBe('[browse] [proxy] none: direct connection (--proxy-server=direct://; ignoring HTTPS_PROXY, all_proxy)');
+  });
+
+  test('an explicit direct on macOS or Windows names the system proxy settings, never variables Chromium did not read', () => {
+    const line = directProxyLogLine({ HTTPS_PROXY: 'http://b:2', BROWSE_PROXY_URL: 'direct' }, 'win32');
+    expect(line).toBe('[browse] [proxy] none: direct connection (--proxy-server=direct://; ignoring the system proxy settings)');
+  });
+
+  test('no proxy on macOS or Windows reports the system proxy settings Chromium follows', () => {
+    expect(directProxyLogLine({ HTTPS_PROXY: 'http://b:2' }, 'darwin'))
+      .toBe("[browse] [proxy] none: system proxy settings (Chromium's default on darwin; BROWSE_PROXY_URL=direct connects directly)");
   });
 });

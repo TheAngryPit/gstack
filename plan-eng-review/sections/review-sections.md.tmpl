@@ -43,7 +43,7 @@ path authorizes no other; implementation edits require explicit authority.
 
 QA Test Plan/task JSONL keep discovery paths `$GSTACK_STATE_ROOT/projects/{slug}/`:
 `{user}-{branch}-eng-review-test-plan-{datetime}.md` and
-`tasks-eng-review-{datetime}.jsonl`. Keep their formats; do not relocate.
+`tasks-eng-review-{branch}-{datetime}.jsonl`. Keep their formats; do not relocate.
 
 **First report save:** Name the fixed target in the report header. Read an
 existing destination and preserve its content. For a new file, create permitted
@@ -339,18 +339,19 @@ Initial scope selectors need no grid or **pre-answer** ledger write. Ask and
 wait before changes.
 
 1. Explain the complexity. Ask each proposed feature cut/deferral separately;
-   wait before changing scope. With no proposed cuts, keep the feature list and
-   go directly to the structure question.
-2. Always ask the structure question when this gate trips, even with no cuts.
-   Compare only the file/class arrangement. Use labels `Original arrangement`
-   and `Smaller arrangement`; put files/classes in each description. Both retain
+   wait before changing scope.
+2. Always resolve the structure question when this gate trips, even with no cuts,
+   as question_id `plan-eng-review-structure` (no per-plan slug); `AUTO_DECIDE`
+   picks the recommendation. Compare only the file/class arrangement, labeled
+   `Original arrangement` and `Smaller arrangement`, with files/classes per
+   option. Both retain
    the same approved feature list, contracts and approved
    security/error/test/performance fixes. Include `Pending remedies not decided here: <ids>` in the
    question; unapproved fixes stay pending. If no smaller arrangement preserves
    these commitments, explain that and offer confirmation of the original
    arrangement or a pause to investigate a smaller one. Wait for the answer.
    A pause leaves the arrangement undecided: investigate only the agreed question,
-   then return to this structure selector. Do not continue to C until it is settled.
+   then return to the selector. Do not continue to C until it is settled.
 3. Save the actual feature and structure answers as one scope record: `feature
    answers: <refs>; structure: <A/B + ref>; accepted scope: <exact scope>;
    pending remedies: <ids or none>`.
@@ -401,6 +402,52 @@ Evaluate:
 * Key flows needing ASCII diagrams in plans/code.
 * One realistic production failure per new path/integration; does the plan handle it?
 * **Distribution architecture:** New artifacts' build, publish and update paths; included or deferred CI/CD.
+
+<!-- "Design it twice" and the red flags derive from pstack's architect skill (Lauren Tan, MIT), rewritten for gstack. See NOTICE.md. -->
+### Two shapes before one (design-twice)
+
+Run this only when the plan introduces a new module, service, package or
+boundary: a public surface other code calls; otherwise say so in one line.
+
+**Ask for the second shape.** A plan with one design usually took the first
+shape that compiled in the author's head. Before judging it, require a second
+shape that is structurally different: another owner for the state, another
+split of responsibilities, another place for the boundary. A point fix inside
+the first shape is not a second candidate. When the plan has none, sketch one
+in five lines (types and signatures, bodies `not implemented`) and record it
+as the alternative. Compare the candidates on interface depth: how much
+behavior and policy each hides behind how small a public surface, and prefer
+the one that hides more behind less. A deep module is not a deep call chain:
+the chain scatters the understanding across layers, the module concentrates
+it behind one interface.
+
+**The eight red flags.** Screen the chosen shape before Section 1 closes.
+Assume the next contributor is an agent that sees only the files it opened,
+copies the nearest example and takes the shortest path that compiles; prefer
+the design where a change that looks right from one file is right for the
+whole repo. A flag is a finding with a file or symbol and a reason to revise
+the shape, not a comment asking for care.
+
+1. **Shallow module.** A large interface over little hidden complexity:
+   several calls per operation, options that expose internal stages.
+2. **Information leakage.** One decision (a representation, a policy, a wire
+   or storage detail) lives in more than one module. Re-exported transport
+   types are leakage; parse external data into domain types at the boundary.
+3. **Temporal decomposition.** Modules split by execution order (load,
+   validate, transform, save) instead of by the knowledge they own.
+4. **Pass-through method.** A function that forwards the same arguments to
+   another with the same shape; remove it or move the responsibility.
+5. **Split ownership.** Two modules write the same state or each keep a copy;
+   an agent editing one cannot see the other. One owner per piece of state.
+6. **Two ways to do one task.** An agent copies whichever it meets first.
+   Keep one; move the callers and delete the rest in the same change.
+7. **Importable internals.** The shortest path that compiles imports them and
+   they become interface. Make an outside import fail the build.
+8. **Hand-synced list.** The same items in two places; an agent that sees one
+   list edits one. Derive the second, or fail the build when they disagree.
+
+Record under Architecture: both shapes, the pick, the depth argument for it,
+and each flag with its fix.
 
 ### 2. Code quality review
 Evaluate:

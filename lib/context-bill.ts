@@ -18,13 +18,16 @@
  * Token figures come from one of two sources, always named in the output:
  *   ESTIMATE (default, offline)  bytes / TOKEN_DIVISOR, calibrated against real
  *                               count_tokens measurements.
- *   EXACT (--exact, opt-in)      Anthropic's count_tokens for every file the
- *                               bill touches. Sends file content off-machine,
- *                               so it is never implicit: an egress receipt is
- *                               written before the POSTs (sink
- *                               'context-bill-exact'), and if the receipt
- *                               cannot be written the run degrades to the
- *                               offline estimate with a warning instead of
+ *   EXACT (--exact, opt-in)      Anthropic's count_tokens for every billed .md
+ *                               file inside the tree, the linked gstack
+ *                               checkout or $GSTACK_STATE_ROOT/render; anything
+ *                               else a symlink reaches is named and estimated,
+ *                               and the bill is labelled mixed. Sends file
+ *                               content off-machine, so it is never implicit:
+ *                               an egress receipt is written before the POSTs
+ *                               (sink 'context-bill-exact'), and if the
+ *                               receipt cannot be written the run degrades to
+ *                               the offline estimate with a warning instead of
  *                               sending unrecorded.
  * Both bytes and tokens are always shown, and the estimate's measured error
  * band is printed with it. The tool never writes state anywhere (the egress
@@ -34,6 +37,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { writeReceipt } from "./egress-receipt";
+import { resolveStateRoot } from "./state-root";
 
 const FORCED_PHRASE = "for every invocation";
 // Backticked reference in prose. `<...>` is excluded: a path template such as
@@ -43,6 +47,17 @@ const PROSE_REF = /`(references\/[^`<>]+\.md)`/g;
 const ROUTER_KEYS = new Set(["name", "description", "version", "allowed-tools", "triggers", "preamble-tier"]);
 // Skill-shaped files other hosts drop into scanner scope.
 const FOREIGN_SKILL_FILE = /^(skill\.(ya?ml|json)|agents?\.md|\.cursorrules|\.windsurfrules)$/i;
+/** Directory entries one walkMdFiles or findSkillDirs call may examine before it refuses the tree. */
+const WALK_ENTRY_CAP = 200_000;
+/** tokenSource prefix of a bill that --exact priced partly by estimate. */
+const MIXED_PREFIX = "mixed: ";
+
+function entryCapError(dir: string, cap: number): Error {
+  return new Error(
+    `${dir} has more than ${cap} entries to walk; a symlink in it probably points at a large tree. ` +
+      `Nothing was billed or sent. Remove or narrow that link and run again.`,
+  );
+}
 
 /**
  * Bytes per token, per content class, fitted to real count_tokens measurements.
@@ -175,9 +190,15 @@ function sumTokens(entries: { tokens: number }[]): number {
   return entries.reduce((n, e) => n + e.tokens, 0);
 }
 
-/** Cache key for a SKILL.md's frontmatter block, which is a slice, not a whole file. */
-function frontmatterKey(skillMdPath: string): string {
-  return `${skillMdPath}#frontmatter`;
+/**
+ * Cache key for a .md file's frontmatter block, which is a slice, not a whole
+ * file. The bill looks it up through a SKILL.md path; --exact measures it once
+ * per real SKILL.md the bill prices, keyed by the first path the send set
+ * reached that file by, so a SKILL.md first walked under another name still
+ * has one.
+ */
+function frontmatterKey(mdPath: string): string {
+  return `${mdPath}#frontmatter`;
 }
 
 function parseFrontmatter(text: string): { bytes: number; keys: string[]; block: string } {
@@ -195,55 +216,197 @@ function parseFrontmatter(text: string): { bytes: number; keys: string[]; block:
   return { bytes: Buffer.byteLength(block, "utf8"), keys, block };
 }
 
-/**
- * Every .md file under a tree, for the on-disk total and for exact
- * measurement. Skips node_modules and dot-directories: a skills tree that is
- * also a repo checkout (dev symlink installs) would otherwise bill its
- * dependency tree and CI state as skill content.
- */
-export function walkMd(dir: string): string[] {
-  const out: string[] = [];
-  let entries: fs.Dirent[];
+/** Whether a path is a regular file once symlinks are followed; a dangling link is not. */
+function isFile(p: string): boolean {
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What a directory entry is once symlinks are followed. Installed skills are
+ * symlinks into the gstack checkout (`review/SKILL.md -> <checkout>/review/SKILL.md`,
+ * `office-hours/sections -> <checkout>/office-hours/sections`), so a plain
+ * Dirent type check sees none of them. Dangling links and anything that is
+ * neither a file nor a directory are null.
+ */
+function entryKind(p: string, e: fs.Dirent): "file" | "dir" | null {
+  if (e.isFile()) return "file";
+  if (e.isDirectory()) return "dir";
+  if (!e.isSymbolicLink()) return null;
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() ? "file" : st.isDirectory() ? "dir" : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The realpath of `p`, resolved one component at a time the way the walk
+ * reads directories, so a lexical path that crosses more links than the
+ * kernel's limit still resolves.
+ */
+function realpathStepwise(p: string): string {
+  const abs = path.resolve(p);
+  const { root } = path.parse(abs);
+  let real = fs.realpathSync(root);
+  for (const segment of abs.slice(root.length).split(path.sep)) {
+    if (segment) real = fs.realpathSync(path.join(real, segment));
+  }
+  return real;
+}
+
+/**
+ * Whether directory `outer` contains (or is) `inner`, both realpaths. A
+ * followed directory symlink that contains the tree being walked (`..`, `/`,
+ * `$HOME`) would climb out of that tree, so walkers refuse it.
+ */
+function encloses(outer: string, inner: string): boolean {
+  const rel = path.relative(outer, inner);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/** walkMdFiles(dir)'s lexical paths, with no billedRoot fence or nested-skill skip. Only tests call it; the bill and --exact use walkMdFiles. */
+export function walkMd(dir: string): string[] {
+  return walkMdFiles(dir).map((f) => f.path);
+}
+
+export interface WalkedFile {
+  /** The lexical path under the walked dir; the key the bill and --exact use. */
+  path: string;
+  /** The file's realpath when it was walked. */
+  real: string;
+  /** The file's identity, taken without following links when it was walked; --exact reads only that same file. */
+  dev: number;
+  ino: number;
+  /** Its size and mtime when it was walked; a measurement is reused only for a file that still has them. */
+  size: number;
+  mtimeMs: number;
+}
+
+/**
+ * Every .md file under a tree, with its realpath and identity, for the
+ * on-disk total and for exact measurement. Skips node_modules and
+ * dot-directories: a skills tree that is also a repo checkout (dev symlink
+ * installs) would otherwise bill its dependency tree and CI state as skill
+ * content. A child repo checkout (the
+ * `gstack/` link inside ~/.claude/skills) is skipped for the same reason.
+ *
+ * Symlinked files and directories are followed, and every returned path stays
+ * the lexical path under `dir`, so buildBill and --exact key the same files.
+ * Each real directory is expanded once and each real file returned once per
+ * walk, under the first lexical path reached with entries in sorted order: a
+ * skill loads a file once however many links reach it, and links that fan out
+ * into each other cannot multiply the walk. A directory that encloses `dir`,
+ * or `billedRoot` (the tree a skill is billed under), is never entered. A link
+ * named *.md counts only when its target is a .md file too, so --exact never
+ * sends a non-markdown file through a markdown-named link. More than
+ * WALK_ENTRY_CAP entries is an error, never a silent cut.
+ *
+ * With `skipNestedSkills`, a top-level subdirectory holding its own SKILL.md is
+ * not entered, so a container skill keeps the files it shares with a nested
+ * skill instead of losing them to whichever path sorted first. The root
+ * container also skips a nested skill reached through a directory link at any
+ * depth: discovery bills that skill on its own, and the plain walk this
+ * replaced never followed directory links, so counting it here too would bill
+ * it twice.
+ *
+ * Every directory is read through its realpath, so a lookup crosses at most
+ * one link however deep the lexical path runs: a chain of links never hits
+ * the kernel's link-depth limit (ELOOP) and silently loses the files past it.
+ */
+export function walkMdFiles(dir: string, opts: { billedRoot?: string; skipNestedSkills?: boolean } = {}): WalkedFile[] {
+  const out: WalkedFile[] = [];
+  let rootReal: string;
+  let billedReal: string;
+  try {
+    rootReal = fs.realpathSync(dir);
+    billedReal = fs.realpathSync(opts.billedRoot ?? dir);
   } catch {
     return out;
   }
-  for (const e of entries) {
-    if (e.name.startsWith(".") || e.name === "node_modules") continue;
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) out.push(...walkMd(p));
-    else if (e.isFile() && e.name.endsWith(".md")) out.push(p);
-  }
+  const seen = new Set<string>([rootReal]);
+  const container = rootReal === billedReal;
+  let entryCount = 0;
+  const walk = (current: string, currentReal: string, viaLink: boolean) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(currentReal, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      if (++entryCount > WALK_ENTRY_CAP) throw entryCapError(dir, WALK_ENTRY_CAP);
+      if (e.name.startsWith(".") || e.name === "node_modules") continue;
+      const viaReal = path.join(currentReal, e.name);
+      const kind = entryKind(viaReal, e);
+      if (kind === "file") {
+        if (!e.name.endsWith(".md")) continue;
+      } else if (
+        kind !== "dir" ||
+        fs.existsSync(path.join(viaReal, ".git")) ||
+        (opts.skipNestedSkills &&
+          (current === dir || (container && (viaLink || e.isSymbolicLink()))) &&
+          isFile(path.join(viaReal, "SKILL.md")))
+      ) {
+        continue;
+      }
+      let real: string;
+      try {
+        real = fs.realpathSync(viaReal);
+      } catch {
+        continue;
+      }
+      if (seen.has(real)) continue;
+      const p = path.join(current, e.name);
+      if (kind === "file") {
+        if (!real.endsWith(".md")) continue;
+        let st: fs.Stats;
+        try {
+          st = fs.lstatSync(real);
+        } catch {
+          continue;
+        }
+        if (!st.isFile()) continue;
+        seen.add(real);
+        out.push({ path: p, real, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs });
+        continue;
+      }
+      if (encloses(real, rootReal) || encloses(real, billedReal)) continue;
+      seen.add(real);
+      walk(p, real, viaLink || e.isSymbolicLink());
+    }
+  };
+  walk(dir, rootReal, false);
   return out;
 }
 
-function totalMd(dir: string, tokensOf: TokensOf): { bytes: number; tokens: number } {
+function totalMd(dir: string, tokensOf: TokensOf, billedRoot: string): { bytes: number; tokens: number } {
   let bytes = 0;
   let tokens = 0;
-  for (const p of walkMd(dir)) {
-    // A skill dir that CONTAINS other skill dirs (the gstack root skill wraps
-    // the whole tree) must not swallow its children's files: each nested
-    // skill reports its own totalMd, and the grand total sums per-skill
-    // figures — counting them here again double-counted every nested skill
-    // in the TOTAL line (v1.63 deferred polish, fixed in fork port wave 2).
-    const rel = path.relative(dir, p);
-    const topSeg = rel.split(path.sep)[0];
-    if (
-      topSeg &&
-      topSeg !== rel && // p is inside a subdirectory
-      fs.existsSync(path.join(dir, topSeg, "SKILL.md"))
-    ) {
-      continue;
-    }
-    const b = bytesOf(p) ?? 0;
+  // A skill dir that CONTAINS other skill dirs (the gstack root skill wraps
+  // the whole tree) must not swallow its children's files: each nested
+  // skill reports its own totalMd, and the grand total sums per-skill
+  // figures — counting them here again double-counted every nested skill
+  // in the TOTAL line (v1.63 deferred polish, fixed in fork port wave 2).
+  for (const { path: p, real } of walkMdFiles(dir, { billedRoot, skipNestedSkills: true })) {
+    const b = bytesOf(real) ?? 0;
     bytes += b;
     tokens += tokensOf(p, b);
   }
   return { bytes, tokens };
 }
 
-export function parseSkill(skillDir: string, name: string, tokensOf: TokensOf = estimateTokensOf): SkillBill {
+export function parseSkill(
+  skillDir: string,
+  name: string,
+  tokensOf: TokensOf = estimateTokensOf,
+  billedRoot: string = skillDir,
+): SkillBill {
   const skillMdPath = path.join(skillDir, "SKILL.md");
   const text = fs.readFileSync(skillMdPath, "utf8");
   const skillMdBytes = bytesOf(skillMdPath) ?? 0;
@@ -275,14 +438,14 @@ export function parseSkill(skillDir: string, name: string, tokensOf: TokensOf = 
   // Foreign-host skill files sitting next to SKILL.md.
   const foreignFiles: { path: string; bytes: number; tokens: number }[] = [];
   for (const entry of fs.readdirSync(skillDir, { withFileTypes: true })) {
-    if (entry.isFile() && FOREIGN_SKILL_FILE.test(entry.name)) {
-      const abs = path.join(skillDir, entry.name);
+    const abs = path.join(skillDir, entry.name);
+    if (FOREIGN_SKILL_FILE.test(entry.name) && entryKind(abs, entry) === "file") {
       const bytes = bytesOf(abs) ?? 0;
       foreignFiles.push({ path: entry.name, bytes, tokens: tokensOf(abs, bytes) });
     }
   }
 
-  const total = totalMd(skillDir, tokensOf);
+  const total = totalMd(skillDir, tokensOf, billedRoot);
   const eagerBytes = skillMdBytes + sumBytes(forcedRefs);
   const eagerTokens = skillMdTokens + sumTokens(forcedRefs);
   return {
@@ -333,52 +496,59 @@ export function parseSkill(skillDir: string, name: string, tokensOf: TokensOf = 
  * repo checkout (`gstack/`, with .git). Its nested SKILL.md files are the
  * repo's sources, not installed skills of the tree being billed.
  *
- * Directory symlinks are followed (setup's shell glob follows them, so a
- * symlinked skill like connect-chrome/ is real scanner load); a realpath
- * seen-set breaks cycles.
+ * Symlinks are followed. Directory links: setup's shell glob follows them, so
+ * a symlinked skill like connect-chrome/ is real scanner load. File links:
+ * setup installs every skill as a real directory whose SKILL.md is a symlink
+ * into the checkout, so skipping them billed a real install as two skills.
+ * A realpath seen-set breaks cycles, a link to a directory that encloses the
+ * root is never followed, and every returned path stays under the root.
  */
-export function findSkillDirs(root: string): string[] {
+export function findSkillDirs(root: string, entryCap: number = WALK_ENTRY_CAP): string[] {
   const out: string[] = [];
   const visited = new Set<string>();
-  const walk = (dir: string, isRoot: boolean) => {
+  const rootDir = path.resolve(root);
+  let entryCount = 0;
+  let rootReal: string;
+  try {
+    rootReal = fs.realpathSync(rootDir);
+  } catch {
+    return out;
+  }
+  // Each directory is read through its realpath (see walkMdFiles), so a deep
+  // chain of links cannot hit the kernel's link limit and drop a skill.
+  const walk = (dir: string, real: string, isRoot: boolean) => {
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = fs.readdirSync(real, { withFileTypes: true });
     } catch {
       return;
     }
-    if (entries.some((e) => e.isFile() && e.name === "SKILL.md")) {
+    if (entries.some((e) => e.name === "SKILL.md" && entryKind(path.join(real, e.name), e) === "file")) {
       out.push(dir);
       // Two symlinked paths to the same skill dir are BOTH billed (each is
       // real scanner load); only container recursion below is cycle-guarded.
       if (!isRoot) return;
     }
     // Cycle guard for container recursion (a symlink loop of directories).
-    let real: string;
-    try {
-      real = fs.realpathSync(dir);
-    } catch {
-      return;
-    }
     if (visited.has(real)) return;
     visited.add(real);
     for (const e of entries) {
+      if (++entryCount > entryCap) throw entryCapError(rootDir, entryCap);
       if (e.name.startsWith(".") || e.name === "node_modules") continue;
-      const child = path.join(dir, e.name);
-      let isDir = e.isDirectory();
-      if (!isDir && e.isSymbolicLink()) {
-        try {
-          isDir = fs.statSync(child).isDirectory();
-        } catch {
-          continue; // dangling symlink
-        }
+      const viaReal = path.join(real, e.name);
+      if (entryKind(viaReal, e) !== "dir") continue;
+      if (fs.existsSync(path.join(viaReal, ".git"))) continue; // repo checkout, not a skill
+      let childReal: string;
+      try {
+        childReal = fs.realpathSync(viaReal);
+      } catch {
+        continue;
       }
-      if (!isDir) continue;
-      if (fs.existsSync(path.join(child, ".git"))) continue; // repo checkout, not a skill
-      walk(child, false);
+      if (encloses(childReal, rootReal)) continue; // would climb out of the root
+      walk(path.join(dir, e.name), childReal, false);
     }
   };
-  walk(path.resolve(root), true);
+  walk(rootDir, rootReal, true);
   return out.sort();
 }
 
@@ -404,25 +574,32 @@ export interface Bill {
 
 export function buildBill(
   root: string,
-  { tokensOf = estimateTokensOf, tokenSource, calibration }: {
+  { tokensOf = estimateTokensOf, tokenSource, calibration, missedKeys }: {
     tokensOf?: TokensOf;
     tokenSource?: string;
     calibration?: Calibration;
+    /** Keys a measured tokensOf had to estimate; filled while the bill is priced. */
+    missedKeys?: ReadonlySet<string>;
   } = {},
 ): Bill {
   const resolved = path.resolve(root);
   if (!fs.existsSync(resolved)) throw new Error(`No such tree: ${resolved}`);
   const skills = findSkillDirs(resolved).map((dir) =>
-    parseSkill(dir, path.relative(resolved, dir) || path.basename(resolved), tokensOf),
+    parseSkill(dir, path.relative(resolved, dir) || path.basename(resolved), tokensOf, resolved),
   );
   const total = skills.reduce((n, s) => n + s.totalMdBytes, 0);
   const totalTokens = skills.reduce((n, s) => n + s.totalMdTokens, 0);
+  const estimated = tokenSource ? (missedKeys?.size ?? 0) : 0;
   return {
     root: resolved,
     // Named so a reader never has to guess whether a figure was measured.
-    tokenSource: tokenSource ?? "estimate: calibrated bytes/token per content class",
+    tokenSource: !tokenSource
+      ? "estimate: calibrated bytes/token per content class"
+      : estimated
+        ? `${MIXED_PREFIX}${tokenSource}, with ${estimated} item(s) estimated offline`
+        : tokenSource,
     tokenEstimate: TOKEN_DIVISORS,
-    tokenEstimateErrorPct: tokenSource ? 0 : TOKEN_ESTIMATE_ERROR_PCT,
+    tokenEstimateErrorPct: tokenSource && !estimated ? 0 : TOKEN_ESTIMATE_ERROR_PCT,
     // Present only under --exact: how far the offline estimate was off, per file.
     ...(calibration ? { calibration } : {}),
     skills,
@@ -605,6 +782,12 @@ export function tokenDisclaimer(bill: Pick<Bill, "tokenEstimateErrorPct" | "toke
   if (bill.tokenEstimateErrorPct === 0) {
     return `Token counts measured with ${bill.tokenSource}. Bytes are exact.`;
   }
+  if (bill.tokenSource.startsWith(MIXED_PREFIX)) {
+    return (
+      `Token counts are MIXED (${bill.tokenSource.slice(MIXED_PREFIX.length)}). Any figure that includes an estimated ` +
+      `item can be off by up to ${bill.tokenEstimateErrorPct}% for that item. Bytes are always exact.`
+    );
+  }
   const per = Object.entries(TOKEN_DIVISORS).map(([k, v]) => `${k} /${v}`).join(", ");
   return (
     `Token counts are ESTIMATES: bytes divided per content class (${per}), calibrated against ` +
@@ -685,17 +868,132 @@ async function countTokens(text: string, { model, apiKey, fetchImpl }: CountToke
   return json.input_tokens;
 }
 
+export interface ExactSendSet {
+  /** Each real file once, under the first lexical path a skill's walk reaches it by. */
+  files: WalkedFile[];
+  /** Files the bill walks outside the root, the gstack checkout and gstack's render folder: never sent, estimated offline. */
+  refused: WalkedFile[];
+  /** Realpath of the gstack checkout the root's gstack/ entry links to, when there is one. */
+  checkout?: string;
+  /** Realpath of gstack's render folder ($GSTACK_STATE_ROOT/render) when it is a real directory; a render link is not trusted. */
+  render?: string;
+  /** Realpaths of the SKILL.md files whose frontmatter the bill prices. */
+  frontmatter: Set<string>;
+}
+
+/** The realpath of `dir` when it is a real directory, not a link; otherwise (missing, unreadable, a file) undefined. */
+function realDirectory(dir: string): string | undefined {
+  try {
+    return fs.lstatSync(dir).isDirectory() ? fs.realpathSync(dir) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A git checkout with VERSION, setup and a SKILL.md named gstack. */
+function isGstackCheckout(dir: string): boolean {
+  if (!fs.existsSync(path.join(dir, ".git"))) return false;
+  if (!["VERSION", "setup", "SKILL.md"].every((name) => isFile(path.join(dir, name)))) return false;
+  const { block } = parseFrontmatter(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"));
+  return /^name:\s*gstack\s*$/m.test(block);
+}
+
+/**
+ * What --exact sends: the same per-skill walks totalMd bills, with the same
+ * fences, so nothing is walked or sent that no skill bills. Of those, only
+ * files inside the root or inside the gstack checkout the skills link into
+ * (the root's gstack/ entry, when it is a git checkout whose SKILL.md is named
+ * gstack and which has VERSION and setup) or inside gstack's render folder
+ * ($GSTACK_STATE_ROOT/render, where setup renders the SKILL.md files some
+ * installs link to; trusted only as a real directory, not a link) are sent; anything else a link reaches is refused and
+ * estimated offline. Each file is judged by its realpath, so a link out of
+ * one of those folders is refused too.
+ *
+ * The root is resolved before keying. buildBill resolves its root, so a
+ * relative root here would produce keys that never match and every lookup
+ * would fall back to the estimate.
+ */
+export function exactSendSet(root: string, stateRoot: string = resolveStateRoot()): ExactSendSet {
+  const resolved = path.resolve(root);
+  if (!fs.existsSync(resolved)) throw new Error(`No such tree: ${resolved}`);
+  const files: WalkedFile[] = [];
+  const refused: WalkedFile[] = [];
+  const frontmatter = new Set<string>();
+  const seen = new Set<string>();
+  const rootReal = fs.realpathSync(resolved);
+  const gstackEntry = path.join(resolved, "gstack");
+  const checkout = isGstackCheckout(gstackEntry) ? fs.realpathSync(gstackEntry) : undefined;
+  const render = realDirectory(path.join(stateRoot, "render"));
+  const approved = [rootReal, checkout, render].filter((d): d is string => d !== undefined);
+  for (const dir of findSkillDirs(resolved)) {
+    frontmatter.add(fs.realpathSync(path.join(dir, "SKILL.md")));
+    for (const file of walkMdFiles(dir, { billedRoot: resolved, skipNestedSkills: true })) {
+      if (seen.has(file.real)) continue;
+      seen.add(file.real);
+      if (!approved.some((d) => encloses(d, file.real))) {
+        refused.push(file);
+        continue;
+      }
+      files.push(file);
+    }
+  }
+  return { files, refused, frontmatter, checkout, render };
+}
+
+/**
+ * Reads the exact file the walk approved: its realpath, opened without
+ * following a final link, and only if it is still the same regular file at
+ * the same realpath. A link retargeted, a file replaced, or a parent directory
+ * swapped for a link after the walk is refused, so nothing the bill did not
+ * walk can be sent. The open does not block, so a file swapped for a FIFO is
+ * refused as not a regular file instead of hanging the run.
+ */
+function readWalkedFile({ path: file, real, dev, ino, size, mtimeMs }: WalkedFile, root: string): string {
+  const changed = () => new Error(`${file} changed after it was walked; nothing from ${root} was sent. Run again.`);
+  let fd: number;
+  try {
+    fd = fs.openSync(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+  } catch {
+    throw changed();
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (
+      !st.isFile() ||
+      st.dev !== dev ||
+      st.ino !== ino ||
+      st.size !== size ||
+      st.mtimeMs !== mtimeMs ||
+      fs.realpathSync(real) !== real
+    ) {
+      throw changed();
+    }
+    return fs.readFileSync(fd, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function fileIdentity(real: string, { dev, ino, size, mtimeMs }: { dev: number; ino: number; size: number; mtimeMs: number }): string {
+  return `${real}\0${dev}\0${ino}\0${size}\0${mtimeMs}`;
+}
+
 export interface ExactMeasurement {
   tokenSource: string;
   tokensOf: TokensOf;
+  /** Texts sent to count_tokens (file bodies plus frontmatter blocks). */
   measuredFiles: number;
   counts: Map<string, number>;
+  /** The realpath each measured file was read from, by its key. */
+  realOf: Map<string, string>;
   /** Keys priced by estimate because measurement missed them. Read after buildBill. */
   missedKeys: Set<string>;
 }
 
 /**
- * Measures every text the bill will bill for. Returns a `tokensOf` lookup.
+ * Measures every text in the send set: what the bill prices inside the root,
+ * the linked gstack checkout or gstack's render folder. Returns a `tokensOf`
+ * lookup.
  *
  * count_tokens prices a whole request, so it includes a fixed message envelope.
  * That envelope is measured once and subtracted, leaving the tokens each file's
@@ -708,11 +1006,15 @@ export interface ExactMeasurement {
  */
 export async function measureExactTokens(
   root: string,
-  { model, apiKey, fetchImpl = fetch, onProgress, egressHome }: {
+  { sendSet, model, apiKey, fetchImpl = fetch, onProgress, onSend, egressHome }: {
+    /** The send set from exactSendSet(root), when the caller already computed it. */
+    sendSet?: ExactSendSet;
     model: string;
     apiKey: string;
     fetchImpl?: FetchLike;
     onProgress?: (done: number, total: number) => void;
+    /** Called with the files about to be sent, after they are read and before the receipt; not called when nothing is sent. */
+    onSend?: (files: WalkedFile[]) => void;
     egressHome?: string;
   },
 ): Promise<ExactMeasurement> {
@@ -725,17 +1027,70 @@ export async function measureExactTokens(
   const opts: CountTokensOptions = { model, apiKey, fetchImpl };
 
   const texts = new Map<string, string>();
-  // Resolve before keying. buildBill resolves its root, so a relative root here
-  // would produce keys that never match and every lookup would fall back to the
-  // estimate -- exact mode silently degrading to the thing it replaces.
-  for (const file of walkMd(path.resolve(root))) {
-    const text = fs.readFileSync(file, "utf8");
-    texts.set(file, text);
-    if (path.basename(file) === "SKILL.md") {
-      const fm = parseFrontmatter(text);
-      if (fm.block) texts.set(frontmatterKey(file), fm.block);
-    }
+  // count_tokens rejects content with no non-whitespace text, so such texts
+  // are not sent: an empty one is measured as zero tokens, and a
+  // whitespace-only one is left unmeasured, so the bill estimates it and says
+  // so. When nothing is left to send, no receipt is written and no request is
+  // made.
+  const counts = new Map<string, number>();
+  // The send set holds each real file once, so each is sent once. The bill keys
+  // the same file by every lexical path it is billed under; measuredAs maps a
+  // real file, at the inode, size and mtime it was walked with, back to the
+  // one key that was measured.
+  const measuredAs = new Map<string, string>();
+  const realOf = new Map<string, string>();
+  const { files, frontmatter } = sendSet ?? exactSendSet(root);
+  for (const walked of files) {
+    const { path: file, real } = walked;
+    const text = readWalkedFile(walked, root);
+    measuredAs.set(fileIdentity(real, walked), file);
+    realOf.set(file, real);
+    if (/\S/.test(text)) texts.set(file, text);
+    else if (text === "") counts.set(file, 0);
+    if (!frontmatter.has(real)) continue;
+    const fm = parseFrontmatter(text);
+    if (fm.block) texts.set(frontmatterKey(file), fm.block);
+    else counts.set(frontmatterKey(file), 0);
   }
+
+  // A key the send set does not hold (a non-.md foreign-host file, or a file
+  // refused as outside the root, the checkout and the render folder) falls back to the
+  // estimate rather than billing zero. So does a key whose file is no longer
+  // the one measured (a link retargeted, or the file rewritten, since the walk).
+  // Misses are counted, not swallowed: a bill that is part-measured and
+  // part-estimated must not present itself as measured.
+  const missed = new Set<string>();
+  const fmSuffix = frontmatterKey("");
+  const measuredKey = (key: string): string | undefined => {
+    const isFm = key.endsWith(fmSuffix);
+    let real: string;
+    let st: fs.Stats;
+    try {
+      real = realpathStepwise(isFm ? key.slice(0, -fmSuffix.length) : key);
+      st = fs.lstatSync(real);
+    } catch {
+      return undefined;
+    }
+    const lexical = measuredAs.get(fileIdentity(real, st));
+    return lexical === undefined ? undefined : isFm ? frontmatterKey(lexical) : lexical;
+  };
+  const tokensOf: TokensOf = (key, bytes) => {
+    const alias = measuredKey(key);
+    const exact = alias === undefined ? undefined : counts.get(alias);
+    if (exact !== undefined) return exact;
+    missed.add(key);
+    return estimateTokensOf(key, bytes);
+  };
+  const measurement: ExactMeasurement = {
+    tokenSource: `count_tokens (${model})`,
+    tokensOf,
+    measuredFiles: 0,
+    counts,
+    realOf,
+    missedKeys: missed,
+  };
+  if (texts.size === 0) return measurement;
+  onSend?.(files.filter((f) => texts.has(f.path)));
 
   // Receipt-before-send. Content-free: file count + total bytes only.
   try {
@@ -760,7 +1115,6 @@ export async function measureExactTokens(
   // One-char body: subtracting its single content token leaves the envelope.
   const envelope = (await countTokens("x", opts)) - 1;
 
-  const counts = new Map<string, number>();
   const keys = [...texts.keys()];
   let next = 0;
   let done = 0;
@@ -773,24 +1127,8 @@ export async function measureExactTokens(
     }
   };
   await Promise.all(Array.from({ length: Math.min(EXACT_CONCURRENCY, keys.length) }, worker));
-
-  // A key the walk never saw (a non-.md foreign-host file) falls back to the
-  // estimate rather than billing zero. Misses are counted, not swallowed: a bill
-  // that is part-measured and part-estimated must not present itself as measured.
-  const missed = new Set<string>();
-  const tokensOf: TokensOf = (key, bytes) => {
-    const exact = counts.get(key);
-    if (exact !== undefined) return exact;
-    missed.add(key);
-    return estimateTokensOf(key, bytes);
-  };
-  return {
-    tokenSource: `count_tokens (${model})`,
-    tokensOf,
-    measuredFiles: counts.size,
-    counts,
-    missedKeys: missed,
-  };
+  measurement.measuredFiles = texts.size;
+  return measurement;
 }
 
 export interface Calibration {
@@ -812,11 +1150,11 @@ export interface Calibration {
  * Estimate-vs-measured residual per file. This is what makes the divisor
  * auditable: run --exact and the tool grades its own offline estimate.
  */
-export function calibrationTable(counts: Map<string, number>, root: string): Calibration {
+export function calibrationTable(counts: Map<string, number>, root: string, realOf?: Map<string, string>): Calibration {
   const rows: Calibration["rows"] = [];
   for (const [key, tokens] of counts) {
     if (key.endsWith("#frontmatter") || tokens === 0) continue;
-    const bytes = bytesOf(key);
+    const bytes = bytesOf(realOf?.get(key) ?? key);
     if (bytes == null) continue;
     // Grade the estimate the tool actually uses, class divisor included.
     const estimated = Math.round(estimateTokensOf(key, bytes));
@@ -868,7 +1206,11 @@ const USAGE =
   "\n" +
   "  --exact              measure tokens with Anthropic's count_tokens instead of\n" +
   "                       estimating. Off by default: it sends the content of every\n" +
-  "                       .md file in the tree to api.anthropic.com. Needs\n" +
+  "                       .md file the bill prices inside the tree, inside\n" +
+  "                       the gstack checkout its gstack/ entry links to, or\n" +
+  "                       inside gstack's render folder ($GSTACK_STATE_ROOT/render)\n" +
+  "                       to api.anthropic.com. Files that symlinks reach anywhere\n" +
+  "                       else are named, not sent, and estimated offline. Needs\n" +
   "                       ANTHROPIC_API_KEY; passing --exact is the consent. An\n" +
   "                       egress receipt is written before the send (see\n" +
   "                       gstack-egress); if it cannot be written, the run falls\n" +
@@ -887,6 +1229,7 @@ export interface MainOptions {
   apiKey?: string;
   fetchImpl?: FetchLike;
   egressHome?: string;
+  stateRoot?: string;
 }
 
 export async function contextBillMain(argv: string[], options: MainOptions = {}): Promise<number> {
@@ -917,29 +1260,81 @@ export async function contextBillMain(argv: string[], options: MainOptions = {})
 
   // Exact mode is the only path that leaves the machine. Announce what is sent
   // before sending it, and degrade to the estimate rather than failing the run.
-  const exactFor = async (tree: string): Promise<{
+  const sendSet = (tree: string) => (flags.exact ? exactSendSet(tree, options.stateRoot) : undefined);
+  const exactFor = async (tree: string, set: ExactSendSet | undefined): Promise<{
     tokensOf?: TokensOf;
     tokenSource?: string;
+    missedKeys?: ReadonlySet<string>;
     calibration?: Calibration;
     onDone?: () => void;
   }> => {
-    if (!flags.exact) return {};
-    const files = walkMd(tree).length;
-    stderr.write(
-      `--exact: sending the content of ${files} .md file(s) under ${tree} to ` +
-        `api.anthropic.com for count_tokens (${flags.exactModel}). No other data leaves this machine.\n`,
-    );
+    if (!set) return {};
+    if (set.refused.length) {
+      const outsideDirs: string[] = [];
+      const kept = new Set<string>();
+      for (const d of [...new Set(set.refused.map((f) => path.dirname(f.real)))].sort()) {
+        let covered = false;
+        for (let a = d; !covered; a = path.dirname(a)) {
+          covered = kept.has(a);
+          if (path.dirname(a) === a) break;
+        }
+        if (covered) continue;
+        kept.add(d);
+        outsideDirs.push(d);
+      }
+      stderr.write(
+        `--exact: not sending ${set.refused.length} .md file(s) that symlinks reach outside ${tree}, the gstack checkout and gstack's render folder ` +
+          `(under ${outsideDirs.join(", ")}); they are estimated offline:\n` +
+          set.refused.map((f) => `  ${path.relative(tree, f.path)}\n`).join(""),
+      );
+    }
+    if (set.files.length === 0) {
+      if (set.refused.length) {
+        stderr.write(`--exact: every billed .md file is outside ${tree}, the gstack checkout and gstack's render folder; nothing was sent, so the bill uses the offline estimate.\n`);
+      } else if (set.frontmatter.size) {
+        stderr.write(`--exact: no markdown skill file to measure under ${tree}; nothing was sent, so the bill uses the offline estimate.\n`);
+      }
+      return {};
+    }
+    let announced = false;
+    const announce = (sent: WalkedFile[]) => {
+      announced = true;
+      const treeReal = fs.realpathSync(tree);
+      const outsideTree = sent.filter((f) => !encloses(treeReal, f.real));
+      const inCheckout = outsideTree.filter((f) => set.checkout && encloses(set.checkout, f.real)).length;
+      const inRender = outsideTree.length - inCheckout;
+      const from = [
+        inCheckout ? `${inCheckout} of them in the gstack checkout ${set.checkout}` : "",
+        inRender ? `${inRender} in gstack's render folder ${set.render}` : "",
+      ].filter(Boolean);
+      stderr.write(
+        `--exact: sending the content of ${sent.length} .md file(s) under ${tree}` +
+          (from.length ? ` (${from.join(", ")})` : "") +
+          ` to api.anthropic.com for count_tokens (${flags.exactModel}). No other data leaves this machine.\n`,
+      );
+    };
     try {
       const measured = await measureExactTokens(tree, {
+        sendSet: set,
         model: flags.exactModel,
         apiKey: options.apiKey ?? process.env.ANTHROPIC_API_KEY ?? "",
         fetchImpl: options.fetchImpl,
+        onSend: announce,
         egressHome: options.egressHome,
       });
+      if (!announced) {
+        stderr.write(
+          `--exact: every .md file --exact could send under ${tree} is blank` +
+            (set.refused.length ? `, and the rest are outside the folders it sends from` : "") +
+            `; nothing was sent, so the bill uses the offline estimate.\n`,
+        );
+        return {};
+      }
       return {
         tokensOf: measured.tokensOf,
         tokenSource: measured.tokenSource,
-        calibration: calibrationTable(measured.counts, tree),
+        missedKeys: measured.missedKeys,
+        calibration: calibrationTable(measured.counts, tree, measured.realOf),
         onDone: () => {
           if (measured.missedKeys.size) {
             stderr.write(
@@ -964,8 +1359,10 @@ export async function contextBillMain(argv: string[], options: MainOptions = {})
       }
       const treeA = path.resolve(cwd, positional[0]);
       const treeB = path.resolve(cwd, positional[1]);
-      const optsA = await exactFor(treeA);
-      const optsB = await exactFor(treeB);
+      const setA = sendSet(treeA);
+      const setB = sendSet(treeB);
+      const optsA = await exactFor(treeA, setA);
+      const optsB = await exactFor(treeB, setB);
       const diff = diffBills(buildBill(treeA, optsA), buildBill(treeB, optsB));
       optsA.onDone?.();
       optsB.onDone?.();
@@ -980,7 +1377,7 @@ export async function contextBillMain(argv: string[], options: MainOptions = {})
       );
       return 2;
     }
-    const exactOpts = await exactFor(tree);
+    const exactOpts = await exactFor(tree, sendSet(tree));
     const bill = buildBill(tree, exactOpts);
     exactOpts.onDone?.();
     if (bill.skills.length === 0) {

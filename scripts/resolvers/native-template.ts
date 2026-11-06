@@ -98,7 +98,7 @@ ${nativeWorker}`);
     } else {
       text = replaceBlock(text,
         'Dispatch a subagent through Agent with `subagent_type: "general-purpose"` and\n`run_in_background: false`, using Step 7\'s shared foreground-dispatch rule.',
-        'It fetches and classifies all Greptile comments,',
+        "It fetches and classifies every configured bot's comments,",
         `Dispatch a fresh native reviewer through the session's advertised context
 API, using Step 7's shared native-worker rule. Wait for actual completion and
 validate the returned contract before acting.

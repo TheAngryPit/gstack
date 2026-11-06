@@ -21,6 +21,7 @@
 # Writes via bin/gstack-question-log so source tagging, dedup, and async
 # derive all apply uniformly.
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select
@@ -128,7 +129,7 @@ for SESSION_FILE in "${SESSION_FILES[@]}"; do
     continue
   fi
 
-  COUNT_LINE=$(SESSION_FILE_PATH="$SESSION_FILE" QLOG_BIN="$QLOG_BIN" QLOG_TIMEOUT_MS="$QLOG_TIMEOUT_MS" MAX_SESSION_BYTES="$MAX_SESSION_BYTES" bun -e '
+  COUNT_LINE=$(SESSION_FILE_PATH="$SESSION_FILE" QLOG_BIN="$QLOG_BIN" QLOG_TIMEOUT_MS="$QLOG_TIMEOUT_MS" MAX_SESSION_BYTES="$MAX_SESSION_BYTES" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e '
     const fs = require("fs");
     const path = require("path");
     const { spawnSync } = require("child_process");
@@ -329,7 +330,7 @@ for SESSION_FILE in "${SESSION_FILES[@]}"; do
       const text = String(e.payload?.message || "");
       if (!text) continue;
       // Detect D-numbered brief or marker. Markers are sufficient on their own.
-      const markerMatch = text.match(/<gstack-qid:([a-z0-9-]{1,64})>/i);
+      const markerMatch = text.match(/<gstack-qid:([a-z0-9-]{1,64})(?:;signal=([a-z0-9-]{1,64}))?>/i);
       const dMatch = text.match(/^D\d+[\.\d]*\s*[—\-]\s*(.+?)$/m);
       if (!markerMatch && !dMatch) continue;
 
@@ -390,6 +391,7 @@ for SESSION_FILE in "${SESSION_FILES[@]}"; do
         options_count: options.length || 1,
         user_choice: userChoice.slice(0, 64),
         ...(recommended ? { recommended: recommended.slice(0, 64) } : {}),
+        ...(markerMatch?.[2] ? { signal_key: markerMatch[2].toLowerCase() } : {}),
         source,
         session_id: sessionId,
         // Use ts_nanos+ts shape from the event itself if available; else null.

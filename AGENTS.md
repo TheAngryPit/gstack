@@ -7,115 +7,77 @@ designer, QA lead, release engineer, debugger, and more.
 ## Available skills
 
 Skills live in `.agents/skills/` (or `~/.claude/skills/gstack/` on Claude Code).
-Invoke them by name (e.g., `/office-hours`).
+Invoke them by name (e.g., `/office-hours`). This index lists names only; what each
+skill does, with examples, is in [docs/skills.md](docs/skills.md). The iOS companion
+CLIs (`gstack-ios-qa-daemon`, `gstack-ios-qa-mint`, `gstack-ios-qa-regen`) are in
+[docs/howto-ios-testing-with-gstack.md](docs/howto-ios-testing-with-gstack.md).
 
-### Plan-mode reviews
-
-| Skill | What it does |
-|-------|-------------|
-| `/office-hours` | Start here. Reframes your product idea before you write code. |
-| `/plan-ceo-review` | CEO-level review: find the 10-star product in the request. |
-| `/plan-eng-review` | Lock architecture, data flow, edge cases, and tests. |
-| `/plan-design-review` | Rate each design dimension 0-10, explain what a 10 looks like. |
-| `/plan-devex-review` | DX-mode review: TTHW, magical moments, friction points, persona traces. |
-| `/plan-tune` | Self-tune AskUserQuestion sensitivity per question. |
-| `/autoplan` | One command runs CEO → design → DX → eng review (eng always last). |
-| `/design-consultation` | Build a complete design system from scratch. |
-| `/spec` | Turn vague intent into a precise, executable spec in five phases. Files a GitHub issue, optionally spawns a Claude Code agent in a fresh worktree, and lets `/ship` close the source issue on merge. |
-
-### Implementation + review
-
-| Skill | What it does |
-|-------|-------------|
-| `/review` | Pre-landing PR review. Finds bugs that pass CI but break in prod; lists every gate edit for gate integrity. |
-| `/deslop-shared-libs` | Find worthwhile shared-code extractions in recent work. Recommendations only. |
-| `/test-audit` | Sweep existing tests for low-value, implementation-coupled or duplicate tests. Report-only unless you approve a batch. |
-| `/codex` | Second opinion via OpenAI Codex. Review, challenge, or consult modes. Available outside the Codex harness. |
-| `/claude-code` | Second opinion via Claude Code. Review, challenge, or consult modes. Available outside the Claude Code harness. |
-| `/investigate` | Systematic root-cause debugging. No fixes without investigation. |
-| `/design-review` | Live-site visual audit + fix loop with atomic commits. |
-| `/design-shotgun` | Generate multiple AI design variants, comparison board, iterate. |
-| `/design-html` | Generate production-quality Pretext-native HTML/CSS. |
-| `/devex-review` | Live developer experience audit (TTHW measured against the real flow). |
-| `/qa` | Test browser, API, CLI, job, worker and webhook behavior; reproduce bugs, fix them and re-verify. |
-| `/qa-only` | The same surface-aware QA, reporting findings and proposed tests without changing product code or tests. |
-| `/scrape` | Pull data from a web page in your Aside browser, with your real logged-in state. Read-only. On the fallback browser a codified browser-skill answers a repeat intent in ~200ms. |
-| `/skillify` | Codify the most recent successful `/scrape` flow into a permanent browser-skill (fallback browser only). |
-
-### Release + deploy
-
-| Skill | What it does |
-|-------|-------------|
-| `/ship` | Run tests, review, gate integrity, push, open PR. Workspace-aware version queue. |
-| `/land-and-deploy` | Merge the PR, wait for CI and deploy, verify production health. |
-| `/canary` | Post-deploy monitoring loop in your Aside browser (or gstack's own when Aside is absent). |
-| `/landing-report` | Read-only dashboard for the workspace-aware ship queue. |
-| `/document-release` | Audit relevant docs before final verification on every ship; also supports standalone documentation updates. |
-| `/document-generate` | Generate Diataxis docs (tutorial / how-to / reference / explanation) from code. |
-| `/setup-deploy` | One-time deploy config detection (Fly.io, Render, Vercel, etc.). |
-| `/gstack-upgrade` | Update gstack to the latest version. |
-
-### Operational + memory
-
-| Skill | What it does |
-|-------|-------------|
-| `/context-save` | Save working context (git state, decisions, remaining work). |
-| `/context-restore` | Resume from a saved context, even across Conductor workspaces. |
-| `/learn` | Manage what gstack learned across sessions. |
-| `/retro` | Weekly retro with per-person breakdowns and shipping streaks. |
-| `/health` | Code quality dashboard (type checker, linter, tests, dead code). |
-| `/benchmark` | Performance regression detection (page load, Core Web Vitals). |
-| `/benchmark-models` | Cross-model benchmark for skills (Claude, GPT, Gemini side-by-side). |
-| `/eval-plan` | Preregister a paid eval (bars, arms, decoys, stop rules), dry-run it for $0, pilot three priced items, then approve the spend. |
-| `/cso` | Supported security findings with explicit coverage. Static assessment remains available without catalog profiles; contained runtime/scanner execution requires matching qualified profiles, and no catalog has one yet (scanner build inputs are reviewed and await their qualification run; runtime qualification needs a private evaluator that is still being built), so `/cso` runs static assessment only. Runtime-tested bundles authenticate separate external assertions. Project-test completion remains `self_reported` because target code controls the test process; `tested` is reserved for a future target-independent completion witness. |
-| `/setup-gbrain` | Set up gbrain for cross-machine session memory sync. |
-| `/sync-gbrain` | Keep gbrain current with this repo's code; refresh agent search guidance in CLAUDE.md. |
-
-### Browser + agent integration
-
-Every browser skill drives the Aside AI browser first (macOS 15+, aside.com) —
-the user's real browser with their real sessions, through `aside repl` scripts;
-gstack never installs it. When Aside is not installed or not running (Linux,
-Windows, a closed Aside app) the same skills fall back automatically to gstack's
-own headless Chromium (`$B`), which is where the three skills under `/browse` apply.
-
-| Skill | What it does |
-|-------|-------------|
-| `/browse` | Drive a browser: open a page, read it, click through a flow, screenshots, console errors. Aside first; gstack's own Chromium (~100ms/command) as the fallback. Every other browser skill stands on it. |
-| `/open-gstack-browser` | Launch the visible GStack Browser with sidebar + stealth — the headed face of the fallback engine. |
-| `/setup-browser-cookies` | Import cookies from your real browser into the fallback engine for authenticated testing. Unnecessary on Aside. |
-| `/pair-agent` | Pair a remote AI agent (OpenClaw, Codex, etc.) with gstack's own browser over a scoped tunnel. |
-
-### iOS QA — drive real iPhones over USB or Tailscale (v1.43.0.0+)
-
-| Skill | What it does |
-|-------|-------------|
-| `/ios-qa` | Live-device iOS QA via USB CoreDevice tunnel + embedded StateServer. Optionally exposes the device over Tailscale so remote agents can drive it. |
-| `/ios-fix` | Autonomous iOS bug fixer with regression snapshot capture. |
-| `/ios-design-review` | Designer's-eye QA on a real iPhone — 10-dimension Apple HIG rubric. |
-| `/ios-clean` | Convenience: strip DebugBridge + #if DEBUG wiring before a Release build. |
-| `/ios-sync` | Regenerate the iOS debug bridge against the latest upstream templates. |
-
-Companion CLIs (run on the Mac that's plugged into the device):
-
-| Command | What it does |
-|---------|-------------|
-| `gstack-ios-qa-daemon` | Mac-side broker. Loopback by default; `--tailnet` adds a Tailscale-facing listener with capability tiers and audit logging. |
-| `gstack-ios-qa-mint` | Owner-grant CLI for the tailnet allowlist (`grant`/`revoke`/`list`). |
-| `gstack-ios-qa-regen` | Regenerate the canonical local DebugBridge package and typed accessors (`--app-source` / `--bridge-dir`). |
-
-End-to-end walkthrough: [docs/howto-ios-testing-with-gstack.md](docs/howto-ios-testing-with-gstack.md).
-
-### Safety + scoping
-
-| Skill | What it does |
-|-------|-------------|
-| `/careful` | Warn before destructive commands (rm -rf, DROP TABLE, force-push). |
-| `/freeze` | Lock edits to one directory. Hard block, not just a warning. |
-| `/guard` | Activate both careful + freeze at once. |
-| `/unfreeze` | Remove directory edit restrictions. |
-| `/make-pdf` | Turn any markdown file into a publication-quality PDF. Renders through Aside, or gstack's own browser when Aside is absent. |
-| `/diagram` | English in, diagram out: mermaid source + editable .excalidraw + SVG/PNG, offline. Renders through Aside, or gstack's own browser when Aside is absent. |
+| Skill | Area |
+|-------|------|
+| `/office-hours` | plan |
+| `/plan-ceo-review` | plan |
+| `/plan-eng-review` | plan |
+| `/plan-design-review` | plan |
+| `/plan-devex-review` | plan |
+| `/plan-tune` | plan |
+| `/autoplan` | plan |
+| `/design-consultation` | plan |
+| `/spec` | plan |
+| `/review` | build + review |
+| `/deslop-shared-libs` | build + review |
+| `/write-skill` | build + review |
+| `/test-audit` | build + review |
+| `/codex` | build + review |
+| `/claude-code` | build + review |
+| `/investigate` | build + review |
+| `/verify` | build + review |
+| `/design-review` | build + review |
+| `/design-shotgun` | build + review |
+| `/design-html` | build + review |
+| `/design-motion` | build + review |
+| `/devex-review` | build + review |
+| `/qa` | build + review |
+| `/qa-only` | build + review |
+| `/scrape` | build + review |
+| `/skillify` | build + review |
+| `/ship` | release + deploy |
+| `/land-and-deploy` | release + deploy |
+| `/modernize` | release + deploy |
+| `/canary` | release + deploy |
+| `/landing-report` | release + deploy |
+| `/document-release` | release + deploy |
+| `/document-generate` | release + deploy |
+| `/setup-deploy` | release + deploy |
+| `/gstack-upgrade` | release + deploy |
+| `/context-save` | operational + memory |
+| `/context-restore` | operational + memory |
+| `/learn` | operational + memory |
+| `/retro` | operational + memory |
+| `/health` | operational + memory |
+| `/captain` | operational + memory |
+| `/benchmark` | operational + memory |
+| `/ubicloud` | operational + memory |
+| `/runaway-stopper` | operational + memory |
+| `/benchmark-models` | operational + memory |
+| `/eval-plan` | operational + memory |
+| `/cso` | operational + memory |
+| `/setup-gbrain` | operational + memory |
+| `/sync-gbrain` | operational + memory |
+| `/browse` | browser |
+| `/open-gstack-browser` | browser |
+| `/setup-browser-cookies` | browser |
+| `/pair-agent` | browser |
+| `/ios-qa` | iOS QA |
+| `/ios-fix` | iOS QA |
+| `/ios-design-review` | iOS QA |
+| `/ios-clean` | iOS QA |
+| `/ios-sync` | iOS QA |
+| `/careful` | safety + scoping |
+| `/freeze` | safety + scoping |
+| `/guard` | safety + scoping |
+| `/unfreeze` | safety + scoping |
+| `/make-pdf` | safety + scoping |
+| `/diagram` | safety + scoping |
 
 ## Validation discipline
 
@@ -152,6 +114,9 @@ When fixing failures or preparing `/ship`, follow this order:
    only when that prose is the contract. Do not lower thresholds, increase model
    budgets, skip cases, or rejudge a failure to manufacture a pass. A
    pre-registered fixed panel is not rejudging.
+   For any measured speedup, regression or eval delta, name the limiter that
+   moved and the run-to-run variation; a gap smaller than that variation is no
+   difference.
    For policy or validation repairs, exercise the actual registered callback with
    representative native input and assert that it uses the helper’s result.
    When renderer or parser failures recur at the same boundary, verify the
@@ -211,7 +176,12 @@ When fixing failures or preparing `/ship`, follow this order:
    result and pending permission state; diagnose a blocked actor before waiting
    through its deadline. Preserve cancellation separately from a test verdict.
    Skipped or unstarted cases
-   do not satisfy coverage; preserve every attempt. Paid evals never retry. Each
+   do not satisfy coverage; preserve every attempt. Paid evals never retry, with
+   one exception: the gate reruns a red rule, behavior or judge case verdict once
+   at the same head (Garry, 2026-10-19: "you can just run the failed test again
+   and note that it is flaky"); a pass is green with a flaky annotation and a
+   flake record, a second failure is a real red, and harness, INFRA, INCOMPLETE
+   or unattributed reds never rerun (`docs/TESTING_INTERNALS.md#flaky-reruns`). Each
    case's kind (`E2E_KINDS`) fixes its trials before the run: `rule` one trial;
    `behavior` a panel of 3 independent trials, PASS at >= 2 with no contract
    violation; `judge` 3 samples on one output, each dimension gated on its
@@ -267,10 +237,15 @@ Agents poll `eval:bg:*` logs for the `### gstack-detach EXIT=<code> ###` sentine
 
 ## Platform support
 
+Support tiers (full: macOS, Linux; minimal: Windows, Gemini models) are in
+[docs/support-tiers.md](docs/support-tiers.md).
+
 - **macOS** + **Linux**: full test suite supported.
-- **Windows**: the curated Windows-safe subset runs in the `windows-free-tests`
-  CI workflow across six `windows-latest` jobs, packed by Windows-measured
-  durations. Setup script (`./setup`) requires Git Bash or
+- **Windows**: minimal support; [docs/support-tiers.md](docs/support-tiers.md)
+  says what is promised. Every PR must pass the `windows-smoke` check (`./setup`,
+  the core skills start, the fastest Windows-safe tests); the curated
+  Windows-safe subset runs nightly on main in `windows-free-tests` and never
+  blocks a PR. Setup script (`./setup`) requires Git Bash or
   MSYS today; native PowerShell support is a future expansion. The `bin/gstack-paths`
   helper resolves state roots through `CLAUDE_PLUGIN_DATA` / `GSTACK_HOME` so plugin
   installs work on every platform.
@@ -298,3 +273,4 @@ Agents poll `eval:bg:*` logs for the `### gstack-detach EXIT=<code> ###` sentine
 - Every Codex run's verdict goes through `lib/outside-review-result.ts`; its reason codes live in `lib/gate-outcomes.ts`, each with a `docs/troubleshooting.md` anchor.
 - `test/module-size-ratchet.test.ts` keeps refactored owner modules at or under 800 lines (150 per function) and residual files from growing.
 - The `claude` CLI binary resolves via `lib/claude-bin.ts` (re-exported from `browse/src/claude-bin.ts` for browse internals; `Bun.which()` + `GSTACK_CLAUDE_BIN` override). Set `GSTACK_CLAUDE_BIN=wsl` plus `GSTACK_CLAUDE_BIN_ARGS='["claude"]'` to run Claude through WSL on Windows.
+- Every Bun gstack starts ignores the working directory's `.env` files and `bunfig.toml`: bun shebangs are `#!/usr/bin/env -S bun --no-env-file --config=/dev/null`, skill prose passes `bun --no-env-file --config=/dev/null`, shipped shell files define `GSTACK_BUN_CONFIG` with the line in `test/bun-entry-isolation.test.ts` (`NUL` when `OSTYPE` is `msys` or `cygwin` and `cygpath` is on `PATH`, where native Bun cannot open `/dev/null`, #3415) and pass `bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}"`, TypeScript spawns use `bunIsolationArgs()` from `lib/bun-isolation.ts`, and `bun build --compile` adds `--no-compile-autoload-dotenv --no-compile-autoload-bunfig`. `test/bun-entry-isolation.test.ts` enforces all four.

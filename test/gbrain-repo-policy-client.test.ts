@@ -19,7 +19,7 @@ import * as path from "path";
 import * as os from "os";
 import { spawnSync } from "child_process";
 
-import { repoPolicyTier, repoPolicyTierBatch } from "../lib/gbrain-repo-policy-client";
+import { hasRepoPolicyStore, memorableRecallPolicy, repoPolicyTier, repoPolicyTierBatch } from "../lib/gbrain-repo-policy-client";
 import { canonicalizeRemote } from "../lib/gstack-memory-helpers";
 
 const ROOT = path.resolve(import.meta.dir, "..");
@@ -217,5 +217,56 @@ describe("repoPolicyTier timeoutMs (hook deadline seam)", () => {
     expect(repoPolicyTier(url, env())).toEqual({ tier: "deny" });
     // 1 ms cannot cover a bash+jq spawn; the caller's polarity decides what unreadable means
     expect(repoPolicyTier(url, env(), 1)).toEqual({ tier: "none", error: "unreadable" });
+  });
+});
+
+describe("memorableRecallPolicy (#3359: per-remote Memorable recall opt-in)", () => {
+  const A = "https://github.com/acme/client-a.git";
+  test("no store: tier none, opt-in false, no error (fast path)", () => {
+    expect(memorableRecallPolicy(A, env())).toEqual({ tier: "none", memorableOptIn: false });
+    expect(fs.existsSync(policyFile())).toBe(false);
+  });
+  test("read-only defaults to off; the explicit opt-in turns it on for that remote only", () => {
+    expect(run(["set", A, "read-only"]).status).toBe(0);
+    expect(run(["set", "https://github.com/acme/client-b", "read-only"]).status).toBe(0);
+    expect(memorableRecallPolicy(A, env())).toEqual({ tier: "read-only", memorableOptIn: false });
+    expect(run(["memorable", "set", A, "allow"]).status).toBe(0);
+    expect(memorableRecallPolicy(A, env())).toEqual({ tier: "read-only", memorableOptIn: true });
+    expect(memorableRecallPolicy("https://github.com/acme/client-b", env())).toEqual({ tier: "read-only", memorableOptIn: false });
+    expect(memorableRecallPolicy("https://github.com/acme/other", env())).toEqual({ tier: "none", memorableOptIn: false });
+  });
+  test("deny with a hand-written opt-in: opt-in false", () => {
+    fs.writeFileSync(policyFile(), JSON.stringify({ _schema_version: 2, "github.com/acme/client-a": "deny", _memorable_recall: { "github.com/acme/client-a": "allow" } }));
+    expect(memorableRecallPolicy(A, env())).toEqual({ tier: "deny", memorableOptIn: false });
+  });
+  test("corrupt store: unreadable, never read as no policy, and not quarantined", () => {
+    fs.writeFileSync(policyFile(), "{not json", { mode: 0o600 });
+    expect(memorableRecallPolicy(A, env())).toEqual({ tier: "none", memorableOptIn: false, error: "unreadable" });
+    expect(fs.readFileSync(policyFile(), "utf-8")).toBe("{not json");
+  });
+  test("a tier the client does not know (hand-edited store) is unreadable, never no-policy", () => {
+    fs.writeFileSync(policyFile(), JSON.stringify({ _schema_version: 2, "github.com/acme/client-a": 7, _memorable_recall: { "github.com/acme/client-a": "allow" } }));
+    expect(memorableRecallPolicy(A, env())).toEqual({ tier: "none", memorableOptIn: false, error: "unreadable" });
+  });
+  test("a dangling symlink as the only store is not the no-store fast path: unreadable", () => {
+    fs.symlinkSync(path.join(tmpHome, "missing.json"), policyFile());
+    expect(hasRepoPolicyStore(env())).toBe(true);
+    expect(memorableRecallPolicy(A, env())).toEqual({ tier: "none", memorableOptIn: false, error: "unreadable" });
+  });
+  test("a dangling symlink above the store, or a file in its path, is not the no-store fast path", () => {
+    fs.symlinkSync(path.join(tmpHome, "missing-dir"), path.join(tmpHome, "link"));
+    const viaLink = { ...env(), GSTACK_TEST_LEGACY_ROOT: path.join(tmpHome, "link", "child") };
+    expect(hasRepoPolicyStore(viaLink)).toBe(true);
+    expect(memorableRecallPolicy(A, viaLink)).toEqual({ tier: "none", memorableOptIn: false, error: "unreadable" });
+    fs.writeFileSync(path.join(tmpHome, "plain-file"), "x");
+    expect(hasRepoPolicyStore({ ...env(), GSTACK_TEST_LEGACY_ROOT: path.join(tmpHome, "plain-file", "child") })).toBe(true);
+    fs.mkdirSync(path.join(tmpHome, "real-dir"));
+    fs.symlinkSync(path.join(tmpHome, "real-dir"), path.join(tmpHome, "good-link"));
+    expect(hasRepoPolicyStore({ ...env(), GSTACK_TEST_LEGACY_ROOT: path.join(tmpHome, "good-link", "child") })).toBe(false);
+    expect(hasRepoPolicyStore({ ...env(), GSTACK_TEST_LEGACY_ROOT: path.join(tmpHome, "no", "such", "root") })).toBe(false);
+  });
+  test("a timed-out spawn classifies as unreadable", () => {
+    expect(run(["set", A, "read-only"]).status).toBe(0);
+    expect(memorableRecallPolicy(A, env(), 1)).toEqual({ tier: "none", memorableOptIn: false, error: "unreadable" });
   });
 });

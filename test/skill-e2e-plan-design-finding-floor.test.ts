@@ -9,6 +9,7 @@ import { CAPTURE_LONG_MS, PTY_MS } from './helpers/eval-budgets';
 import { describeE2ETier } from './helpers/e2e-gate';
 import { runPlanSkillFloorCheck } from './helpers/claude-pty-runner';
 import { FORCING_FLOOR_DESIGN } from './fixtures/forcing-finding-seeds';
+import { pickDesignFocusAll } from './fixtures/design-floor-focus-picker';
 import { seedPlanReviewProject } from './helpers/ceo-finding-fixture';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -33,6 +34,7 @@ describeE2E('/plan-design-review AskUserQuestion floor (periodic)', () => {
           cwd: project,
           timeoutMs: CAPTURE_LONG_MS,
           env: { QUESTION_TUNING: 'false', EXPLAIN_LEVEL: 'default' },
+          pickSetupChoice: pickDesignFocusAll,
         });
 
         if (obs.outcome !== 'auq_observed') {

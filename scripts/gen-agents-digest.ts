@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * Generate agents-digest/gstack-AGENTS.md — the instruction-only tier.
  *
@@ -46,7 +46,7 @@ reviews, and evals on top of these rules.
 
 ## Ethos
 
-- **Boil the Ocean** — AI makes completeness cheap, so do the complete thing: tests, edge cases, error paths. Shortcuts need an explicit, recorded decision.
+- **Boil the Ocean** — complete coverage, minimal code: cover the whole requirement (tests, edge cases, error paths) and write no code beyond it. Shortcuts need an explicit, recorded decision.
 - **Search Before Building** — know what exists before deciding what to build. Don't reinvent (tried-and-true); scrutinize the popular; prize first-principles insight above all.
 - **User Sovereignty** — models recommend, the user decides. Cross-model agreement is signal, never permission. Ask before changing the user's stated direction.
 - **Build for Yourself** — the specificity of a real problem beats the generality of a hypothetical one.

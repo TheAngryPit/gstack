@@ -3,7 +3,7 @@
  * and a fake clock: no network, no sleeping.
  */
 import { describe, expect, test } from 'bun:test';
-import { freeTestsState, readinessDecision, waitForReadiness, type FreeTestsRun } from '../scripts/eval-readiness';
+import { freeTestsState, readinessDecision, screenTarget, waitForReadiness, type FreeTestsRun } from '../scripts/eval-readiness';
 import type { GhRunner } from '../scripts/recover-receipts';
 
 const HEAD = 'a'.repeat(40);
@@ -53,6 +53,25 @@ describe('readiness decision', () => {
     expect(freeTestsState([free(3, 'completed', 'cancelled')], HEAD)).toEqual({ state: 'failed', runId: 3, conclusion: 'cancelled' });
   });
 
+  // #3508: a head whose only conflict with main is the CHANGELOG gets no pull_request CI (GitHub has no merge ref to build);
+  // the dispatch route runs Free Tests through workflow_dispatch on the branch, and readiness must read that run.
+  test('a dispatched-only head: the workflow_dispatch Free Tests run at the exact head decides, green or red, newest first; a pull_request run outranks it', () => {
+    const dispatched = (id: number, status: string, conclusion: string | null, over: Partial<FreeTestsRun> = {}) => free(id, status, conclusion, { event: 'workflow_dispatch', ...over });
+    expect(freeTestsState([dispatched(40448356650, 'completed', 'success')], HEAD)).toEqual({ state: 'success', runId: 40448356650 });
+    expect(freeTestsState([dispatched(5, 'completed', 'failure')], HEAD)).toEqual({ state: 'failed', runId: 5, conclusion: 'failure' });
+    expect(freeTestsState([dispatched(5, 'in_progress', null)], HEAD)).toEqual({ state: 'running', runId: 5 });
+    // A dispatched run on another head, or a push run on this one, is not this head's gate.
+    expect(freeTestsState([dispatched(5, 'completed', 'success', { head_sha: NEWER })], HEAD)).toEqual({ state: 'missing' });
+    expect(freeTestsState([free(5, 'completed', 'success', { event: 'push' })], HEAD)).toEqual({ state: 'missing' });
+    // A pull_request run at the head decides when one exists, whatever its age: it built the merge ref, a dispatch built the
+    // head alone, so a newer green dispatch never overrides a red pull_request run (rerun that run instead) and a red or
+    // running extra dispatch never holds a head its pull_request CI cleared (pre-landing review, pass 1).
+    expect(freeTestsState([free(1, 'completed', 'failure'), dispatched(2, 'completed', 'success')], HEAD)).toEqual({ state: 'failed', runId: 1, conclusion: 'failure' });
+    expect(freeTestsState([dispatched(1, 'completed', 'success'), free(2, 'completed', 'failure')], HEAD)).toEqual({ state: 'failed', runId: 2, conclusion: 'failure' });
+    expect(freeTestsState([free(1, 'completed', 'success'), dispatched(2, 'in_progress', null)], HEAD)).toEqual({ state: 'success', runId: 1 });
+    expect(freeTestsState([free(1, 'completed', 'success'), dispatched(2, 'completed', 'failure')], HEAD)).toEqual({ state: 'success', runId: 1 });
+  });
+
   test('ready needs both a green Free Tests on the head and an elapsed window; a moved head is superseded', () => {
     const green = { state: 'success', runId: 7 } as const;
     expect(readinessDecision({ headSha: HEAD, prHead: HEAD, free: green, quietLeftMs: 0 }).kind).toBe('ready');
@@ -78,6 +97,20 @@ describe('waitForReadiness', () => {
     expect(calls.filter(call => call.endsWith('free-tests.yml/runs'))).toHaveLength(2);
     expect(c.at()).toBe(CREATED + 11 * 60_000);
     expect(lines.join('\n')).toContain('Free Tests run 5 passed');
+  });
+
+  test('a dispatched-only head starts the gate: the runs listing is not narrowed to pull_request (#3508)', () => {
+    const { gh, calls } = fakeGh([{ free: [free(40448356650, 'completed', 'success', { event: 'workflow_dispatch' })] }]);
+    const c = clock(CREATED + 3 * 3600_000);
+    const argsSeen: string[][] = [];
+    const spy: GhRunner = (args, timeout) => { argsSeen.push(args); return gh(args, timeout); };
+    const { decision, lines } = waitForReadiness({ ...base, gh: spy, now: c.now, sleep: c.sleep });
+    expect(decision.kind).toBe('ready');
+    expect(lines.join('\n')).toContain('Free Tests run 40448356650 passed');
+    const listing = argsSeen.find(args => args.some(a => a.endsWith('free-tests.yml/runs')))!;
+    expect(listing).toContain(`head_sha=${HEAD}`);
+    expect(listing.some(a => a.startsWith('event='))).toBe(false);
+    expect(calls.filter(call => call.endsWith('free-tests.yml/runs'))).toHaveLength(1);
   });
 
   test('a re-run keeps the original creation time, so an elapsed window is not waited again', () => {
@@ -125,5 +158,43 @@ describe('waitForReadiness', () => {
     const c = clock(CREATED + 60_000);
     expect(waitForReadiness({ ...base, gh, now: c.now, sleep: c.sleep }).decision.kind).toBe('ready');
     expect(c.sleeps[0]).toBe(10 * 60_000);
+  });
+});
+
+describe('dispatched screens (GSTA-49 T1b): the merge commit is checked against the PR before Free Tests is read on its head', () => {
+  const MERGE = 'c'.repeat(40);
+  const BASE = 'd'.repeat(40);
+  const pull = (over: Record<string, unknown> = {}) => ({ state: 'open', head: { sha: HEAD, ref: 'feature', repo: { full_name: 'garrytan/gstack' } }, base: { repo: { full_name: 'garrytan/gstack' } }, ...over });
+  const gh = (pr: unknown, parents: string[] | null): GhRunner => (args) => {
+    const target = args.find(a => a.startsWith('repos/')) ?? '';
+    if (target.endsWith('/pulls/42')) return pr ? { status: 0, stdout: JSON.stringify(pr), stderr: '' } : { status: 1, stdout: '', stderr: 'HTTP 404: Not Found' };
+    if (target.endsWith(`/commits/${MERGE}`)) return parents ? { status: 0, stdout: JSON.stringify({ parents: parents.map(sha => ({ sha })) }), stderr: '' } : { status: 1, stdout: '', stderr: 'HTTP 422' };
+    return { status: 1, stdout: '', stderr: 'unexpected' };
+  };
+
+  test("an open same-repository PR's merge commit names its head (second parent) and tested base (first parent)", () => {
+    expect(screenTarget(gh(pull(), [BASE, HEAD]), 'garrytan/gstack', 42, MERGE)).toEqual({ head: HEAD, base: BASE, branch: 'feature' });
+  });
+
+  test('a fork PR, a closed PR, a non-merge commit, a short SHA or an unreadable PR is refused', () => {
+    const refused: Array<[GhRunner, string, string]> = [
+      [gh(pull({ head: { sha: HEAD, ref: 'feature', repo: { full_name: 'fork/gstack' } } }), [BASE, HEAD]), MERGE, 'not a same-repository PR'],
+      [gh(pull({ head: { sha: HEAD, ref: 'feature', repo: null } }), [BASE, HEAD]), MERGE, 'not a same-repository PR'],
+      [gh(pull({ state: 'closed' }), [BASE, HEAD]), MERGE, 'is closed, not open'],
+      [gh(pull(), [BASE]), MERGE, 'is not a two-parent merge commit'],
+      [gh(pull(), null), MERGE, 'cannot read the merge commit'],
+      [gh(null, [BASE, HEAD]), MERGE, 'cannot read PR #42'],
+      [gh(pull(), [BASE, HEAD]), MERGE.slice(0, 12), 'is not a full commit SHA'],
+    ];
+    for (const [runner, merge, why] of refused) expect((screenTarget(runner, 'garrytan/gstack', 42, merge) as { error?: string }).error, why).toContain(why);
+  });
+
+  test('the screen then waits on Free Tests for the PR head with no quiet window, and a moved head is superseded', () => {
+    const { gh: ready } = fakeGh([{ free: [free(5, 'completed', 'success')] }]);
+    const c = clock(CREATED);
+    expect(waitForReadiness({ ...base, quietMs: 0, gh: ready, now: c.now, sleep: c.sleep }).decision.kind).toBe('ready');
+    expect(c.sleeps).toEqual([]);
+    const { gh: moved } = fakeGh([{ free: [free(5, 'completed', 'success')], prHead: NEWER }]);
+    expect(waitForReadiness({ ...base, quietMs: 0, gh: moved, now: c.now, sleep: c.sleep }).decision).toEqual({ kind: 'superseded', by: NEWER });
   });
 });

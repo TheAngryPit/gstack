@@ -1,11 +1,38 @@
 #!/usr/bin/env bash
 # gstack-learnings-log — append a learning to the project learnings file
-# Usage: gstack-learnings-log '{"skill":"review","type":"pitfall","key":"n-plus-one","insight":"...","confidence":8,"source":"observed"}'
+# Usage: gstack-learnings-log --help
 # Valid types: pattern, pitfall, preference, architecture, tool, operational, investigation
 #
 # Append-only storage. Duplicates (same key+type) are resolved at read time
 # by gstack-learnings-search ("latest winner" per key+type).
+# Heredoc delivery guard: bash 5.2+ pipes heredoc bodies <=64KiB, and on
+# macOS a starved 512-byte pipe hangs bodies >=512B at startup. Compat level
+# 50 restores the tempfile path (test/heredoc-pipe-deadlock.test.ts).
+BASH_COMPAT=50
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
+
+usage() {
+  cat <<'EOF'
+Usage: gstack-learnings-log '<json>'
+       gstack-learnings-log --help
+
+Appends one learning to this project's learnings.jsonl (append-only; the latest entry per key+type wins).
+  {"skill":"<skill>","type":"<type>","key":"<kebab-key>","insight":"<one sentence>","confidence":<1-10>,
+   "source":"<source>","files":["<path>"]}
+  type     pattern pitfall preference architecture tool operational investigation
+  key      letters, digits, - and _ only
+  source   observed user-stated inferred cross-model (optional; user-stated marks it trusted)
+  files    optional
+Read learnings back with gstack-learnings-search.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
+  -*) echo "gstack-learnings-log: unknown argument '$1'; pass one JSON object, or --help" >&2; exit 2 ;;
+esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Windows git-bash (#1950): pwd yields a POSIX path (/c/Users/...), which Bun
 # on Windows cannot resolve as an ES module specifier in the import below.
@@ -27,7 +54,7 @@ INPUT="$1"
 TMPERR=$(mktemp "${TMPDIR:-/tmp}/gstack-learnings-log.XXXXXX") || { echo "gstack-learnings-log: could not create a temp file in ${TMPDIR:-/tmp}, so the learning was not recorded. Fix: point TMPDIR at a writable directory." >&2; exit 1; }
 trap 'rm -f "$TMPERR"' EXIT
 set +e
-VALIDATED=$(printf '%s' "$INPUT" | GSTACK_LIB_DIR="$SCRIPT_DIR/../lib" bun -e "
+VALIDATED=$(printf '%s' "$INPUT" | GSTACK_LIB_DIR="$SCRIPT_DIR/../lib" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
 const { hasInjection } = await import(process.env.GSTACK_LIB_DIR + '/jsonl-store.ts');
 const raw = await Bun.stdin.text();
 let j;

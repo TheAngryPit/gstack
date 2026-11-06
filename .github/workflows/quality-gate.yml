@@ -57,6 +57,12 @@ jobs:
       - name: Slop scan (changed files, advisory)
         run: bun run slop:diff || true
 
+      # The CHANGELOG's [Unreleased] block is the entry this PR adds (the train
+      # stamps it at merge). The lint gates only that block: an older entry, a
+      # template or a doc gets a report from the same bin and never a red check.
+      - name: Prose lint (CHANGELOG [Unreleased] block, gating)
+        run: bun --no-env-file --config=/dev/null bin/gstack-prose-lint CHANGELOG.md --unreleased --gate
+
       - name: Scan changed text for credentials (added lines, own redact engine)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}

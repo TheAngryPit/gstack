@@ -68,6 +68,7 @@ function fixtureTree(root: string) {
     fs.copyFileSync(path.join(ROOT, hook), path.join(root, hook));
     fs.chmodSync(path.join(root, hook), 0o755);
     if (fs.existsSync(path.join(ROOT, `${hook}.ts`))) fs.writeFileSync(path.join(root, `${hook}.ts`), 'export const ok = 1;\n');
+    for (const m of fs.readFileSync(path.join(ROOT, hook), 'utf8').matchAll(/\$HERE\/([\w.-]+\.ts)\b/g)) fs.writeFileSync(path.join(root, path.dirname(hook), m[1]!), 'export const ok = 1;\n');
   }
   for (const dir of SKILLS_WITH_HOOKS) {
     fs.mkdirSync(path.join(root, dir), { recursive: true });
@@ -296,6 +297,8 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
       GSTACK_STATE_ROOT: path.join(fx.home, '.gstack'),
       GSTACK_SETTINGS_FILE: fx.settings,
       GSTACK_PLAN_TUNE_HOOKS: 'yes',
+      GSTACK_SKILL_ROUTING: 'off',
+      GSTACK_SKILL_CONTRACTS: 'off',
       TMPDIR: fx.base,
     };
     // A file, not `bash -c`: the script is longer than Windows' 32,767-character command line.
@@ -365,5 +368,5 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
     expect(r.out).toContain('keeps running the broken file until it is fixed');
     expect(r.out).not.toContain('previous install is still active');
     expect(registeredCommands(fx)).toEqual(before);
-  });
+  }, 30_000); // Two setup hook passes, each resolving every gate switch.
 });

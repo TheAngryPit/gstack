@@ -130,13 +130,27 @@ export function shipHookFailures(fixture: ReturnType<typeof createShipHookFixtur
       const labels = evidence.interactions.filter(event => event.disposition === 'declined')
         .flatMap(event => (event.input as { questions: Array<{ options: Array<{ label: string }> }> }).questions[0].options.map(option => option.label));
       const own = labels.reduce((text, label) => text.replaceAll(`"${label}"`, '').replaceAll(`“${label}”`, ''), result.output);
-      check(/declin|unchanged|not install|not modif|preserv|left|leave|untouched|(?:installed|changed|modified) nothing|nothing (?:was |is )?(?:installed|changed|modified)|did(?: not|n['’]t) (?:install|modify|change|replace|touch)/i.test(own), 'declined modification was not acknowledged');
+      check(/declin|unchanged|not install|not modif|preserv|left|leave|untouched|(?:installed|changed|modified) nothing|(?:nothing|\bno (?:hooks?|changes?|files?)) (?:was |were |is )?(?:installed|changed|modified|overwritten|replaced)|did(?: not|n['’]t) (?:install|modify|change|replace|touch)/i.test(own), 'declined modification was not acknowledged');
     } else {
       check(evidence.localHook === localPolicy, 'existing local policy changed');
       check(evidence.interactions.length === 0, 'existing local policy requires manual integration, not consent to overwrite');
-      // Manual integration: "manual", or one sentence asking the user (or someone) to integrate it by hand.
-      const toUser = (sentence: string) => /\b(?:integrate|combine|merge|set\s+up|wire[sd]?\s+(?:up|in)|add)\b/i.test(sentence) &&
-        (/\byourself\b/i.test(sentence) || (/\bby\s+hand\b/i.test(sentence) && /\b(?:your?|someone|needs?\s+to\s+be|has\s+to\s+be|must\s+be)\b/i.test(sentence)));
+      // Manual integration: "manual", or one sentence asking the user (or someone) to integrate it by hand. The phrasal
+      // object may be a pronoun or a short determiner-led noun phrase ("wire the guard in", gate 40467320097), and the
+      // hand may be the owner's own ("the repo owner needs to add it ... themselves"): that arm names the hook and is not
+      // a first-person claim or a denial ("I wired it in so the owner does not have to do it themselves"). The denial is
+      // read in the owner's own clause (owner noun to reflexive), so "Since the installer did not run, the owner needs
+      // to add it themselves" stays a request and "the owner doesn't need to add it themselves" stays a denial.
+      const phrasalObject = '(?:(?:it|them|this|that|both|(?:the|this|that|its|your|these|those|both)\\s+(?:\\S+\\s+){0,2}?)\\s*)?';
+      const ownersOwnHand = (sentence: string) => {
+        const reflexive = sentence.search(/\b(?:them|him|her)sel(?:f|ves)\b/i);
+        const owner = reflexive >= 0 ? [...sentence.slice(0, reflexive).matchAll(/\b(?:owner|maintainer|someone|whoever|user|team)\b/gi)].at(-1) : undefined;
+        return owner !== undefined && /\b(?:hooks?|guard|polic(?:y|ies)|pre-push|scripts?|wrapper)\b/i.test(sentence) &&
+          !/(?:\b(?:not|never|no\s+need|without|nothing)|n['’]t)\b/i.test(sentence.slice(owner.index, reflexive)) &&
+          !/\b(?:I|we)(?:['’](?:ll|ve|d))?\s+(?:(?:will|have|already|just|can)\s+)?(?:integrate|combine|merge|set|wire|add)/i.test(sentence);
+      };
+      const toUser = (sentence: string) => new RegExp(`\\b(?:integrate|combine|merge|set\\s+${phrasalObject}up|wire[sd]?\\s+${phrasalObject}(?:up|in)|add)\\b`, 'i').test(sentence) &&
+        (/\byourself\b/i.test(sentence) || ownersOwnHand(sentence) ||
+          (/\bby\s+hand\b/i.test(sentence) && /\b(?:your?|someone|needs?\s+to\s+be|has\s+to\s+be|must\s+be)\b/i.test(sentence)));
       check(/manual/i.test(result.output) || result.output.split(/[.!?](?:\s|$)|\n/).some(toUser), 'manual integration was not reported');
     }
   }

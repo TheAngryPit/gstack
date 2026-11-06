@@ -3,11 +3,12 @@ name: ship
 preamble-tier: 4
 version: 1.0.0
 description: |
-  Ship workflow: detect + merge base branch, run tests, review diff, bump VERSION,
-  update CHANGELOG, commit, push, create PR. Use when asked to "ship", "deploy",
+  Ship it: merge the base, run tests, review the diff, bump VERSION and CHANGELOG,
+  push and create a PR. Use when asked to "ship", "deploy", "deploy this",
   "push to main", "create a PR", "merge and push", or "get it deployed".
   Proactively invoke this skill (do NOT push/PR directly) when the user says code
   is ready, asks about deploying, wants to push code up, or asks to create a PR. (gstack)
+codex_default_prompt: "Use $gstack-ship to take this branch to a pull request: merge the base, run the tests, review the diff, stamp the version and changelog, then push and open or update the PR."
 allowed-tools:
   - Bash
   - Read
@@ -43,7 +44,8 @@ tests without asking again. Step 15 commits those tests.
 
 **Route:** integrate (1–3) → test and review (4–11.5) → prepare the release
 (12–15) → verify frozen content (16) → push and publish (17–21).
-Every new invocation repeats Steps 1–16, including both reviews and the docs audit.
+Every new invocation repeats Steps 1–16, including both reviews and the docs audit,
+unless Step 1's carry check binds an earlier receipt to HEAD.
 Steps 12, 17 and 19 prevent duplicate bumps, pushes and PRs, never verification.
 
 ### Keep state between steps
@@ -58,13 +60,25 @@ its absolute path, with these headings so a paused run can resume:
 - **Documentation:** candidate/id, attempts used, accepted hashes or named blocked exception.
 - **Next steps:** one ordered work list, with the current step marked.
 
+**Budget** (docs/ship-budget.md): `--token-cap <n|none>` (or GSTACK_SHIP_TOKEN_CAP); `--resume <record>`
+or `--continue <handoff>` re-attach. Step 1 runs `gstack-ship-budget start --record <record>`. With a cap,
+read `~/.claude/skills/gstack/ship/sections/budget-handoff.md`, `check` at each step boundary and dispatch
+batch, obey `verdict=`, `close` before Step 22.
+
 A **receipt** is saved evidence of a check's command, result and consumed content.
 A review's **start token** is the opaque value returned by `gstack-review-log --start`
 before it reads the diff. Keep `REVIEW_START` for Step 9, a separate `PASS_START` for
 each Step 11 attempt, and `DESIGN_START` for design. Finish each pass with its original
 token; `--finish` stamps the binding fields automatically. Never borrow or replace a token.
-`gstack-wtree` prints a Git tree hash covering tracked and non-ignored untracked files,
-not a commit ID. Use `git diff <old-tree> <new-tree>` to compare these snapshots.
+`gstack-wtree` prints a Git tree hash of tracked and non-ignored untracked files (not a commit);
+compare two with `git diff <old-tree> <new-tree>`.
+
+**Review policy** (docs/review-policy.md): only a finding that would fail a test,
+break production, or lose data or secrets blocks a pass; the rest is a PR-body
+note. Step 9's plan sets both reviews' depth (`--depth-floor standard|full` only
+raises it). Pass 1 reads the diff, later passes the range; the cap is two rounds under `frozen`
+(fix-checks included), else Step 9.4's third fix cycle. `NO FINDINGS` is complete. `ship: review_scope` (Step 3)
+is the knob; the receipt's `review_loop` records the outcome.
 
 ### Ship control flow
 
@@ -98,7 +112,7 @@ Permitted repairs continue in this invocation without restarting /ship.
 {{BASE_BRANCH_DETECT}}
 
 `<base>` means the detected branch name for fetch/helper arguments;
-`origin/<base>` is its remote-tracking ref for comparisons. Step 1 fetches it.
+`origin/<base>` is its remote-tracking ref for comparisons.
 
 {{GBRAIN_CONTEXT_LOAD}}
 
@@ -116,26 +130,31 @@ repository-landing asks, including on Apple repos.
 
 ## Step 1: Pre-flight
 
-1. Save the current branch as `<branch-name>`. If on the base branch or the repo's default branch, **abort**: "You're on the base branch. Ship from a feature branch."
+Run `~/.claude/skills/gstack/bin/gstack-ship-preflight --base <base> --run <SESSION_ID>`: Steps 1–3 at once;
+act on each `STOP:` and `NEXT:` line.
 
-2. Run `git status` (never `-uall`). Uncommitted changes are always included; do not ask.
+1. It saves the current branch as `<branch-name>`. If on the base branch or the repo's default branch, **abort**: "You're on the base branch. Ship from a feature branch."
+2. Uncommitted changes are always included; do not ask (`STATUS:`).
+3. It runs `git fetch origin <base>` first; if the fetch fails, stop: report the error and
+   restore access. `DIFF:` is the stat and commit count.
 
-3. Run `git fetch origin <base>` before inspecting the diff. If fetch fails, STOP:
-   report the error and restore access first. Then inspect
-   `git diff origin/<base> --stat`, untracked files from status, and
-   `git log origin/<base>..HEAD --oneline`.
+4. **Carry check.** An open PR prints `PR: #<n>` and its `gstack-ship-receipt carry --pr <n> --base <base> --dry-run` line.
+   `CARRY: would carry` (base merge committed, same product patch-id): skip review and Step 14.5,
+   fix what it broke (CHANGELOG, size caps), commit, `gstack-ship-release push --branch <branch-name>
+   --early`, `gstack-ci-carry wait --base <base>`, run `gstack-pregate --allow-repo-commands`, then carry without
+   `--dry-run` plus `--pregate .gstack/tmp/pregate.json`. `CARRY: carried` binds HEAD and ends
+   the run with its `GSTACK_RESULT:` line. A failed check, HEAD moving after pregate, `current`, or `refused` with no
+   `NEXT: carry route` re-runs Steps 2–16. Steps 17–21 then publish.
 
-4. Display historical readiness using the dashboard below, then finish Step 1.
+5. Display historical readiness using the dashboard below, then finish Step 1.
    Prior CLEAR reviews or dashboard skips never replace Step 9's gates.
 
 {{REVIEW_DASHBOARD}}
 
 An outside review with status `unverified` or `unavailable` is missing coverage, never a pass.
 
-For diffs >200 lines (`git diff origin/<base> --stat | tail -1`), recommend
-`/plan-eng-review` or `/autoplan`.
-
-For Design Review: run `source <(~/.claude/skills/gstack/bin/gstack-diff-scope <base> 2>/dev/null)`. If `SCOPE_FRONTEND=true` and no design review exists, mention: "Design Review not run — Step 9 includes the lite check; consider /design-review for a full visual audit."
+Over 200 lines, `DIFF:` recommends `/plan-eng-review` or `/autoplan`. `SCOPE: frontend=true` (from
+`gstack-diff-scope <base>`) with no design review: mention "Design Review not run — Step 9 includes the lite check; consider /design-review for a full visual audit."
 
 Continue to Step 2 without asking; Step 9 applies the review gates.
 
@@ -146,49 +165,35 @@ Continue to Step 2 without asking; Step 9 applies the review gates.
 Check distribution for new standalone artifacts (CLI binaries, packages, tools),
 not web services already deployed.
 
-1. List candidate distribution paths:
-   ```bash
-   git diff origin/<base> --diff-filter=A --name-only | grep -E '(^|/)(cmd/[^/]+/main\.go|bin/[^/]+|Cargo\.toml|setup\.py|package\.json)$' | head -5
-   ```
-   Include matching untracked files from Step 1's status. Read each match:
+1. `DISTRIBUTION:` lists new candidate paths (`git diff origin/<base> --diff-filter=A --name-only`,
+   untracked included) and any release workflow. Read each match:
    a new `package.json` or `Cargo.toml` alone is not a publishable artifact;
    also check existing manifests for newly declared binaries or package
    exports. Gate only when a new distributable is present.
 
-2. If new artifact detected, check for a release workflow:
-   ```bash
-   ls .github/workflows/ 2>/dev/null | grep -iE 'release|publish|dist'
-   grep -qE 'release|publish|deploy' .gitlab-ci.yml 2>/dev/null && echo "GITLAB_CI_RELEASE"
-   ```
-
-3. **New artifact without a pipeline:** AskUserQuestion: "Users cannot download this
+2. **New artifact without a pipeline:** AskUserQuestion: "Users cannot download this
    artifact after merge without a release pipeline."
    - A) Add the platform's release workflow now
    - B) Defer with a P1 distribution TODO in Step 14
    - C) Not needed: internal/web-only, covered by existing deployment
 
-4. **If A:** Add packaging/publish configuration using repository CI conventions.
+3. **If A:** Add packaging/publish configuration using repository CI conventions.
    Ask for unknown targets, registries or access first; never invent credentials.
    Recheck against the artifact and include the workflow in tests and review.
    Do not publish a release during `/ship`.
-5. Otherwise continue without a pipeline.
+4. Otherwise continue without a pipeline.
 
 ---
 
 ## Step 3: Merge the base branch (BEFORE tests)
 
-Merge the base ref fetched in Step 1 so tests and reviews cover the integrated code:
+The preflight merges the fetched base (`git merge`) so tests and reviews cover the integrated code (`MERGE:`; `up to date` if nothing new; `skipped` under stamp-at-merge).
 
-```bash
-git merge origin/<base> --no-edit
-```
+**Merge conflicts:** `MERGE:` names them. Auto-resolve simple ones (VERSION, schema.rb, CHANGELOG ordering). For complex or ambiguous conflicts, **STOP**: show the choices, ask via AskUserQuestion, wait for the answer before any edit; then commit and rerun the preflight.
 
-**Merge conflicts:** Auto-resolve simple ones (VERSION, schema.rb, CHANGELOG ordering). For complex or ambiguous conflicts, **STOP**, show the conflicting choices, use AskUserQuestion for the resolution, and wait for the answer before editing or continuing.
-
-**If already up to date:** Continue silently.
-
-**Ship policy:** `~/.claude/skills/gstack/bin/gstack-ship-policy show-effective --base <base>`
-(docs/ship-policy.md); its `ship:` lines bind Steps 12, 16 and history.
+**Ship policy:** `POLICY:` is `gstack-ship-policy show-effective --base <base>`
+(docs/ship-policy.md); its `ship:` lines bind Steps 12-16 and history. `RUNTIME_LINES:` goes
+to `gstack-ship-budget check --runtime-lines`.
 
 If integration changes the artifact or distribution configuration inspected in Step 2,
 repeat Step 2 (decisions included) on the merged content, then Step 4.
@@ -212,12 +217,14 @@ repeat Step 2 (decisions included) on the merged content, then Step 4.
 ## Step 11.5: Bind the reviews
 
 1. **Select the two reviews.** Run `~/.claude/skills/gstack/bin/gstack-review-read`.
-   Select this invocation's final Step 9.4 record (`skill:"review"`, `via:"ship"`)
-   and Step 11 native record (`skill:"adversarial-review"`). Match each to its saved
+   Select this invocation's final Step 9 record (`skill:"review"`, `via:"ship"`, or a
+   last 3.5 `review-fix-check`) and Step 11 native record (`skill:"adversarial-review"`;
+   none after `ADVERSARIAL: skipped`). Match each to its saved
    handle, original token and source; reject outside-provider or older records.
-2. **Compare their content.** Require the native record's `review_binding.state`
-   to be `verified`. All three snapshots must match: its `wtree`, Step 9.4's
-   `review_binding.start_wtree` and `review_binding.end_wtree`. A mismatch or missing
+2. **Compare their content.** All three snapshots must match: the native record's
+   `wtree` (its `review_binding.state` `verified`), the Step 9 record's
+   `review_binding.start_wtree` and `review_binding.end_wtree`; after a planned skip, the
+   last two with `review_freshness` `CURRENT`. A mismatch or a missing required
    record/field blocks release preparation: report **Review records missing or mismatched**
    and insert `9 → 10 → 11 → 11.5` before Step 12. Bind the new records at 11.5.
    Never attach new tokens to old work.
@@ -226,33 +233,39 @@ repeat Step 2 (decisions included) on the merged content, then Step 4.
    does not mean failed or unrun probes passed. Keep Step 9.4's incomplete flags
    and the user's exception.
 4. **Save the evidence.** Save both records and matching **reviewed tree** for
-   Step 16. Continue to Step 12.
+   Step 16, with its merge base. Continue to Step 12.
 
 ## Step 12: Version bump (auto-decide)
 
-Item 3 needs `BUMP_LEVEL`: reuse this invocation's saved level. Otherwise FRESH
+Item 3 needs `BUMP_LEVEL`: reuse this invocation's saved level. Else FRESH
 chooses it in item 2 and ALREADY_BUMPED derives it in item 1.
 
-`ship: queue_mode stamp-at-merge` replaces items 1–4.
+**One call:** `~/.claude/skills/gstack/bin/gstack-ship-release version --base <base> [--bump <BUMP_LEVEL>] --why '<WHY>'`
+runs items 1 and 3–5; item commands serve only a `STOP:`, which names its rerun flag
+(`--bump`, `--accept-incomplete`, `--version <v>`, `--keep-current`, `--answer`).
+
+`VERSION: skipped` or `VERSION: <v> kept (…; no write)` ends Step 12 with
+`NEW_VERSION` unset: Step 13 follows its `NEXT:`; Steps 18 and 20 take NO_VERSION's branch
+(`kept`: VERSION stays `<v>`).
 
 1. **Classify state** — pure reader, never writes:
    ```bash
-   bun run ~/.claude/skills/gstack/bin/gstack-version-bump classify --base <base>
+   bun --no-env-file --config=/dev/null run ~/.claude/skills/gstack/bin/gstack-version-bump classify --base <base>
    ```
    Save the JSON `baseVersion` as `BASE_VERSION`, then read `state` and dispatch:
    - **FRESH** → use the recorded level or choose it in item 2, then check the queue and write.
    - **ALREADY_BUMPED** → keep `NEW_VERSION=currentVersion`. If `BUMP_LEVEL` is missing,
      use the first changed component from `baseVersion` to `currentVersion`
-     (major/minor/patch/micro; an absent fourth component is zero). Continue at item 3,
-     not another automatic bump.
+     (major/minor/patch/micro; an absent fourth component is zero). Continue at item 3; never bump again.
    - **DRIFT_STALE_PKG** → run `gstack-version-bump repair`, then reclassify.
      Success follows ALREADY_BUMPED, including its queue check; failure stops.
      Repair alone never re-bumps.
    - **DRIFT_UNEXPECTED** → STOP: package.json disagrees with VERSION while VERSION
      matches base. Reconcile the manual edit, then reclassify.
-   - **NO_VERSION** → print `notice` verbatim and ship without a version change: skip
-     the rest of Step 12 and Step 13's CHANGELOG entry, never create VERSION, use an
-     unprefixed title in Step 18 and log `"version":null` in Step 20.
+   - **NO_VERSION** → print `Version bump: skipped (no version source: <path, reason>)` and
+     `notice`; ship without a version change: skip the rest of Step 12 and Step 13's
+     CHANGELOG entry, never create VERSION, use an unprefixed title in Step 18 and log
+     `"version":null` in Step 20.
    - **Exit 2** → STOP and show stderr: a configured version file is missing, empty,
      unreadable or malformed. Fix it or its pin, then reclassify. Never substitute `0.0.0.0`.
 
@@ -262,18 +275,21 @@ chooses it in item 2 and ALREADY_BUMPED derives it in item 1.
      **MAJOR**: ask for milestones or breaking changes (`ship: bump patch` never asks).
      AskUserQuestion: recommended level with rationale, smaller level, or cancel.
      Wait; cancel stops before release writes or push and preserves existing work.
-   Save lowercase `BUMP_LEVEL`. A claimed version may move the next available number
-   forward, but cannot change the chosen MICRO/PATCH/MINOR/MAJOR level.
+   Save lowercase `BUMP_LEVEL`. A claimed version may move the number forward, never the level.
 
-3. **Queue-aware pick** (workspace-aware ship):
+3. **Queue-aware pick:**
    ```bash
-   QUEUE_JSON=$(bun run ~/.claude/skills/gstack/bin/gstack-next-version --base <base> --bump "$BUMP_LEVEL" --current-version "$BASE_VERSION" 2>/dev/null || echo '{"offline":true}')
+   QUEUE_JSON=$(bun --no-env-file --config=/dev/null run ~/.claude/skills/gstack/bin/gstack-next-version --base <base> --bump "$BUMP_LEVEL" --current-version "$BASE_VERSION" 2>/dev/null || echo '{"offline":true}')
    CANDIDATE_VERSION=$(echo "$QUEUE_JSON" | jq -r '.version // empty')
    ```
    **Qualify first:** require successful utility output and a nonempty valid version.
    `offline:false` qualifies; `offline:true` qualifies only with `fallback:"git"`.
    Offline output without that fallback, failure, malformed output or an empty version
    is unusable, even when it contains a version-looking string.
+
+   **Incomplete** (`complete:false`): PRs in `unknown_claims` went unread; the pick may
+   collide. Rerun item 3 once; still incomplete, AskUserQuestion: use it (recommended;
+   Version Gate CI rereads the queue) or stop.
 
    - **Usable candidate:** print warnings and claimed queue. FRESH sets `NEW_VERSION=CANDIDATE_VERSION`.
      ALREADY_BUMPED compares it with `currentVersion`: if different, ask to rebump
@@ -286,25 +302,20 @@ chooses it in item 2 and ALREADY_BUMPED derives it in item 1.
 
 4. **Write the bump** (FRESH, or an approved rebump):
    ```bash
-   bun run ~/.claude/skills/gstack/bin/gstack-version-bump write --version "$NEW_VERSION" --regen-digest
+   bun --no-env-file --config=/dev/null run ~/.claude/skills/gstack/bin/gstack-version-bump write --version "$NEW_VERSION" --regen-digest --changelog CHANGELOG.md
    ```
-   The CLI validates `MAJOR.MINOR.PATCH.MICRO` (or pinned 3-digit semver), writes
-   VERSION, the manifest (`--package-json-path` → `.gstack/package-json-path` →
-   `./package.json`) and existing npm lockfiles, never creating one, with the 3-digit
-   translation (`1.67.0.0` → `1.67.0`); VERSION is authoritative. Exit 3 is a half-write:
-   reclassify and `repair` DRIFT_STALE_PKG.
+   It writes VERSION, manifest and lockfiles, and moves `## [Unreleased]` under NEW_VERSION
+   for Step 13. Exit 2 wrote nothing: show stderr, stop.
+   Exit 3 is a half-write: reclassify and `repair` DRIFT_STALE_PKG.
 
-   `--regen-digest` runs repo code (`scripts/gen-agents-digest.ts`) with Step 5's privileges
-   only when it and committed `agents-digest/gstack-AGENTS.md` exist; if `agentsDigest` is
-   false, run `bun scripts/gen-agents-digest.ts` and stage the digest with the bump. Before
+   `--regen-digest` runs `scripts/gen-agents-digest.ts` only when it and a committed `agents-digest/gstack-AGENTS.md` exist; if `agentsDigest` is
+   false, run `bun --no-env-file --config=/dev/null scripts/gen-agents-digest.ts` and stage the digest with the bump. Before
    push, verify the committed digest matches generation for the selected VERSION.
 
 5. **Record the release decision after a version was written**, including
-   an approved ALREADY_BUMPED rebump. Skip unchanged versions and manifest-only repairs.
-   ```bash
-   ~/.claude/skills/gstack/bin/gstack-decision-log '{"decision":"Ship NEW_VERSION (BUMP_LEVEL)","rationale":"WHY","scope":"repo","source":"skill","confidence":9}' 2>/dev/null || true
-   ```
-   Substitute `NEW_VERSION`, `BUMP_LEVEL` and a one-line `WHY` (scope or breaking-change signal); best-effort.
+   an approved ALREADY_BUMPED rebump; skip unchanged versions and manifest-only repairs.
+   The bin logs `Ship NEW_VERSION (BUMP_LEVEL)` through `gstack-decision-log` with `--why`,
+   a one-line `WHY` (scope or breaking-change signal); best-effort.
 
 {{SECTION:changelog}}
 
@@ -341,7 +352,7 @@ write failures are non-blocking.
 ## Step 14.5: Documentation audit (every ship)
 
 **Doc-sync invariant:** Every ship dispatches the /document-release subagent before final
-commit/verification/publication, including reruns, already-pushed branches, existing PRs and docs-only changes.
+commit/verification/publication, including reruns, already-pushed branches, existing PRs and docs-only changes, but not a Step 1 carry.
 No edits means an executed audit, not a skip; report the section's verified outcome.
 
 {{SECTION:documentation}}
@@ -354,19 +365,10 @@ Make bisectable commits; if already committed, continue to Step 16. Never create
    migrations may stand alone. Under 50 lines across fewer than 4 files may be one commit.
 2. Order dependencies first: infrastructure → models/services → controllers/views.
    Each commit works alone (no broken imports or missing code).
-   Group VERSION + CHANGELOG + TODOS.md after the feature commits.
 3. Use `<type>: <summary>` (feat/fix/chore/refactor/docs) and a brief body; fixing a
-   user-named issue adds a `Fixes: #<n>` trailer. Only the final
-   VERSION/CHANGELOG commit gets the release version and co-author trailer. No Git tag:
-
-```bash
-git commit -m "$(cat <<'EOF'
-chore: bump version and changelog (vX.Y.Z.W)
-
-{{CO_AUTHOR_TRAILER}}
-EOF
-)"
-```
+   user-named issue adds a `Fixes: #<n>` trailer. Leave VERSION, CHANGELOG/fragment, TODOS.md
+   and the digest uncommitted: Step 16's `finish` commits them last with
+   `--trailer '{{CO_AUTHOR_TRAILER}}'`. Do not add a Git tag.
 
 ---
 
@@ -374,44 +376,46 @@ EOF
 
 **IRON LAW: NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE.**
 
-Run stages 1–5 in order; recovery notes below name where to resume. Content
-changes during or after verification restart at stage 1 and complete all five
-stages before Step 17. Content-preserving commits keep evidence valid.
+`finish` runs stages 1–4 in order; act on each `STOP:` by its recovery below, then rerun
+it. Content changes during or after verification restart at
+stage 1 and complete all five stages before Step 17. Content-preserving commits keep evidence valid.
+
+**One call for stages 1–4:** `~/.claude/skills/gstack/bin/gstack-ship-release finish --base <base> --reviewed-tree <tree> --reviewed-base <mb> --docs-post <audit-id>-post.json --lane <label>=<Step 5 command>... [--build <cmd>]... --trailer '<trailer>'`
+also makes Step 15's item-3 commit and runs the pregate (`--docs-rechecked`,
+`--no-lanes-approved` record stage 2.2 and Step 5's approval).
 
 ### 1. Finish writers and prepare outputs
 
-Inspect writer handles, including the docs child. Confirm terminal completion or
-termination before another writer runs; timeout or cancellation acknowledgment
-alone means STOP until confirmed.
+Before `finish`, confirm every writer (the docs child too) completed or terminated;
+an acknowledged timeout or cancellation alone means STOP until confirmed.
 
-Find declared generation/build commands in project instructions, manifests, build
-files and CI. Run them and save results. If none exists, record not applicable and
-the inspected sources. A missing prerequisite or failed build stops shipping:
-report **Build failed or prerequisite missing**, with the command, error and needed
-repair. Never invent a substitute command.
-**If blocked:** Repair it, then repeat stage 1. After it passes, continue
-to stage 2; treat any content repair as a behavioral change there.
+Pass each declared generation/build command (instructions, manifests, build files, CI)
+as `--build`; with none, record N/A and the sources inspected.
+A missing prerequisite or failed build stops shipping: report **Build failed or prerequisite
+missing** with the command, error and repair. Never invent a substitute command.
+**If blocked:** repair it, repeat stage 1, then continue to stage 2: a content repair is behavior there.
 
 ### 2. Choose the change route
 
-Capture the current tree with `~/.claude/skills/gstack/bin/gstack-wtree`. Inspect
-`git diff <reviewed-tree> <current-tree>` against the snapshot saved before Step 12.
-Missing snapshots block this comparison, regardless of HEAD equality.
+`finish` runs `git diff <reviewed-tree> <current-tree>` (`--reviewed-tree`, saved before Step 12
+by `~/.claude/skills/gstack/bin/gstack-wtree`) and prints `ROUTE:`. No saved tree: pass `review_binding.end_wtree` from Step 11.5's bound Step 9 record;
+with none, insert `9 → 10 → 11 → 11.5`.
 
-Classify the comparison in this order:
+Its `STOP:` names the route:
 
 1. **Behavior, tests or build inputs changed:** Prompts/templates count as behavior.
-   Insert `5–11.5 → 12–14 → 16` before the pending Step 17, then stop this step.
-   This repair excludes Step 14.5 because the rebuild can change generated docs.
-   Step 16 restarts at stage 1: rebuild and compare again before stage 3 decides
-   documentation freshness. Further repairs use the same work list.
+   Insert `5–11.5 → 12–14 → 16` before the pending Step 17. It excludes Step 14.5 (a rebuild
+   can change generated docs; compare before stage 3) and Step 15 (`finish` STOPs on an uncommitted
+   non-release file: commit it per Step 15, rerun). Its Step 9 plans with `gstack-review-plan --post-review`
+   (at the cap: a stop for the owner). A STOP naming a scoped-review packet
+   instead takes one reader (no round) and `--context-reviewed` rerun; a blocker is this item.
 2. **Only authored docs or release metadata changed:** Keep Step 8's original child
-   report and counts. Recheck affected plan items using their recorded verification
-   and append current evidence to the invocation record. If a classification is no
+   report and counts. Recheck affected plan items by their recorded verification and
+   log current evidence. If a classification is no
    longer supported, run Step 8's audit and decision gates only, then return to
-   Step 16 stage 1. Never edit the child's counts yourself.
-3. **No changes, or the docs-only checks still support the plan:** Continue to stage 3
-   without a new code review.
+   Step 16 stage 1; else rerun with `--docs-rechecked`. Never edit the child's counts yourself.
+3. **No changes, or the docs-only checks still support the plan:** `finish` continues to
+   stage 3 without a new code review.
 
 ### 3. Resolve documentation freshness
 
@@ -427,6 +431,7 @@ audit or risk decision never qualifies.
 
 Report changed inputs, blockers and attempts used:
 
+- **A fix the audit's result named:** rerun finish with `--docs-requested <path> --docs-result <json>`.
 - **An attempt remains, with changed inputs or an available repair:** insert
   `14.5 → 15 → 16` before Step 17. Use Blocked recovery with the existing count.
   Validate the outcome before Step 15, then restart Step 16 stage 1.
@@ -442,51 +447,47 @@ Never run a third audit. Child return is not acceptance.
 Freeze inputs through verification and push. Run declared docs/link/generated-file
 checks; report any that are unavailable.
 
-**Reuse a check when its inputs match.** Compare hashes or complete bytes of its
-saved and current consumed files, fixtures, dependencies and execution parameters.
-Changed or unknown dependencies require a rerun. For model judges, compare the complete
-expanded request, rubric, parameters and builder/runtime dependencies. Cite the original
-command, result/counts, timestamp and log, never resample. Mandatory reviews still run.
+**Reuse a check when its inputs match.** Same consumed files, fixtures, dependencies
+and parameters (for a model judge, the complete expanded request and rubric); unknown means
+rerun. Cite the original command, result, timestamp and log; never resample. Mandatory reviews still run.
 
-**Check each test lane's receipt as well.** Use its actual Step 5 label/command:
-`--label <lane> --expect-cmd '<exact Step 5 command>'`. Inspect changes since the run;
-`--allow-paths` exempts only release metadata. A `package.json` version-only edit
-can qualify; scripts, dependencies and runtime configuration require live tests.
-Uncertain edits cannot be exempted. Docs, TODO edits, new/generated tests and fixes
-make evidence STALE even without a new code review. Use this example only once
-every allowed edit is release metadata:
+**Check each test lane's receipt as well.** `finish` checks every `--lane` as
+`--label <lane> --expect-cmd '<exact Step 5 command>'`, like this example:
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-evidence check --label tests --expect-cmd '<tests>' --label vitest --expect-cmd '<vitest>' --max-age 24 --allow-paths CHANGELOG.md,VERSION,package.json,agents-digest/gstack-AGENTS.md
 ```
 
+`--allow-paths` exempts only release metadata (in `package.json`, only a version edit). Docs, TODO edits, new/generated tests and fixes
+make evidence STALE even without a new code review.
+
 | Receipt result | Next action |
 |---|---|
 | FRESH (exit 0) | Cite the label, exit, timestamp, log and `tests_ran`. |
-| STALE/MISSING: changed content, command or age, or no proven run | Run `~/.claude/skills/gstack/bin/gstack-evidence run --label <lane> -- '<command>'`, read the result and recheck once. Handle failures as described below. |
-| ZERO-RUN: the receipt's `tests_ran` is 0 | STALE-equivalent: the lane proved nothing. Use Step 5's ZERO-RUN triage (a failed lane), never FRESH, even with exit 0. |
+| STALE/MISSING: changed content, command or age, or no proven run | Run `~/.claude/skills/gstack/bin/gstack-evidence run --label <lane> -- '<command>'`, read the result and recheck once (`finish` does; a CI-mapped lane is carried, else `EVIDENCE: DEFERRED`). Still not FRESH: a failed lane. |
+| ZERO-RUN: the receipt's `tests_ran` is 0 | STALE-equivalent: use Step 5's ZERO-RUN triage (a failed lane), never FRESH, even with exit 0. |
 | `tests_ran: unknown` | Non-blocking: keep the exit-0 verdict, cite the lane as `count unavailable`. Never record it as ZERO-RUN or as a counted pass. |
-| Only receipt storage/readback failed | Independently prove unchanged final content, the same command and valid age from the successful run's evidence. Cite its exact command, exit, timestamp and log as **ledger unavailable**, never FRESH. Without that proof, use STALE/MISSING. |
+| Only receipt storage/readback failed | Prove unchanged final content, the same command and valid age from the successful run's evidence. Cite its exact command, exit, timestamp and log as **ledger unavailable**, never FRESH. Without that proof, use STALE/MISSING. |
 
-No test lanes: require Step 5's explicit untested-scope approval for final content,
+No test lanes: rerun with `--no-lanes-approved` on Step 5's explicit untested-scope approval,
 or run Steps 5–15, including the no-tests decision, then return to Step 16 stage 1.
 Report the gap, never FRESH; builds must pass.
 
 **New, changed or unwaived test failure:** STOP publication. Run Steps 5–15,
 starting with Step 5's triage, then return to Step 16 stage 1. This recovery also
-applies if a failure appears while reporting in stage 5. Reentry to Step 14.5
-keeps its existing audit count; it does not authorize a third attempt.
+covers a failure seen in stage 5. Reentry to Step 14.5 keeps its audit count and
+does not authorize a third attempt.
 
 ### 5. Report, then push
 
-Commit only approved, verified release changes left uncommitted after Step 15,
-including generated outputs; use its grouping rules; never create an empty commit.
+`finish` made the release commit. Commit only verified outputs stage 1's
+builds regenerated, grouped as in Step 15; never create an empty commit. It is
+content-preserving: no restart.
 Preserve unrelated user files.
 
 Paste build/docs/test results. Reuse waivers only for the same verified
 pre-existing failures and approved scope; cite the actual approval and failing
-counts, never FRESH or all-green. A new, changed or unwaived test failure uses
-stage 4's recovery before publication.
+counts, never FRESH or all-green.
 
 Then the honesty inventory, two lines, from Step 9's latest `Gate edits:` line and
 its records:
@@ -496,7 +497,7 @@ its records:
 - Each test lane's `tests_ran` (N, ZERO-RUN or `count unavailable`).
 Write this report in the auditor's posture: this session's own gate edits are
 evidence for the reader to examine, not positions to defend; a kept gate
-states its reason and nothing more. Otherwise continue to Step 17.
+states its reason and nothing more. Then continue to Step 17.
 
 ---
 
@@ -580,25 +581,15 @@ failure STOPs here. If one exists and is not a draft:
 
 A new PR or an existing draft needs no question: Step 19 creates or keeps the draft.
 
-**Idempotency check:** Check if the branch is already pushed and up to date.
+**Idempotency check:** after the guard block run
 
 ```bash
-LOCAL=$(git rev-parse HEAD) || exit 1
-REMOTE_REF=$(git ls-remote --heads origin refs/heads/<branch-name>) || {
-  echo "STATUS: BLOCKED — cannot verify remote branch; restore access before pushing"
-  exit 1
-}
-REMOTE=$(printf '%s\n' "$REMOTE_REF" | awk '{print $(1)}')
-REMOTE=${REMOTE:-none}
-echo "LOCAL: $LOCAL  REMOTE: $REMOTE"
-[ "$LOCAL" = "$REMOTE" ] && echo "ALREADY_PUSHED" || echo "PUSH_NEEDED"
+~/.claude/skills/gstack/bin/gstack-ship-release push --branch <branch-name>
 ```
 
-`ALREADY_PUSHED`: skip the push, continue to Step 18. Otherwise push with upstream tracking:
-
-```bash
-git push -u origin <branch-name>
-```
+It checks the branch, the offer, the gate above (`--gate-open <n>`; `--gate-open-approved` is B)
+`gstack-pregate sealed` and push guards, then `git ls-remote --heads origin refs/heads/<branch-name>` against HEAD: a failed lookup STOPs, a match prints
+`PUSH: ALREADY_PUSHED` (go to Step 18), else it runs `git push -u origin <branch-name>`.
 
 **If the push fails, STOP.** No Step 19 or publication claim. Report the error:
 - **Non-fast-forward push:** fetch and inspect the remote, then merge under Step 3's
@@ -607,7 +598,8 @@ git push -u origin <branch-name>
   even with unchanged content before returning to Step 17. Never bypass failed guards.
 Never force-push. Only a successful push or verified `ALREADY_PUSHED` proceeds.
 
-Continue to Step 18. No documentation writer runs after push.
+After `EVIDENCE: DEFERRED`, run Step 5's `gstack-ship-release accept`; a `STOP:` there
+is a failed lane (stage 4). Continue to Step 18. No documentation writer runs after push.
 
 ---
 
@@ -623,7 +615,9 @@ Lookup failure or ambiguous matches **STOP** for resolution, never mean no PR.
 Save the result for Step 19's recheck.
 
 The pr-body section prepares the title from that result, then publishes;
-`--no-pr` or an automation lane takes the handoff section.
+`--no-pr` or an automation lane takes the handoff section. Unattended (`UNATTENDED_SHIP:`
+echoed): an open PR at HEAD takes pr-body's existing-PR path (body and title only, no
+`pr-create`, no push); else handoff.
 
 {{SECTION:pr-body}}
 
@@ -631,21 +625,19 @@ The pr-body section prepares the title from that result, then publishes;
 
 ## Step 20: Persist ship metrics
 
-Log metrics for `/retro` through `gstack-review-log`; it handles project/branch paths,
-JSON validation, storage and sync and takes **no path argument**.
+Log metrics for `/retro` through `gstack-review-log`; it takes **no path argument**.
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"ship","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","coverage_pct":COVERAGE_PCT,"coverage_schema":2,"coverage_pct_value":COVERAGE_PCT_VALUE,"weak_gaps":WEAK_GAPS,"tests_extended":TESTS_EXTENDED,"tests_rejected":TESTS_REJECTED,"regression_proof":REGRESSION_PROOF,"plan_items_total":PLAN_TOTAL,"plan_items_done":PLAN_DONE,"verification_result":"VERIFY_RESULT","version":"VERSION","branch":"'"$(git rev-parse --abbrev-ref HEAD)"'"}'
 ```
 
 Substitute from earlier steps:
-- **COVERAGE_PCT**: Step 7 diagram's integer percentage; encode null/undetermined as -1
-- **COVERAGE_PCT_VALUE**: Step 7's `coverage_pct_value` (the gate's X) as an integer, or `null` when missing or ignored
-- **WEAK_GAPS**, **TESTS_EXTENDED**, **TESTS_REJECTED**: counts of Step 7's `weak_gaps`, `tests_extended` and `tests_rejected` (0 when the key is missing or ignored)
-- **REGRESSION_PROOF**: `{"red_at_head":N,"base_green":N,"base_unavailable":N}` from Step 7, or `null` when missing
-- **PLAN_TOTAL**: total plan items extracted in Step 8 (0 if no plan file)
-- **PLAN_DONE**: count of DONE + CHANGED items from Step 8 (0 if no plan file)
-- **VERIFY_RESULT**: "pass", "fail", or "skipped", set after Step 9 executes Step 8.1's verification list
+- **COVERAGE_PCT**: Step 7's integer percentage; -1 when null or undetermined
+- **COVERAGE_PCT_VALUE**: Step 7's `coverage_pct_value` (the gate's X) as an integer; `null` when missing or ignored
+- **WEAK_GAPS**, **TESTS_EXTENDED**, **TESTS_REJECTED**: counts of Step 7's `weak_gaps`, `tests_extended`, `tests_rejected` (0 when missing or ignored)
+- **REGRESSION_PROOF**: Step 7's `{"red_at_head":N,"base_green":N,"base_unavailable":N}`; `null` when missing
+- **PLAN_TOTAL** / **PLAN_DONE**: Step 8's plan items, total and DONE + CHANGED (0 with no plan file)
+- **VERIFY_RESULT**: "pass", "fail" or "skipped", set when Step 9 runs Step 8.1's verification list
 - **VERSION**: `NEW_VERSION` from Step 12; `null` (unquoted) under NO_VERSION
 
 The shell supplies the branch. Run it without confirmation.
@@ -661,15 +653,26 @@ GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_
 _NUDGE_MARKER="$GSTACK_STATE_ROOT/.plan-tune-nudge-shown"
 _QT=$(~/.claude/skills/gstack/bin/gstack-config get question_tuning 2>/dev/null || echo "false")
 if [ ! -f "$_NUDGE_MARKER" ] && [ "$_QT" = "false" ]; then
-  echo ""
-  echo "gstack can learn from your AskUserQuestion answers. Run /plan-tune to opt in"
-  echo "— it captures which prompts you find valuable vs noisy and (with hooks installed)"
-  echo "auto-decides your never-ask preferences."
+  printf '\ngstack can learn from your AskUserQuestion answers. Run /plan-tune to opt in: it captures which prompts you find valuable vs noisy and (with hooks installed) auto-decides your never-ask preferences.\n'
   mkdir -p "$GSTACK_STATE_ROOT" && touch "$_NUDGE_MARKER"
 fi
 ```
 
 The marker or enabled question_tuning suppresses it; remove the marker to re-enable.
+
+---
+
+## Step 22: Terminal line (every run)
+
+The last line printed is the result line a parent greps (docs/unattended.md):
+
+```bash
+~/.claude/skills/gstack/bin/gstack-ship-receipt result --pr <pr-number>   # handoff: --body .gstack/tmp/ship-receipt.md
+```
+
+It binds the receipt to HEAD, writes the run record, prints `GSTACK_RESULT: skill=ship
+status=complete head=<sha> run=<dir>`; `QUEUE_RECEIPT_STALE`: HEAD moved past the receipt (rewrite,
+repost, rerun). A STOP before Step 19 publishes ends with `GSTACK_RESULT: skill=ship status=refused run=-`.
 
 ---
 
@@ -685,7 +688,6 @@ hand-roll VERSION/package.json writes.
 
 Follow the numbered gates and their explicit exceptions.
 
-- **Never force push.** Use regular `git push` only.
 - **An early Greptile PR stays up.** A stop after Step 6.5 opened it leaves the draft
   open with one comment saying why (greptile-early section); never close it.
 - **Use the configured version file's format** (4-digit for VERSION); under NO_VERSION,

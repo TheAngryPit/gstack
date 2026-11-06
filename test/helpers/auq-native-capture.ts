@@ -303,7 +303,7 @@ export async function captureNativeFirstAuq(opts: NativeAuqCaptureOptions): Prom
       trustedDirs: [cwd],
     })), {mode:0o600});
     const skillPath = path.join(cwd, opts.skillName, 'SKILL.md');
-    const prompt = `The ONLY skill file you may read is this absolute path: ${skillPath}. Do NOT search for, Glob, find, or read any other SKILL.md anywhere — especially nothing under ~/.claude or /Users.
+    const prompt = `The ONLY skill file you may read is this absolute path: ${skillPath}, together with the files in its sections/ directory that it tells you to Read. Do NOT search for, Glob, find, or read any other SKILL.md anywhere — especially nothing under ~/.claude or /Users.
 
 Read ${skillPath} and follow its workflow for this scenario:
 
@@ -313,7 +313,7 @@ Skip any system-audit / environment-setup / codebase-exploration steps. At the f
     session = await launchClaudePty({
       // Explicit tool approvals suffice. Bypass mode introduces a separate
       // safety-consent screen in a fresh CLI config; never accept that screen.
-      cwd, model, seedSkills: false, permissionMode: 'default',
+      cwd, model, seedSkills: false, permissionMode: 'default', priceTranscript: false,
       observeScreen: true, observeSetupQuestions: true,
       timeoutMs: Math.max(1, deadline - Date.now()),
       // Explicit availability as well as approval: no Bash/Agent/Skill or MCP.

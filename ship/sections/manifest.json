@@ -55,8 +55,8 @@
     {
       "id": "greptile",
       "file": "greptile.md",
-      "title": "Address Greptile review comments",
-      "trigger": "addressing Greptile review comments when a PR exists (Step 10)"
+      "title": "Address review bot comments",
+      "trigger": "addressing review bot comments when a PR exists (Step 10)"
     },
     {
       "id": "adversarial",
@@ -83,10 +83,22 @@
       "trigger": "preparing the title and creating or updating the PR/MR with the verified documentation outcome (Steps 18-19)"
     },
     {
+      "id": "capy-pr",
+      "file": "capy-pr.md",
+      "title": "Capy PR body: What changed (before/after images), Why, Approvals",
+      "trigger": "Step 19 printed CAPY_PR: on (a Capy session, GSTACK_CAPY=1) — read before composing the PR body"
+    },
+    {
       "id": "handoff",
       "file": "handoff.md",
       "title": "Handoff without a PR (automation lanes)",
       "trigger": "handing the branch to a coordinator instead of opening a PR (--no-pr or an automation lane; Step 18)"
+    },
+    {
+      "id": "budget-handoff",
+      "file": "budget-handoff.md",
+      "title": "Token budget and fresh-context handoff",
+      "trigger": "a token cap is set or verdict=delegate printed (Step 1 on)"
     }
   ]
 }

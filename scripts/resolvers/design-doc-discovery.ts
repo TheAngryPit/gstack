@@ -11,7 +11,10 @@
  * The fragment carries no code fences — the {{DESIGN_DOC_DISCOVERY}} token
  * sits inside each caller's ```bash block. Callers must set $SLUG and
  * $BRANCH first; the block sets $DESIGN and prints "Design doc found: ..." or
- * "No design doc found".
+ * "No design doc found". When /office-hours recorded a host plan-mode copy of
+ * the doc, the helper also prints DESIGN_PLAN_COPY (and STALE_DESIGN_DOC when
+ * the copy is newer) on stderr with the write-through command (#542), so this
+ * block stays the same size in every caller.
  */
 
 import type { TemplateContext } from './types';

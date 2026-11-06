@@ -55,8 +55,9 @@ describe('content-binding template drift', () => {
 
   test('ship Step 5 lanes run wrapped with per-lane labels', () => {
     const tests = rendered('ship/sections/tests.md');
-    expect(tests).toContain('gstack-evidence run --label tests');
-    expect(tests).toContain('gstack-evidence run --label vitest');
+    expect(tests).toContain('gstack-ship-preflight --tests-only --base <base> --lane <label>=<command>');
+    expect(tests).toContain('Each lane runs as `gstack-evidence run --label <label> -- \'<command>\'`');
+    expect(tests).toContain('use the same lane labels and exact commands again in Step 16');
   });
 
   test('land-and-deploy grades staleness content-first (wtree rule) and checks evidence', () => {
@@ -210,9 +211,9 @@ describe('content-binding template drift', () => {
     }
   });
 
-  test('greptile triage reads bodies through the guard (metadata/body split)', () => {
+  test('review bot triage reads bodies through the guard (metadata/body split)', () => {
     const triage = rendered('review/greptile-triage.md');
-    expect(triage).toContain('gstack-issue-guard --stdin --source greptile-line');
+    expect(triage).toContain('gstack-issue-guard --stdin --source review-bot');
     expect(triage).toContain('gstack-issue-guard --stdin --source greptile-replies');
   });
 });

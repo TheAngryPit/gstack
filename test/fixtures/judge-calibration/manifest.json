@@ -92,6 +92,19 @@
       "estimated_cost_usd": 20.36745,
       "cumulative_usd": 111.8289,
       "within_budget": false
+    },
+    {
+      "config": "cookie-workflow",
+      "priority": 8,
+      "cases": 1,
+      "model": "claude-sonnet-5-5",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 894807,
+      "estimated_output_tokens_per_call": 1200,
+      "estimated_cost_usd": 4.381614,
+      "priced_at": "2026-10-25T16:58:41.883Z",
+      "funding": "separate approval (GStack Minder, 2026-10-25; CREW 5), outside the W2 $115 reservation"
     }
   ]
 }

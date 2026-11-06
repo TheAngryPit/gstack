@@ -133,7 +133,7 @@ export const QUESTIONS = {
     door_type: 'two-way',
     options: ['fix-now', 'ack-and-ship', 'false-positive'],
     signal_key: 'code-quality-care',
-    description: "Greptile flagged a valid issue — fix, ack and ship, or mark false positive?",
+    description: "A review bot flagged a valid issue — fix, ack and ship, or mark false positive?",
   },
   'ship-greptile-comment-false-positive': {
     id: 'ship-greptile-comment-false-positive',
@@ -141,7 +141,7 @@ export const QUESTIONS = {
     category: 'approval',
     door_type: 'two-way',
     options: ['reply', 'fix-anyway', 'ignore'],
-    description: "Greptile comment looks like a false positive — reply to explain, fix anyway, or ignore silently?",
+    description: "A review bot comment looks like a false positive — reply to explain, fix anyway, or ignore silently?",
   },
   'ship-todos-create': {
     id: 'ship-todos-create',
@@ -335,6 +335,14 @@ export const QUESTIONS = {
     options: ['reduce', 'hold'],
     signal_key: 'scope-appetite',
     description: "Plan touches 8+ files — reduce scope or hold?",
+  },
+  'plan-eng-review-structure': {
+    id: 'plan-eng-review-structure',
+    skill: 'plan-eng-review',
+    category: 'routing',
+    door_type: 'two-way',
+    options: ['original-arrangement', 'smaller-arrangement'],
+    description: "Complexity gate — Original arrangement or Smaller arrangement (file/class layout only)?",
   },
   'plan-eng-review-test-gap': {
     id: 'plan-eng-review-test-gap',
@@ -540,8 +548,8 @@ export const QUESTIONS = {
     skill: 'preamble',
     category: 'approval',
     door_type: 'two-way',
-    options: ['on', 'off'],
-    description: "Let gstack proactively suggest skills based on conversation context?",
+    options: ['core', 'all', 'off'],
+    description: "Let gstack proactively suggest skills based on conversation context? core (the four core skills, default) / all / off",
   },
   'preamble-routing-injection': {
     id: 'preamble-routing-injection',

@@ -10,7 +10,7 @@ import { total } from '../lib/cso/admission';
 import { SCANNER_IDS, ScannerExecution, ScannerId, scannerPlans } from '../lib/cso/scanners';
 import { type PreparationSandboxRunner } from '../lib/cso/preparation-executor';
 import { canonicalStartPlan } from '../lib/cso/verification';
-import { completeRuntimeCatalogFixture } from './helpers/cso-runtime-catalog';
+import { completeRuntimeCatalogFixture, unqualifiedRuntimeCatalog } from './helpers/cso-runtime-catalog';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -186,7 +186,7 @@ describe('Schemathesis application admission', () => {
     expect(calls).toBe(0); expect(out.outcome.gaps[0].message).toContain('boundary is missing or transformed');
   });
   test('no runtime profile means a prerequisite, not a scanner success', async () => {
-    const out = await executeScanner(input('schemathesis'), { catalog: catalog('schemathesis') });
+    const out = await executeScanner(input('schemathesis'), { catalog: catalog('schemathesis'), runtimes: unqualifiedRuntimeCatalog() });
     expect(out.outcome.status).toBe('not_assessed'); expect(out.outcome.gaps[0].message).toContain('runtime is unavailable');
   });
   test.each(['remote-ref', 'server', 'hook', 'callback', 'operation', 'unbounded', 'source-command'])('rejects hostile or ambiguous %s harness input', kind => {

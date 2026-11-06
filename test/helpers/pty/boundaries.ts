@@ -68,7 +68,7 @@ export const engSetupAUQ: Step0BoundaryPredicate = (fp) => {
   return answered.length > 0 && answered.every(q => {
     if (!q.options.some(option => option.label === call.answers?.[q.question])) return false;
     const actions = q.options.map(option => option.label.trim().replace(/^[A-Z][.)]\s+/i, ''));
-    const id = /<gstack-qid:\s*([a-z0-9-]+)\s*>/i.exec(q.question)?.[1]?.toLowerCase();
+    const id = /<gstack-qid:\s*([a-z0-9-]+)(?:;signal=[a-z0-9-]+)?\s*>/i.exec(q.question)?.[1]?.toLowerCase();
     const body = q.question.replace(/<gstack-qid:[^>]*>/gi, '').trim()
       .replace(/^D\s*\d+\s*[—–:-]\s*/i, '');
     // A finding about one component or a TODO remains substantive even if
@@ -234,7 +234,7 @@ function engNumberedFindingAUQ(fp: AskUserQuestionFingerprint): boolean {
   // A declarative severity-labelled issue can own the same cache repair as
   // an interrogative title. Require its native decision, current assessment,
   // and opposed implementation options; metadata alone never opens review.
-  const declaredCache = /^(?:Issue|Finding) ([1-9]\d*) \[P[0-3]\] \(confidence (?:10|[1-9])\/10\) [A-Za-z][\w./-]*:[1-9]\d*(?:-[1-9]\d*)?: ([A-Za-z_$][\w$]*) and ([A-Za-z_$][\w$]*) share a global mutable ([A-Za-z_$][\w$]*) via module-level export, and both mutate it\.$/.exec(title);
+  const declaredCache = /^(?:Issue|Finding) ([1-9]\d*) \[(?:P[0-3]|CRITICAL|INFORMATIONAL)\] \(confidence (?:10|[1-9])\/10\) [A-Za-z][\w./-]*:[1-9]\d*(?:-[1-9]\d*)?: ([A-Za-z_$][\w$]*) and ([A-Za-z_$][\w$]*) share a global mutable ([A-Za-z_$][\w$]*) via module-level export, and both mutate it\.$/.exec(title);
   if (declaredCache) return engDeclaredCacheFinding(q, declaredCache);
   if (engCacheWriterDecision(q)) return true;
   const libraryHooks = engLibraryHooksFinding(q, title);
@@ -592,7 +592,7 @@ export const engFirstReviewAUQ: Step0BoundaryPredicate = (fp) => {
     if (!call.answers?.[q.question]) return false;
     // These are review section identities, including the registry's
     // arch-finding/test-gap IDs. Scope and onboarding IDs cannot qualify.
-    const id = /<gstack-qid:\s*([a-z0-9-]+)\s*>/i.exec(q.question)?.[1] ?? '';
+    const id = /<gstack-qid:\s*([a-z0-9-]+)(?:;signal=[a-z0-9-]+)?\s*>/i.exec(q.question)?.[1] ?? '';
     if (/^plan-eng-(?:review-)?(?:arch(?:itecture)?|quality|test|perf(?:ormance)?)-(?:focus|mode|setup|routing|learnings|prerequisite|onboarding|next-steps?)(?:-|$)/i.test(id)) return false;
     const title = `${q.header} ${q.question.split('\n')[0]}`.replace(/<gstack-qid:[^>]*>/gi, '');
     return /^plan-eng-(?:review-)?(?:arch(?:itecture)?|quality|test|perf(?:ormance)?)-/i.test(id) &&
@@ -637,27 +637,3 @@ export const engStep0Boundary: Step0BoundaryPredicate = (fp) =>
   // the skill-name prefix; live qids observed: plan-eng-review-jitter,
   // plan-eng-review-idempotency, plan-eng-review-todos-e2e-concurrent.
   /gstack-qid:\s*(?:plan-)?eng-review-/i.test(fp.promptSnippet);
-
-/**
- * The seed declares "Design: review all seven dimensions" for the pending Step 0D
- * focus menu. Pick its single all-seven option only when every other option
- * narrows the review and the brief approves no product action.
- */
-export function pickDesignFocusAll(q: NativePlanQuestionCall['questions'][number]): number | null {
-  if (q.multiSelect || q.options.length < 2 || q.options.length > 4 || new Set(q.options.map(o => o.label)).size !== q.options.length) return null;
-  const text = q.question.trim();
-  const title = text.split(/\r?\n/, 1)[0]!.replace(/^D[1-9]\d*\s*[—–:-]\s*/i, '');
-  const sources = [...text.matchAll(/^Project\/branch\/task:\s*([^\n]+)$/gm)];
-  const explanatory = [text, ...q.options.map(o => o.description ?? '')].join('\n')
-    .replace(/`+[^`]*`+|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/g, '').replace(/[✅❌*]/g, '');
-  if (!/^Review all (?:7|seven) (?:design )?(?:dimensions|passes),? or focus(?: on [^?\n]+)?\?$/i.test(title) ||
-      sources.length !== 1 || !/\bplan-design-review of PLAN\.md\b/i.test(sources[0]![1]!) ||
-      /\b(?:historical|archived|quoted|example|foreign|other|another|previous)\b/i.test(sources[0]![1]!) ||
-      (text.match(/\?/g)?.length ?? 0) !== 1 || /```|~~~|^\s*>/m.test(text) ||
-      !/^ELI10:\s*I['’]ve rated this plan (?:10(?:\.0+)?|[0-9](?:\.\d+)?)\/10 on design completeness\./mi.test(text) ||
-      /(?:^|[.!?;:\n]|\b(?:and|while))\s*(?:(?:also|please|then|now)\s+)*(?:approv(?:e|ing)|deploy(?:ing)?|implement(?:ing)?|ship(?:ping)?|merg(?:e|ing)|delet(?:e|ing))\b/im.test(explanatory)) return null;
-  const labels = q.options.map(o => o.label.trim().replace(/^[A-Z][).:]\s+/i, '').replace(/\s*\(recommended\)\s*$/i, ''));
-  const all = labels.flatMap((label, i) => /^(?:Review )?All (?:7|seven) (?:design )?(?:dimensions|passes)$/i.test(label) ? [i + 1] : []);
-  if (all.length !== 1 || labels.some((label, i) => i + 1 !== all[0] && !/^(?:Only|Focus)\b/i.test(label))) return null;
-  return all[0]!;
-}

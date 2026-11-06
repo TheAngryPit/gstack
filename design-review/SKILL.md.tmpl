@@ -7,9 +7,7 @@ description: |
   AI slop patterns, and slow interactions — then fixes them. Iteratively fixes issues
   in source code, committing each fix atomically and re-verifying with before/after
   screenshots. For plan-mode design review (before implementation), use /plan-design-review.
-  Use when asked to "audit the design", "visual QA", "check if it looks good", or "design polish".
-  Proactively suggest when the user mentions visual inconsistencies or
-  wants to polish the look of a live site. (gstack)
+  Use when asked to "audit the design", "visual QA", "check if it looks good", or "design polish". (gstack)
 allowed-tools:
   - Bash
   - Read
@@ -78,17 +76,11 @@ After the user chooses, execute their choice (commit or stash), then continue wi
 
 {{BROWSE_FALLBACK}}
 
-**Check test framework (bootstrap if needed):**
-
-{{TEST_BOOTSTRAP}}
-
 **Find the gstack designer (optional — enables target mockup generation):**
 
 {{DESIGN_SETUP}}
 
-If `DESIGN_READY`: during the fix loop, you can generate "target mockups" showing what a finding should look like after fixing. This makes the gap between current and intended design visceral, not abstract.
-
-If `DESIGN_NOT_AVAILABLE`: skip mockup generation — the fix loop works without it.
+`DESIGN_READY` enables Phase 8a.5 target mockups; `DESIGN_NOT_AVAILABLE` skips them and the fix loop works without.
 
 {{DESIGN_DETECTOR}}
 
@@ -111,13 +103,17 @@ Remember `RUN_ID` and restate it literally in later blocks (each bash block is a
 
 {{LEARNINGS_SEARCH}}
 
-{{UX_PRINCIPLES}}
+**How users behave (Krug):** they scan, they don't read, so each screen is a billboard with one obvious next step; they satisfice and muddle through, so the default path must be the right one; every page passes the trunk test and navigation is wayfinding; clickable things look clickable, conventions beat novelty, and happy talk and instructions get cut; each confusion drains the goodwill reservoir; mobile raises every stake (thumb reach, 44px targets, no hover). Fix noise by removal, not addition, and clarity beats consistency.
 
 ## Phases 1-6: Design Audit Baseline
 
 {{DESIGN_METHODOLOGY}}
 
 {{DESIGN_HARD_RULES}}
+
+{{SECTION_INDEX:design-review}}
+
+{{SECTION:craft-audit}}
 
 Record baseline design score and AI slop score at end of Phase 6.
 
@@ -143,7 +139,9 @@ $GSTACK_STATE_ROOT/projects/$SLUG/designs/design-audit-{YYYYMMDD}/
 
 ---
 
-{{DESIGN_OUTSIDE_VOICES}}
+## Outside voices (after Phase 6)
+
+{{SECTION:outside-voices}}
 
 ## Phase 7: Triage
 
@@ -215,25 +213,7 @@ git commit -m "style(design): FINDING-NNN — short description"
 
 ### 8d. Re-test
 
-Navigate back to the affected page and verify the fix — one Aside script per finding:
-
-```bash
-aside repl '
-const HOOK = `(() => { window.__gstackErrs = window.__gstackErrs || []; const oe = console.error; console.error = (...a) => { window.__gstackErrs.push(a.map(String).join(" ")); oe.apply(console, a); }; window.addEventListener("error", e => window.__gstackErrs.push("uncaught: " + e.message)); })()`;
-const pg = await openTab("about:blank");
-await pg._sendToTarget("Page.addScriptToEvaluateOnNewDocument", { source: HOOK });
-await pg.goto("<affected-url>");
-const s = await snapshot(pg, { interactive: true });
-console.log(s.tree);
-console.log("CONSOLE_ERRORS=" + JSON.stringify(await pg.evaluate(() => window.__gstackErrs)));
-await pg.screenshot({ path: "finding-NNN-after.png", type: "png", fullPage: true });
-console.log("ASIDE_DIR=" + pwd);
-await closeTab(pg);
-console.log("GSTACK_STEP_OK");
-'
-```
-
-Then `cp "<ASIDE_DIR>/finding-NNN-after.png" "$REPORT_DIR/screenshots/"` and Read it next to the before shot. `CONSOLE_ERRORS=` must be `[]` (or no worse than the baseline) — a new error is a regression.
+Re-run the Phase 3 read script on the affected page, one script per finding, saving `await pg.screenshot({ path: "finding-NNN-after.png", type: "png", fullPage: true })` in place of the annotated screenshot. Then `cp "<ASIDE_DIR>/finding-NNN-after.png" "$REPORT_DIR/screenshots/"` and Read it next to the before shot. `CONSOLE_ERRORS=` must be `[]` (or no worse than the baseline) — a new error is a regression.
 
 Take **before/after screenshot pair** for every fix.
 
@@ -251,7 +231,11 @@ interactive state issues.
 
 For CSS-only fixes: skip entirely. CSS regressions are caught by re-running /design-review.
 
-If the fix involved JS behavior: follow the same procedure as /qa Phase 8e.5 (study existing
+If the fix involved JS behavior and no test command is known yet (none in CLAUDE.md or TESTING.md, none found earlier this run):
+
+{{SECTION:test-bootstrap}}
+
+Then follow the same procedure as /qa Phase 8e.5 (study existing
 test patterns, write a regression test encoding the exact bug condition, run it, commit if
 passes or defer if fails). Commit format: `test(design): regression test for FINDING-NNN`.
 
@@ -335,10 +319,6 @@ If the repo has a `TODOS.md`:
 
 The audit rule "Never read source code" governs the Phases 1-6 audit only; the Phase 8 fix loop reads and edits source.
 
-11. **Clean working tree required.** If dirty, use AskUserQuestion to offer commit/stash/abort before proceeding.
-12. **One commit per fix.** Never bundle multiple design fixes into one commit.
-13. **Only modify tests when generating regression tests in Phase 8e.5.** Never modify CI configuration. Never modify existing tests — only create new test files.
-14. **Revert on regression.** If a fix makes things worse, `git revert HEAD` immediately.
-15. **Self-regulate.** Follow the design-fix risk heuristic. When in doubt, stop and ask.
-16. **CSS-first.** Prefer CSS/styling changes over structural component changes. CSS-only changes are safer and more reversible.
-17. **DESIGN.md export.** You MAY write a DESIGN.md file if the user accepts the offer from Phase 2. Write it in the open DESIGN.md format (front matter tokens plus the canonical sections, the Phase 6 template in /design-consultation); an existing file keeps its persisted format choice, and this skill never offers a conversion.
+11. **Clean tree, one commit per fix, revert on regression, CSS-first, self-regulate** (Setup and Phase 8).
+12. **Only modify tests when generating regression tests in Phase 8e.5.** Never modify CI configuration. Never modify existing tests — only create new test files.
+13. **DESIGN.md export.** You MAY write a DESIGN.md file if the user accepts the offer from Phase 2. Write it in the open DESIGN.md format (front matter tokens plus the canonical sections, the Phase 6 template in /design-consultation); an existing file keeps its persisted format choice, and this skill never offers a conversion.

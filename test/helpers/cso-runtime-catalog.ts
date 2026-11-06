@@ -1,10 +1,12 @@
 import type { CsoStack } from '../../lib/cso/preparation';
 
-type RuntimeStack = Exclude<CsoStack, 'java'>;
+type RuntimeStack = Exclude<CsoStack, 'java' | 'go'>;
 import { canonical, sha256 } from '../../lib/cso/contracts';
 import { ISOLATION_POLICY_HASH } from '../../lib/cso/docker';
 import {
   CSO_HELPER_ABI,
+  RUNTIME_CATALOG,
+  selectRuntime,
   type QualifiedRuntime,
   type RuntimeCatalog,
   type RuntimePlatform,
@@ -124,4 +126,23 @@ export function installStagedRuntime(catalog: RuntimeCatalog, runtime: Qualified
   profile.versions = { ...installed.versions };
   catalog.promotion.evidenceDigest = `sha256:${sha256(canonical(catalog.runtimes))}`;
   return installed;
+}
+
+/** The given catalog with its promotion removed: every reviewed profile is still awaiting a qualified image. */
+export function unqualifiedRuntimeCatalog(base: RuntimeCatalog = RUNTIME_CATALOG): RuntimeCatalog {
+  const { promotion: _promotion, ...reviewed } = base;
+  return { ...reviewed, profiles: reviewed.profiles.map(profile => ({ ...profile, versions: { ...profile.versions } })), runtimes: [] };
+}
+
+/**
+ * The fail-closed rejection replay reaches at runtime admission for a fixture
+ * bundle whose image digest no qualified catalog entry carries.
+ */
+export function replayRuntimeRejection(profile: string, platform: RuntimePlatform): { code: string; message: string } {
+  try {
+    selectRuntime(profile, platform);
+  } catch (error) {
+    return { code: 'PREREQUISITE', message: String((error as Error).message).split(':')[0] };
+  }
+  return { code: 'INCOMPATIBLE_INPUT', message: 'Qualified runtime digest does not match the bundle' };
 }

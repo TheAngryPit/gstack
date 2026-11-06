@@ -248,12 +248,16 @@ test('existing SDK429 retry policy stays three and closes the prior query before
 });
 
 test('late first completion cannot approve tools or overwrite evidence after a fresh second invocation', async () => {
-  const result = await fixture(['late', 'success'], 250);
+  // The budget bounds the second, successful attempt too (stub server, two mkdtemps, the fake SDK
+  // run with its HTTP fetch). At 250ms it failed 4 of 4 times on windows-latest once the shard
+  // pack moved this file next to heavier neighbours (#3449, run 40263984171); 2s keeps the first
+  // attempt late and leaves the second one room on a loaded runner.
+  const result = await fixture(['late', 'success'], 2_000);
   expect(result.rows.map(r => [r.passed, r.attempt])).toEqual([[false, 1], [true, 2]]);
   expect(result.evidence[0].querySettled).toBe(0);
   expect(result.evidence[0].attemptId).not.toBe(result.evidence[1].attemptId);
   expect(result.homes[0]).not.toBe(result.homes[1]);
-}, 10_000);
+}, 20_000);
 
 test('HTTP finalization closes only connections belonging to the owned fixture server', async () => {
   const foreign = http.createServer((_req, res) => res.end('foreign'));

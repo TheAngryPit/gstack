@@ -11,6 +11,7 @@ import { newRun, readJson, saveReport } from '../lib/cso/state';
 import { MAX_OUTPUT, canonical, sha256, type VerificationObservation } from '../lib/cso/contracts';
 import { ISOLATION_POLICY_HASH } from '../lib/cso/docker';
 import { canonicalStartPlan, canonicalTestPlan, patchHash, verifyRepair } from '../lib/cso/verification';
+import { replayRuntimeRejection } from './helpers/cso-runtime-catalog';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const launcher = path.join(ROOT, 'bin', process.platform === 'win32' ? 'gstack-cso-launcher.exe' : 'gstack-cso-launcher');
@@ -342,6 +343,6 @@ describe('CSO --paths audit scope', () => {
     const supplied = cso(repo, ['replay', verified.bundle.id, '--source', repo]);
     expect(supplied.status).not.toBe(0);
     expect(supplied.stderr).not.toContain('does not match the bundle input hashes');
-    expect(supplied.stderr).toContain('MISSING_QUALIFIED_RUNTIME');
+    expect(supplied.stderr).toContain(replayRuntimeRejection(request.runtimeProfile, `linux/${arch}`).message);
   }, 60_000);
 });

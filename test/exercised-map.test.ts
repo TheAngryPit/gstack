@@ -161,7 +161,7 @@ describe('the five recorded variant-c misses on this checkout', () => {
 
 describe('shadow output never changes the real selection', () => {
   test('mode, cases, judges and reasons equal the selection without a shadow', () => {
-    for (const files of [['bin/gstack-config'], ['design/src/evolve.ts'], ['review/SKILL.md.tmpl'], ['lib/fs-utils.ts', 'docs/x.md'], ['ETHOS.md']]) {
+    for (const files of [['bin/gstack-config'], ['design/src/evolve.ts'], ['review/SKILL.md.tmpl'], ['lib/fs-utils.ts', 'docs/x.md'], ['SECURITY.md']]) {
       const withShadow = selectPrProfile({ selectedE2E: [], selectedJudges: [], changedFiles: files });
       const without = selectPrProfile({ selectedE2E: [], selectedJudges: [], changedFiles: files, exercised: null });
       expect(withShadow.shadow, files.join()).toBeDefined();
@@ -326,6 +326,10 @@ describe('parity with the measured prototype', () => {
   /** Files the shipped function reaches beyond the prototype, each with the reviewed edge class behind it. */
   const REVIEWED_SUPERSET: Record<string, string> = {
     setup: './setup, $ROOT/setup and join(..., "setup") exec edges (plan A2-2); setup is a full-gate file, so the closure stops there',
+    'lib/bun-isolation.ts': 'GSTA-56: every bun launcher (script-invocation, restamp, qa-deadline, the hooks) imports it, so it reaches every consumer of those launchers',
+    'lib/ship-receipt-docs.ts': 'bin/gstack-ship-receipt imports it (the docs audit record and doc caps), so it reaches every consumer of the receipt binary',
+    'lib/ship-receipt-prose.ts': 'bin/gstack-ship-receipt imports it (read --check-prose), so it reaches every consumer of the receipt binary',
+    'lib/default-base.ts': 'GST-511/GST-774: lib/ship-policy.ts (resolveBaseBranch), lib/gate-diff/git.ts, lib/pregate/context.ts, lib/ship-receipt-depth.ts and the review-plan, gate-diff, pregate, docs-candidate and diff-scope bins import or run it, so it reaches every consumer of those readers',
   };
 
   test('the shipped map equals or is a reviewed superset of the prototype map on this checkout', () => {

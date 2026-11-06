@@ -1,6 +1,13 @@
 
 import { FREE_TEXT_WRITE_RULE, freeTextFileBash, freeTextFileUse } from '../free-text-file';
 
+export function generateFailureRouting(): string {
+  return `**Failures: check the cause, then route.** A failing test, error or stack trace shows where a failure surfaces, not its root cause.
+
+- **Cause supplied** (the user names a specific cause and a narrow fix): make one read-only check of the evidence it rests on, such as the named file, test or log. If that confirms the cause, make the fix and run the focused test that covers it. If it does not, invoke \`/investigate\` before any further tracing or edit.
+- **Cause unknown:** make one read-only triage pass over the supplied evidence and the directly implicated test and code. Do not reproduce, test hypotheses or search wider. If that pass establishes the root cause and a narrow fix, make the fix and run the focused test that covers it. If the cause, scope or intended behavior is still unclear, invoke \`/investigate\` before any broader diagnosis or edit.`;
+}
+
 export function generateTestFailureTriage(): string {
   return `## Test Failure Ownership Triage
 
@@ -48,7 +55,7 @@ Ask with AskUserQuestion in the AskUserQuestion Format. List each failure the sa
 ### Step T4: Execute the chosen action
 
 **If "Investigate and fix now":**
-- Switch to /investigate mindset: root cause first, then minimal fix.
+- One read-only root-cause pass, then \`/investigate\` if unclear.
 - Fix the pre-existing failure.
 - Commit the fix separately from the branch's changes: \`git commit -m "fix: pre-existing test failure in <test-file>"\`
 - Continue with the workflow.

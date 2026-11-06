@@ -27,7 +27,7 @@ describe('docs/no-tests empty lane: reviewer edges (#3215)', () => {
     expect(r.out).toMatch(/docs\/no-tests: 1 documentation file\(s\)/);
   });
 
-  test('without a pin file, a template source and an unread test-tree Markdown file still fail closed; a renamed or deleted Markdown file is docs', () => {
+  test('without a pin file, a template source and an unread test-tree Markdown file are still unmapped (the no-policy warning, never docs); a renamed or deleted Markdown file is docs', () => {
     const repo = fixture(null);
     repo.git('checkout', '-q', 'main');
     commit(repo, { 'notes/old.md': '# old\n', 'notes/gone.md': '# gone\n' }, 'notes');
@@ -42,10 +42,11 @@ describe('docs/no-tests empty lane: reviewer edges (#3215)', () => {
     expect(docs.out).toContain('notes/gone.md: docs/no-tests (empty lane)');
     commit(repo, { 'skills/review/SKILL.md.tmpl': '# {{PREAMBLE}}\n', 'test/notes.md': '# notes no test reads\n' });
     const r = lanes(repo);
-    expect(r.status).toBe(EXIT.fail);
-    expect(r.err).toContain('(PREGATE_NO_LANE)');
-    expect(r.out).toContain('FAIL lanes — skills/review/SKILL.md.tmpl has no test lane');
-    expect(r.out).toContain('FAIL lanes — test/notes.md has no test lane');
+    expect(r.err).not.toContain('PREGATE_NO_LANE');
+    expect(r.out).toContain('(PREGATE_NO_POLICY)');
+    expect(r.out).toContain('no policy: skills/review/SKILL.md.tmpl test/notes.md have no test lane');
+    expect(r.out).not.toContain('skills/review/SKILL.md.tmpl: docs/no-tests');
+    expect(r.out).not.toContain('test/notes.md: docs/no-tests');
   });
 
   test('empty_lanes is read from the base branch only: the same key added on the branch does not clear a file', () => {

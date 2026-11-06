@@ -58,6 +58,16 @@ export function resultOf(out: string, phase: string, voice: 'native' | 'outside'
 }
 /** The sealed copy a completed voice is bound to. */
 export const boundOf = (out: string, phase: string, voice: 'native' | 'outside'): string => path.join(out, readRun(out).phases[phase][voice].output);
+/**
+ * A `rec`/`all` reply that carries every open Critical/High finding item into the build (`<id>b`, no plan change),
+ * so a test about another gate mechanism keeps its flow; `extra` tokens are appended to the except list.
+ */
+export function recCarrying(out: string, base = 'all', extra: string[] = []): string {
+  const carry = (JSON.parse(fs.readFileSync(path.join(out, 'gate.json'), 'utf8')).items as Array<{ id: string; finding?: string[] }>).filter(i => i.finding).map(i => `${i.id}b`);
+  const tokens = [...carry, ...extra];
+  return tokens.length ? `${base} except ${tokens.join(' ')}` : base;
+}
+
 export function attemptsOf(out: string, phase: string): { native: string; outside: string } {
   const run = readRun(out);
   return { native: run.phases[phase].native.attempt, outside: run.phases[phase].outside.attempt };
@@ -69,12 +79,14 @@ export interface PhaseRunOptions { nativeModel?: string; outsideModel?: string; 
 export function runPhase(out: string, phase: string, o: PhaseRunOptions = {}): { next: SpawnSyncReturns<string>; native: SpawnSyncReturns<string>; outside: SpawnSyncReturns<string> } {
   const next = autoplan(['next', '--out', out]);
   if (next.status !== 0) throw new Error(`next failed: ${next.stderr}\n${next.stdout}`);
-  for (const voice of ['native', 'outside'] as const) {
+  const outsideDisabled = readRun(out).phases[phase]?.outside?.status === 'disabled';
+  for (const voice of outsideDisabled ? ['native'] as const : ['native', 'outside'] as const) {
     const r = review(path.join(out, `${phase}-${voice}-prompt.md`), o.breakVoice === voice && o.breakKind ? { FIXTURE_BREAK: o.breakKind } : {});
     if (r.status !== 0) throw new Error(`fixture reviewer failed: ${r.stderr}`);
   }
   const ids = attemptsOf(out, phase);
   const native = autoplan(['submit', '--out', out, '--phase', phase, '--voice', 'native', '--result', resultOf(out, phase, 'native'), '--model', o.nativeModel ?? 'anthropic/claude-opus-4-7', '--attempt', ids.native, '--runner', 'host-subagent']);
+  if (outsideDisabled) return { next, native, outside: native };
   const outside = autoplan(['submit', '--out', out, '--phase', phase, '--voice', 'outside', '--result', resultOf(out, phase, 'outside'), '--model', o.outsideModel ?? 'openai/gpt-6-astra', '--attempt', ids.outside, '--runner', 'host-subagent', ...(o.reconcile ? ['--reconcile', o.reconcile] : [])]);
   return { next, native, outside };
 }

@@ -106,6 +106,53 @@ describe("env.kv: a function call assigned to a credential name is code (#2899)"
   );
 });
 
+describe("env.kv: a name-shaped literal inside a call is a file or dict key, not a secret (GST-1064)", () => {
+  const FAKE_KEY = "Zx9Qw8Er7Ty6Ui5Op4As3Df2";
+  const FAKE_STRIPE_TAIL = "4eC39HqLyjWDarjtT1zdp7dc";
+  table(
+    "env.kv",
+    "MEDIUM",
+    [
+      String.raw`key = json.loads(files.get("key.json", ""))`,
+      String.raw`token = resp.json().get("access_token")`,
+      String.raw`    session = store.load('session.cookie')`,
+      String.raw`secret = vault.read("client_secret")`,
+    ],
+    [
+      String.raw`key = "${FAKE_KEY}"`,
+      String.raw`KEY=${FAKE_KEY}`,
+      String.raw`key = json.loads("sk_live_${FAKE_STRIPE_TAIL}")`,
+      String.raw`token = resp.json().get("access_token", "${FAKE_KEY}")`,
+      String.raw`password = os.getenv("DB_PASSWORD", "hunter2.Zx9Qw8")`,
+      String.raw`key = json.loads(files.get("key.json")) or "${FAKE_KEY}"`,
+      String.raw`password = os.getenv("DB_PASSWORD", "correct-horse-battery-staple")`,
+      String.raw`api_key = decrypt("prod-signing-key")`,
+      String.raw`token = decrypt("correct_horse_battery_staple")`,
+      String.raw`key = decrypt("qwhzxkvbnmplor")`,
+      String.raw`SECRET_KEY = os.getenv("SECRET_KEY", "orange_monkey_pass")`,
+      String.raw`password = os.environ.get("DB_PASSWORD", "purple_walrus")`,
+      String.raw`token = resp.json().get("access_token", "orange_monkey_pass")`,
+      String.raw`key = derive_secret("tigers.horse")`,
+      String.raw`password = os.getenv("DB_PASSWORD", "qwhzxkvbnmplor.txt")`,
+      String.raw`password = make_password("orange_monkey_pass")`,
+      String.raw`password = bcrypt.hashpw("orange_monkey_pass", salt)`,
+      String.raw`token = jwt.encode("purple_walrus_pie", payload)`,
+      String.raw`api_key = settings.Secret("correct_horse_battery")`,
+      String.raw`password = hash_password("purple_walrus")`,
+      String.raw`password=hash_password("purple_walrus")`,
+      String.raw`+password = hash_password( "purple_walrus" )`,
+      String.raw`password = hash_password("purple_walrus").encode()`,
+      String.raw`password = hash_password("purple_walrus")  # seed user`,
+      String.raw`password = config.get("db_password") or ("orange_monkey_pass")`,
+      String.raw`password = config.get("db_password", ("orange_monkey_pass"))`,
+      String.raw`password = login(user, ("purple_walrus"))`,
+      String.raw`password = load_cfg("app.yaml"); login("purple_walrus")`,
+      String.raw`password = login(user, str("purple_walrus"))`,
+      String.raw`password = encrypt(str("orange_monkey_pass"))`,
+    ],
+  );
+});
+
 describe("internal.hostname: per-machine config filenames are not hosts (#2962, #2740)", () => {
   table(
     "internal.hostname",
@@ -161,6 +208,35 @@ describe("pii.ip_public: a four-part version needs a version declaration (#2784)
   );
 });
 
+describe("pii.ip_public: a four-part version gstack names is not an address (GST-1204)", () => {
+  table(
+    "pii.ip_public",
+    "MEDIUM",
+    [
+      "gstack 1.94.4.0",
+      "gstack: ok 1.94.4.0 for=ship",
+      "gstack: fail claude,codex (1.93.37.0)",
+      "upgraded gstack from 1.93.14.0 to 1.94.4.0",
+      "seen on gstack 1.94.4.0 to 1.94.8.0",
+      "(gstack 1.94.4.0-1.94.8.0)",
+    ],
+    [
+      "gstack talks to 8.8.8.8",
+      "gstack-proxy 1.128.1.0",
+      "landed in 1.94.4.0",
+      "gstack 1.94.4.0 via 8.8.8.8",
+      "from 1.128.1.0 to 1.128.1.1",
+      "gstack 8.8.8.8",
+      "gstack: fail 8.8.8.8",
+      "upgraded gstack from 8.8.8.8",
+      "my-gstack 1.94.4.0",
+      "/opt/gstack 1.94.4.0",
+      "gstack 1.94.4.0 - 8.8.8.8",
+      "VERSION 1.2.3.4 to 8.8.8.8",
+    ],
+  );
+});
+
 describe("db.url_with_password: postgres:postgres only on a loopback host (#2913)", () => {
   // Assembled from parts so this file's own source never carries a
   // credential-bearing URL for the repo's secret scan to block.
@@ -192,6 +268,27 @@ describe("db.url_with_password: postgres:postgres only on a loopback host (#2913
   );
 });
 
+// Free Tests flaked test/capy-captain-flow.test.ts in 7 of 57 runs (2026-10-21..23): the autoplan run id
+// run-YYYYMMDDHHMMSS put a 14-digit stamp in the approval row, and one stamp in ten passes Luhn.
+describe("pii.cc: a separator-free YYYYMMDDHHMMSS stamp is not a card number", () => {
+  table(
+    "pii.cc",
+    "MEDIUM",
+    [
+      'Approve the plan "Retry backoff" (autoplan run run-20261024131504, 2 decisions)',
+      "autoplan:run-20261024131504@gate_rev=1",
+      "backup stamp 20261024131512 ran late",
+    ],
+    [
+      "card 30569309025904",
+      "ref 20261324131501",
+      "stamp 202610241315045",
+      "card 2026 1024 1315 04",
+      "card 4111111111111111",
+    ],
+  );
+});
+
 describe("pii.phone.e164: GitHub Actions run and job ids in their id positions", () => {
   table(
     "pii.phone.e164",
@@ -204,6 +301,14 @@ describe("pii.phone.e164: GitHub Actions run and job ids in their id positions",
       "https://github.com/garrytan/gstack/actions/runs/37235771700/job/111534615007",
       "GITHUB_RUN_ID=37235771700",
       '{"run_id": 37235771700}',
+      // An 11-digit id after a run word, as a READY block, a ship receipt or an approval record names one (GSTA-121's `screen <id> GREEN`).
+      "citing screen 40477638211 GREEN at 5619199800a2",
+      "gate=40477638211",
+      "rerun passed 40477638211",
+      "run #40477638211",
+      "Screens: 40477638211",
+      "dispatched 40477638211 at the pin",
+      "cleared by run 19368712345",
     ],
     [
       "call 37235771700 tomorrow",
@@ -211,6 +316,84 @@ describe("pii.phone.e164: GitHub Actions run and job ids in their id positions",
       "https://example.com/contact/37235771700",
       '{"phone_id": 37235771700}',
       "run 4155550123 laps",
+      // A run word before a 10-digit national number, a bare 11-digit number and a generic word exempt nothing.
+      "gate 4155550123",
+      "the id is 40477638211",
+      "job 40477638211",
+      "workflow 40477638211",
+      "40477638211 failed",
+    ],
+  );
+});
+
+describe("pii.phone.e164: run ids in a runs= list or an actions/runs/ path (GST-1227)", () => {
+  table(
+    "pii.phone.e164",
+    "MEDIUM",
+    [
+      // The run list a CI carry or run clear prints (lib/run-evidence.ts runReceiptFields): every id, not only the first.
+      "CI_CARRY: cleared pregate.json/remote_gate run tests=412 runs=41629861819/1,41629861820/2 profiles=free-tests heads=2f9d11a0c3e4",
+      '{"remote_gate": "carried runs=41629861819/1,41629861820/1,41629861821/3 profiles=free-tests,windows-smoke"}',
+      "run=41629861819/1,416298618201/1",
+      "see actions/runs/41629861820 for the log",
+      "garrytan/gstack actions/runs/4162986182/attempts/2",
+    ],
+    [
+      "call +1 415 555 0123 tomorrow",
+      "call +1 415 555 0123 about runs=41629861819/1,41629861820/2",
+      "runs=+14155550123/1",
+      "runs=1/4155550123",
+      "runs=4155550123",
+      "reruns=4155550123/1",
+      "factions/runs/4155550123",
+      "sales-actions/runs/4155550123",
+      "runs=4162986182/1",
+      "runs=1234567890123/1",
+    ],
+  );
+});
+
+describe("pii.phone.e164: a short sha after review_loop_grant or review_loop_exception (Free Tests 41667825418, 41766865679)", () => {
+  table(
+    "pii.phone.e164",
+    "MEDIUM",
+    [
+      // The ask gstack-approvals records for the owner's grant, here with a stop head whose 12-character sha is all digits.
+      "Owner grant: one scoped fix-check after round 2 (review_loop_grant 367120488513)",
+      "Owner accepts the stop after the fix-check (review_loop_exception 367120488513)",
+      "review_loop_grant=367120488513",
+      "review_loop_grant: 3671204885",
+    ],
+    [
+      "review_loop_grant +14155552671",
+      "review_loop_grant 415-555-2671",
+      "review_loop_grant (415) 555-2671",
+      "call 367120488513 about the review_loop_grant",
+      "grant 367120488513",
+      "my_review_loop_grant 367120488513",
+      "review_loop_grant for 367120488513",
+    ],
+  );
+});
+
+describe("pii.wallet: a bc1 address needs the bech32 alphabet and checksum (Free Tests 41715139988)", () => {
+  table(
+    "pii.wallet",
+    "MEDIUM",
+    [
+      // The sha the CSO history range printed as <REDACTED-pii.wallet>..<REDACTED-pii.wallet>; it holds 1 and b, outside bech32's alphabet.
+      "bc1f7576f1eaf9d548ddb6f742b85ec11b4a3e79..bc1f7576f1eaf9d548ddb6f742b85ec11b4a3e79",
+      // A sha inside the alphabet (no 1 or b after the prefix) fails the checksum.
+      "commit bc1f7576f2eaf9d548ddf6f742c85ec22d4a3e79",
+      // A real address with its last character changed fails the checksum too.
+      "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5",
+    ],
+    [
+      "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      "send it to bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq today",
+      "wallet: bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
+      "0x52908400098527886E0F7030069857D2E4169EE7",
+      "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
     ],
   );
 });

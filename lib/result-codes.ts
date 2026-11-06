@@ -11,6 +11,13 @@
  * checks every anchor exists; add a row here before printing a new code.
  */
 import { RELEASE_RESULT_CODES } from './result-codes-release';
+import { CAPY_RESULT_CODES } from './result-codes-capy';
+import { BUDGET_RESULT_CODES } from './result-codes-budget';
+import { EVAL_RESULT_CODES } from './result-codes-eval';
+import { PLAN_RESULT_CODES } from './result-codes-plan';
+import { AUTOPLAN_RESULT_CODES } from './result-codes-autoplan';
+import { BROWSE_RESULT_CODES } from './result-codes-browse';
+import { CLEAN_RESULT_CODES } from './result-codes-clean';
 
 export interface ResultCode {
   /** Stable `<a id>` in docs/troubleshooting.md. */
@@ -162,10 +169,15 @@ export const RESULT_CODES = {
     summary: 'an argument given to .\\setup.ps1 is an empty string, which its Git Bash hand-off cannot carry, so nothing ran',
     fix: 'drop the empty argument or give it a value, then run .\\setup.ps1 again',
   },
+  SETUP_DEPS_MIGRATE_FAILED: {
+    anchor: 'setup-deps-migrate-failed',
+    summary: 'setup tried to move an install made before v1.91.231.0 to production-only dependencies, the production install failed, and setup put the full install back',
+    fix: 'read the cause on the warning line (offline, proxy, disk full), fix it, then re-run ./setup; the full install keeps working meanwhile',
+  },
   // C-stamp (plan C1, C2, C3, C5, C7): ship policy, restamp, tree receipt, ship receipt.
   POLICY_SOURCE_UNAVAILABLE: {
     anchor: 'policy-source-unavailable',
-    summary: 'policy source unavailable: origin/<base> is not a resolvable commit, so the reviewed .gstack/ship-policy.json cannot be read',
+    summary: 'policy source unavailable: origin/<base> is not a resolvable commit, or a pin file committed on it cannot be read, so the reviewed .gstack/ship-policy.json cannot be read',
     fix: 'git fetch origin <base> --depth=1 (the working-tree copy is never used silently)',
   },
   POLICY_INVALID: {
@@ -225,8 +237,8 @@ export const RESULT_CODES = {
   },
   CHANGELOG_DUPLICATE_HEADING: {
     anchor: 'changelog-duplicate-heading',
-    summary: 'two CHANGELOG sections carry the same version heading',
-    fix: 'merge the duplicate sections into one entry under the new version',
+    summary: 'two CHANGELOG sections carry the same version heading, beyond any duplicate the base branch already carries',
+    fix: 'merge the duplicate sections the PR introduced into one entry under the new version',
   },
   CHANGELOG_TOP_MISMATCH: {
     anchor: 'changelog-top-mismatch',
@@ -363,7 +375,7 @@ export const RESULT_CODES = {
   },
   PREGATE_CONFIG_INVALID: {
     anchor: 'pregate-config-invalid',
-    summary: '.gstack/pregate.json has an unknown key, a wrong type, a non-downgradable check in `warn`, or an uncontained glob',
+    summary: 'the pregate policy (.gstack/pregate.json, or the user-owned copy) has an unknown key, a wrong type, a non-downgradable check in `warn`, or an uncontained glob',
     fix: 'run `gstack-pregate validate` and fix the file on the base branch (secrets and required lanes cannot be downgraded)',
   },
   PREGATE_SECRETS: {
@@ -384,7 +396,7 @@ export const RESULT_CODES = {
   PREGATE_NO_LANE: {
     anchor: 'pregate-no-lane',
     summary: 'a touched source file maps to no test lane through imports, repo-path literals, the bin/<name> convention or a declaration',
-    fix: 'add a test that names the file, or declare its lane (or an explicit empty lane) under `dependencies` in .gstack/pregate.json. Markdown no test depends on is already a docs/no-tests empty lane; other documentation goes in `empty_lanes`',
+    fix: 'add a test that names the file, or declare its lane (or an explicit empty lane) under `dependencies` in .gstack/pregate.json. Markdown no test depends on is already a docs/no-tests empty lane; other documentation goes in `empty_lanes`; a release manifest whose only change against the merge base is its version values is waived as version-stamp-only',
   },
   PREGATE_LANE_FAILED: {
     anchor: 'pregate-lane-failed',
@@ -398,8 +410,8 @@ export const RESULT_CODES = {
   },
   PREGATE_STALLED: {
     anchor: 'pregate-stalled',
-    summary: 'a test command printed nothing for the stall timeout, so its process group was killed; the check is incomplete, never pass',
-    fix: 'read the lane log for the last file started, fix the hang, or raise `--stall-timeout` (`stall_timeout_s`; 0 disables) for a test that is quiet for longer, then rerun `gstack-pregate --stage tests`',
+    summary: 'a test command printed nothing for the stall timeout while its process group used under a tenth of one CPU (log growth alone on Windows), so the group was killed; the check is incomplete, never pass',
+    fix: 'read the lane log for the last file started, fix the hang, or raise `--stall-timeout` (`stall_timeout_s`; 0 disables) for a test that waits quietly for longer, then rerun `gstack-pregate --stage tests`',
   },
   PREGATE_RECEIPT_INVALID: {
     anchor: 'pregate-receipt-invalid',
@@ -433,11 +445,6 @@ export const RESULT_CODES = {
   },
   // PR E (multi-agent wave): gstack-eval-plan, gstack-lane-check, gstack-evidence verify,
   // gstack-owner-brief, gstack-contributor-mode, gstack-banned-terms.
-  PREREG_INCOMPLETE: {
-    anchor: 'prereg-incomplete',
-    summary: 'the preregistration file lacks a required section or a section is empty',
-    fix: 'fill every section `gstack-eval-plan prereg --check` names (bars, arms, decoys, stop rules, held-out exposure) before any priced call',
-  },
   EVAL_PRICE_MISSING: {
     anchor: 'eval-price-missing',
     summary: 'an arm names a model with no row in the price table, so its admission cannot be estimated',
@@ -511,7 +518,7 @@ export const RESULT_CODES = {
   SEALED_OUTPUT_REFUSED: {
     anchor: 'sealed-output-refused',
     summary: 'a push or PR would publish sealed or eval output (a sealed path, a transcript, a quoted answer, a seed or a local home path) to a public or unknown destination, or the sealed policy is unreadable',
-    fix: 'remove it from every published commit, or add one reviewed `rule<TAB>path<TAB>sha<TAB>reason` line to the base branch\'s .gstack/sealed-allow.tsv; a private destination sets sealed.visibility "private" in the base branch\'s .gstack/pregate.json',
+    fix: 'remove it from every published commit, or add one reviewed `rule<TAB>path<TAB>full-commit-sha<TAB>reason` line to the base branch\'s .gstack/sealed-allow.tsv (a shortened sha is ignored); a private destination sets sealed.visibility "private" in the base branch\'s .gstack/pregate.json',
   },
   EVAL_GATE_UNPRICED: {
     anchor: 'eval-gate-unpriced',
@@ -591,13 +598,13 @@ export const RESULT_CODES = {
   // Field wave lane A (items 1-4): gstack-upgrade, the Capy skill bootstrapper, install admission.
   UPGRADE_REFUSED: {
     anchor: 'upgrade-refused',
-    summary: 'bin/gstack-upgrade changed nothing: the checkout is dirty, diverged, pinned (detached or off the remote default branch), not a gstack checkout, or the incoming release holds',
+    summary: 'bin/gstack-upgrade changed nothing: the checkout is dirty, diverged, pinned (detached or off the remote default branch), not a gstack checkout, tracked by an enclosing project (#1022), or the incoming release holds',
     fix: 'resolve the named cause (commit or move the listed changes, check out the default branch), then re-run bin/gstack-upgrade; it never stashes or resets',
   },
   UPGRADE_BUSY: {
     anchor: 'upgrade-busy',
-    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), so moving the checkout would change gstack under it',
-    fix: 'wait for those sessions to finish (bin/gstack-lease list names each pid and age), then re-run bin/gstack-upgrade; GSTACK_UPGRADE_FORCE=1 overrides when you know they are idle',
+    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, or a shared harness (capy-server) whose lease may be a sibling session\'s is under 120 minutes old, or a live eval run holds gstack-detach\'s ~/.gstack/locks/gstack-evals.lock, so moving the checkout would change gstack under it',
+    fix: 'wait for those sessions to finish, or for a shared-harness lease to turn 120 minutes old (bin/gstack-lease list names each pid and age), then re-run bin/gstack-upgrade; GSTACK_UPGRADE_FORCE=1 overrides when you know no other session uses the checkout',
   },
   UPGRADE_FETCH_FAILED: {
     anchor: 'upgrade-fetch-failed',
@@ -628,12 +635,6 @@ export const RESULT_CODES = {
     anchor: 'install-unverified',
     summary: 'a Capy session (GSTACK_CAPY=1) has no passing install verdict for this checkout, HEAD and workflow, so the workflow refused to start',
     fix: 'run the Capy skill installer with --for <workflow> on this machine and launch with the GSTACK_LAUNCH line it prints',
-  },
-  // Fix wave 2026-10-15, PR 1a (items 7 and 11).
-  BROWSE_TAB_UNRECOVERABLE: {
-    anchor: 'browse-tab-unrecoverable',
-    summary: 'every tab was closed outside browse and a new one could not be opened, because the browser or its context is gone',
-    fix: 'run `browse restart` (`$B restart` in a gstack skill); `browse status` and `browse stop` keep working',
   },
   BUN_VERSION_UNREADABLE: {
     anchor: 'bun-version-unreadable',
@@ -668,12 +669,6 @@ export const RESULT_CODES = {
     anchor: 'artifact-public-target-exists',
     summary: '`gstack-autoplan export --public <dir>` writes only into an empty directory or over an earlier public copy of the same run',
     fix: 'pass an empty or new --public directory, or the directory that already holds this run\'s public copy',
-  },
-  // Field list 2 (2026-10-16), W8: preregistered diagnostics run before the freeze commit.
-  PREREG_DIAGNOSTIC_UNTESTED: {
-    anchor: 'prereg-diagnostic-untested',
-    summary: 'the declared summarizer, run on the declared synthetic fixture, did not report every preregistered diagnostic at its expected count',
-    fix: 'fix the summarizer or the declared definition (expected count, fixture) until every PREREG_DIAGNOSTIC line says ok, then commit the freeze; never freeze a diagnostic the summarizer has not counted',
   },
   // Field list 2 (2026-10-16), W9: .gstack/eval-models.json.
   EVAL_MODELS_INVALID: {
@@ -768,6 +763,13 @@ export const RESULT_CODES = {
     fix: 'rerun once; if it repeats, report the printed frame to the gstack maintainers',
   },
   ...RELEASE_RESULT_CODES,
+  ...CAPY_RESULT_CODES,
+  ...BUDGET_RESULT_CODES,
+  ...EVAL_RESULT_CODES,
+  ...PLAN_RESULT_CODES,
+  ...AUTOPLAN_RESULT_CODES,
+  ...BROWSE_RESULT_CODES,
+  ...CLEAN_RESULT_CODES,
 } as const satisfies Record<string, ResultCode>;
 
 export type ResultCodeName = keyof typeof RESULT_CODES;

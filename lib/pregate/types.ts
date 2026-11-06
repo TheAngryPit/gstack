@@ -4,6 +4,7 @@
  */
 import type { PregateCheck } from '../headless-artifacts';
 import type { Registry } from '../regen';
+import type { RunSource } from '../run-evidence';
 import type { PregateConfig } from './config';
 import type { Lane } from './workflows';
 
@@ -33,13 +34,27 @@ export interface PregateContext {
   touched: TouchedFile[];
   config: PregateConfig;
   configLabel: string;
+  /** Where the policy came from: the base branch, the unreviewed head, the user-owned file, or nowhere (defaults). */
+  configKind: 'base' | 'head' | 'user' | 'none';
+  /** The active policy has a `dependencies`, `empty_lanes`, `selection` or `local` key (config LANE_KEYS); false keeps the no-policy lane verdicts. Absent counts as declared. */
+  policyDeclaresLanes?: boolean;
+  /** This run's scratch directory under the state root (lib/pregate/run-scratch.ts): logs and scan files, never os.tmpdir(). */
+  scratch: string;
+  /** The policy file to edit: the user-owned path when it is the active policy, else `.gstack/pregate.json`. */
+  configFile: string;
+  /** sha256 of the user-owned policy's bytes when it is active; recorded as `inputs.policy` (a base copy is pinned by `inputs.base`). */
+  configDigest?: string;
+  /** The user-owned policy path looked for and absent under the defaults; recorded so verify can tell when one appears. */
+  absentUserPolicy?: string;
   registry: Registry;
   registryLabel: string;
   lanes: Lane[];
   platform: NodeJS.Platform;
   allowRepoCommands: boolean;
   timeoutMs: number;
-  /** No output for this long kills a test-tier process group (`--stall-timeout`, `stall_timeout_s`); 0 disables. */
+  /** Where timeoutMs came from: `--timeout`, `timeout_s from <policy>`, or the 600 s default. */
+  timeoutSource?: string;
+  /** No output and no CPU activity for this long kills a test-tier process group (`--stall-timeout`, `stall_timeout_s`); 0 disables. */
   stallTimeoutMs: number;
   /** Live stderr lines: per-file progress, heartbeats, the stage result. */
   progress: (line: string) => void;
@@ -47,6 +62,10 @@ export interface PregateContext {
   cores: number;
   testBackend: string;
   policyFrom: 'base' | 'head';
+  /** `--from-run`: a Free Tests run whose tree.json files count as passed for this tree (lanes, lib/run-evidence.ts verifyFromRun), with the base branch's run check or why it could not be built. */
+  fromRun?: { ref: string; check: RunSource | { error: string } };
+  /** `--no-ci-carry`: false skips the tests stage's automatic --from-run (lib/ci-carry.ts findCarry at HEAD's clean tree). */
+  ciCarry?: boolean;
   /** `--remote`: run the declared remote gate now, under this spend cap. */
   remote: { spendCapUsd: number } | null;
   env: NodeJS.ProcessEnv;
@@ -80,7 +99,14 @@ export interface CheckResult extends PregateCheck {
   /** Per-file or per-item lines for the table body. */
   lines?: string[];
   remote?: RemoteObligation[];
+  /** With `cause: 'environment'` (declared on PregateCheck): the kind and the line that proves it. */
+  environment?: EnvironmentCause;
 }
+
+export type EnvironmentKind = 'missing-binary' | 'network' | 'quota' | 'disk' | 'runtime' | 'tool';
+/** How the cause was established: `launch` (the command could not start, its binary is off PATH, the runtime or a gstack tool refused), or `output` (a rule matched the command's text before any test was counted, which the diff's own output could have written). */
+export type EnvironmentProof = 'launch' | 'output';
+export interface EnvironmentCause { kind: EnvironmentKind; evidence: string; proof: EnvironmentProof }
 
 export interface CheckDef {
   id: string;

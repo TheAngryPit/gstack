@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { runGeneration } from '../scripts/gen-skill-docs';
+import { warmFirstExec } from './helpers/warm-first-exec';
 
 const root = mkdtempSync(join(tmpdir(), 'skill-positional-'));
 const rendered = join(root, 'rendered');
@@ -29,6 +30,9 @@ beforeAll(async () => {
     expect((await runGeneration({ host, outputRoot: rendered })).exitCode).toBe(0);
   }
 }, 120000);
+// Windows Free Tests 40700602081, 41174352235, 41175308095: only the file's first checksum run hit the 5 s kill
+// and serial retries took 0.3 s. The first awk launch is a runner cost, not the rendered literal.
+beforeAll(() => warmFirstExec('bash', ['-c', "printf x | sha256sum | awk '{print $(1)}'"]), 30_000);
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 function substitute(text: string, args: string[]) {
@@ -71,7 +75,7 @@ for (const host of ['claude', 'codex'] as const) for (const args of [[], tenArgu
     const file = backslashPath ? join(root, 'checksum\\path', 'install-script') : join(root, 'install-script');
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, 'synthetic installer bytes\n');
-    for (const name of ['open-gstack-browser', 'pair-agent', 'setup-browser-cookies']) {
+    for (const name of ['open-gstack-browser', 'pair-agent']) {
       const lines = apply(skill(host, name)).split('\n').filter(line => line.includes('actual_sha=$('));
       expect(lines.map(line => line.trim())).toEqual([
         literals.checksum,

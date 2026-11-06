@@ -31,8 +31,8 @@ function start(args: string[] = [], text = SMALL_PLAN): { out: string; dir: stri
   return { out, dir, plan };
 }
 const v2File = (dir: string, text = V2) => { const f = path.join(dir, `plan-v2-${++n}.md`); fs.writeFileSync(f, text); return f; };
-function gated(): { out: string; dir: string; plan: string } {
-  const s = start();
+function gated(args: string[] = []): { out: string; dir: string; plan: string } {
+  const s = start(args);
   phaseVia(r, s.out, 'ceo', { native: [], outside: [] });
   expect(phaseVia(r, s.out, 'eng', { native: [], outside: [] }).outside.stdout).toContain('status=gate_pending');
   return s;
@@ -97,7 +97,7 @@ describe('revise', () => {
   });
 
   test('a second revise never overwrites the first archive', () => {
-    const s = gated();
+    const s = gated(['--max-rounds', '3']);
     expect(r.ap(['revise', '--out', s.out, '--plan', v2File(s.dir)]).status).toBe(0);
     const first = fs.readFileSync(path.join(s.out, 'ceo-native-prompt.r1.md'));
     phaseVia(r, s.out, 'ceo', { native: [], outside: [] });

@@ -243,6 +243,121 @@ describe('gate on: the mediated hand-off', () => {
     }
   });
 
+  test('#3359 per-remote opt-in: lifts read-only for that remote only; default, other remotes, deny and a corrupt store stay blocked', () => {
+    gateOn();
+    const policy = (...args: string[]) => spawnSync('bash', [POLICY, ...args], { env, encoding: 'utf8', timeout: 20_000 });
+    const store = path.join(home, '.gstack', 'gbrain-repo-policy.json');
+    const repos: Record<string, string> = {};
+    try {
+      for (const [name, url] of [['a', 'https://github.com/example/client-a.git'], ['b', 'https://github.com/example/client-b.git']]) {
+        const repo = fs.mkdtempSync(path.join(os.tmpdir(), `gstack-memo-optin-${name}-`));
+        spawnSync('git', ['init', '-q'], { cwd: repo, timeout: 10_000 });
+        spawnSync('git', ['remote', 'add', 'origin', url], { cwd: repo, timeout: 10_000 });
+        isolateGitRemote(repo, url);
+        expect(policy('set', url, 'read-only').status).toBe(0);
+        repos[name] = repo;
+      }
+      const hook = (name: string) => {
+        fs.rmSync(path.join(home, 'calls.log'), { force: true });
+        return runHook(JSON.stringify({ prompt: 'hello', cwd: repos[name] }), {}, repos[name]);
+      };
+      // default: read-only stays blocked
+      expect(hook('a').stdout).toBe('');
+      expect(calls()).toBe('');
+      expect(errLog()).toContain('memorable set <origin-url> allow');
+      // opt-in on client-a: recall runs there, and does not leak to client-b
+      expect(policy('memorable', 'set', 'https://github.com/example/client-a.git', 'allow').status).toBe(0);
+      expect(hook('a').stdout).toContain('remembered');
+      expect(calls()).toBe('hook user-prompt\n');
+      expect(hook('b').stdout).toBe('');
+      expect(calls()).toBe('');
+      // deny beats an opt-in, even one written into the store by hand
+      expect(policy('set', 'https://github.com/example/client-a.git', 'deny').status).toBe(0);
+      const s = JSON.parse(fs.readFileSync(store, 'utf8'));
+      fs.writeFileSync(store, JSON.stringify({ ...s, _memorable_recall: { 'github.com/example/client-a': 'allow' } }));
+      expect(hook('a').stdout).toBe('');
+      expect(calls()).toBe('');
+      // a corrupt store fails closed and is left in place (never quarantined into "no policy")
+      fs.writeFileSync(store, '{"_schema_version":2,"github.com/example/client-b":"read-only",');
+      expect(hook('b')).toEqual({ status: 0, stdout: '', stderr: '' });
+      expect(calls()).toBe('');
+      expect(errLog()).toContain('trust policy lookup failed');
+      expect(fs.readFileSync(store, 'utf8')).toContain('"read-only",');
+      expect(hook('b').stdout).toBe('');
+      expect(calls()).toBe('');
+    } finally {
+      for (const repo of Object.values(repos)) fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('#3359 review: a url.insteadOf rewrite to another host does not dodge a deny, and a dangling-symlink store fails closed', () => {
+    gateOn();
+    const url = 'https://fixture.invalid/org/denied.git';
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-memo-rewrite-'));
+    try {
+      spawnSync('git', ['init', '-q'], { cwd: repo, timeout: 10_000 });
+      spawnSync('git', ['remote', 'add', 'origin', url], { cwd: repo, timeout: 10_000 });
+      spawnSync('git', ['config', '--local', 'url.https://mirror.invalid/.insteadOf', 'https://fixture.invalid/'], { cwd: repo, timeout: 10_000 });
+      expect(spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: repo, encoding: 'utf8', timeout: 10_000 }).stdout.trim()).toBe('https://mirror.invalid/org/denied.git');
+      expect(spawnSync('bash', [POLICY, 'set', url, 'deny'], { env, encoding: 'utf8', timeout: 20_000 }).status).toBe(0);
+      const prompt = JSON.stringify({ prompt: 'hello', cwd: repo });
+      expect(runHook(prompt, {}, repo).stdout).toBe('');
+      expect(calls()).toBe('');
+      const store = path.join(home, '.gstack', 'gbrain-repo-policy.json');
+      fs.rmSync(store);
+      fs.symlinkSync(path.join(home, 'missing.json'), store);
+      expect(runHook(prompt, {}, repo)).toEqual({ status: 0, stdout: '', stderr: '' });
+      expect(calls()).toBe('');
+      expect(errLog()).toContain('trust policy lookup failed');
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('#3359 review: a second configured origin URL cannot dodge the first URL\'s deny, in either order', () => {
+    gateOn();
+    const denied = 'https://fixture.invalid/org/denied.git';
+    const other = 'https://fixture.invalid/org/unlisted.git';
+    expect(spawnSync('bash', [POLICY, 'set', denied, 'deny'], { env, encoding: 'utf8', timeout: 20_000 }).status).toBe(0);
+    for (const order of [[denied, other], [other, denied]]) {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-memo-multi-'));
+      try {
+        spawnSync('git', ['init', '-q'], { cwd: repo, timeout: 10_000 });
+        spawnSync('git', ['remote', 'add', 'origin', order[0]], { cwd: repo, timeout: 10_000 });
+        spawnSync('git', ['config', '--local', '--add', 'remote.origin.url', order[1]], { cwd: repo, timeout: 10_000 });
+        for (const u of order) spawnSync('git', ['config', '--local', `url.${u}.insteadOf`, u], { cwd: repo, timeout: 10_000 });
+        fs.rmSync(path.join(home, 'calls.log'), { force: true });
+        expect(runHook(JSON.stringify({ prompt: 'hello', cwd: repo }), {}, repo).stdout).toBe('');
+        expect(calls()).toBe('');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test('#3359 review: an origin URL with a newline or edge whitespace (valid local paths) is looked up verbatim, so its deny holds', () => {
+    gateOn();
+    for (const name of ['remote\nname.git', 'remote.git ', ' remote.git']) {
+      const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-memo-nl-'));
+      try {
+        const remote = path.join(parent, name);
+        fs.mkdirSync(remote);
+        expect(spawnSync('git', ['init', '-q', '--bare', remote], { timeout: 10_000 }).status).toBe(0);
+        const repo = path.join(parent, 'work');
+        fs.mkdirSync(repo);
+        spawnSync('git', ['init', '-q'], { cwd: repo, timeout: 10_000 });
+        spawnSync('git', ['remote', 'add', 'origin', remote], { cwd: repo, timeout: 10_000 });
+        expect(spawnSync('bash', [POLICY, 'set', remote, 'deny'], { env, encoding: 'utf8', timeout: 20_000 }).status).toBe(0);
+        expect(spawnSync('bash', [POLICY, 'memorable', 'get', remote], { env, encoding: 'utf8', timeout: 20_000 }).stdout).toBe('deny\toff\n');
+        fs.rmSync(path.join(home, 'calls.log'), { force: true });
+        expect([name, runHook(JSON.stringify({ prompt: 'hello', cwd: repo }), {}, repo).stdout]).toEqual([name, '']);
+        expect(calls()).toBe('');
+      } finally {
+        fs.rmSync(parent, { recursive: true, force: true });
+      }
+    }
+  });
+
   test('gate flipped off between two runs: the second run spawns nothing (the mid-flight re-check itself cannot be interleaved from outside)', () => {
     // The pre-spawn re-check reads the same store; a deterministic mid-flight flip would need a
     // seam inside main(). This pins the observable contract only: once off, no spawn.

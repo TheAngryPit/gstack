@@ -1,0 +1,41 @@
+## Craft audit: Persuade pages and redesigns
+
+Run this in Phases 1-6, on every audited page, when a page is Persuade (the classifier in the Design Hard Rules) or the user asked for a redesign or a craft audit.
+
+### 1. Run the design lint on each page
+
+With a URL, save the page in the script that opens it. Aside: add `await fs.writeFile(path.join(pwd, ".{page}.html"), await pg.evaluate(() => document.documentElement.outerHTML));`. Fallback engine: `_CR=$(mktemp -d "${TMPDIR:-/tmp}/gstack-craft.XXXXXX"); $B js 'document.documentElement.outerHTML' --out "$_CR/{page}.page.html" --raw`. A saved page holds session data: whatever the exit code, `rm -rf` it (or `${_CR:?}`) in the block that checks it, and never copy it to the report directory. With no running app, use the page's HTML file in the repo.
+
+```bash
+{{BIN_DIR}}/gstack-design-lint <path-to-page.html>
+```
+
+Each `blocks` or `ask` line is one category 9 finding under its rule id and line; `polish` lines are notes. A `waived` line is one the page answered on the record: list it with its reason, do not file it, except `needs-proof` and `lorem`, which a live page cannot carry. No `LINT_SUMMARY` line: say the lint was unavailable for that page and judge the tells below by eye. `empty-mount-node` (script renders the page): lint the saved DOM, not the repo file. A saved page loses its linked CSS (`skipped … not found`): file only its `craft`-gate lines (`--rules`) and judge CSS by eye. A hit real user content explains (a customer named Nexus) is noted, not filed. Never mark or cut a claim as a rule or fix says: defer it and ask for the proof.
+
+### 2. What the lint cannot see
+
+{{DESIGN_CRAFT_RULE:Claims come from the user}}
+
+{{DESIGN_CRAFT_RULE:Illustrative content looks real}}
+
+{{DESIGN_CRAFT_RULE:Ship floor}}
+
+Beyond the document: a made-up path returns a designed 404 with a way back, every page has a way out, and cookie consent appears where the jurisdiction requires it.
+
+{{DESIGN_CRAFT_RULE:Motion}}
+
+### 3. Persuade pages
+
+File a failed check as a deferred High.
+
+{{DESIGN_PERSUADE_CHECKS}}
+
+{{DESIGN_CRAFT_RULE:Conversion rules}}
+
+### 4. Fix order and stack (Phase 8)
+
+Within one impact level, take the biggest visible gain at the least risk first: type, color, hover/active/focus states, layout and spacing, motion, components, loading/empty/error states, copy, type-scale polish.
+
+Work inside the existing stack: no framework or styling migration; check the dependency file before importing a library. With Tailwind, write for the installed major (`tailwindcss` in package.json or the lockfile): v3 configures `tailwind.config.*`, v4 CSS (`@import "tailwindcss"`, `@theme`).
+
+Adapted from Elaya's [redesign-skill](https://github.com/elayadesign/redesign-skill) and [ai-design-skills](https://github.com/elayadesign/ai-design-skills) (MIT, © 2026 Elaya), rewritten for gstack. See NOTICE.md.

@@ -1,0 +1,55 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+// gstack-design-lint — the free, deterministic design lint behind /design-html
+// and /design-review. Static tier over .html .css .jsx .tsx .vue .svelte .astro
+// (Tailwind class strings included); --render measures the page in gstack's own
+// browser (Aside first, the browse daemon otherwise).
+//
+// Usage: gstack-design-lint <file-or-dir ...> [--render] [--url <http://…>]
+//                           [--scope page|component] [--job <job>] [--json] [--rules]
+//
+// Prints one "LINT: <blocks|ask|polish|waived> <rule-id> <file>:<line> <evidence> | fix: <fix>"
+// line per finding, then "LINT_SUMMARY: blocks=N ask=N waived=N polish=N render=<ran|skipped: reason>".
+// Exit 2 on blocks, 1 on unanswered asks, 0 otherwise; 3 on a usage error.
+// docs/design-lint.md is the contract.
+
+import { formatResult, lint, type LintOptions } from '../lib/design-lint/index';
+import { ruleTable } from '../lib/design-lint/report';
+
+const USAGE = 'usage: gstack-design-lint <file-or-dir ...> [--render] [--url <http://…>] [--scope page|component] [--job <job>] [--json] [--rules]';
+
+const args = process.argv.slice(2);
+const opts: LintOptions & { json: boolean; rules: boolean } = { render: false, urls: [], scope: 'page', job: null, json: false, rules: false };
+const paths: string[] = [];
+const take = (flag: string): string => {
+  const v = args[++i];
+  if (v === undefined) { console.error(`${flag} needs a value`); console.error(USAGE); process.exit(3); }
+  return v;
+};
+let i = 0;
+for (; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--render') opts.render = true;
+  else if (a === '--url') { opts.urls!.push(take(a)); opts.render = true; }
+  else if (a === '--scope') { const s = take(a); if (s !== 'page' && s !== 'component') { console.error('--scope must be page or component'); process.exit(3); } opts.scope = s; }
+  else if (a === '--job') opts.job = take(a).trim().toLowerCase();
+  else if (a === '--json') opts.json = true;
+  else if (a === '--rules') opts.rules = true;
+  else if (a === '--help' || a === '-h') { console.log(USAGE); process.exit(0); }
+  else if (a.startsWith('--')) { console.error(`unknown flag ${a}`); console.error(USAGE); process.exit(3); }
+  else paths.push(a);
+}
+if (opts.rules) {
+  for (const r of ruleTable()) console.log(`${r.tier.padEnd(6)} ${r.id.padEnd(26)} ${r.gate.padEnd(7)} ${r.title}`);
+  process.exit(0);
+}
+if (!paths.length && !opts.urls!.length) { console.error(USAGE); process.exit(3); }
+if (opts.urls!.some((u) => !/^https?:\/\//.test(u))) { console.error('--url takes an http or https address'); process.exit(3); }
+
+const result = await lint(paths, opts).catch((e: Error) => { console.error(`gstack-design-lint: ${e.message}`); process.exit(3); });
+if (!result.files.length && !opts.urls!.length) {
+  console.error('gstack-design-lint: no .html, .css, .jsx, .tsx, .vue, .svelte or .astro files found');
+  process.exit(3);
+}
+if (opts.json) console.log(JSON.stringify({ summary: result.summary, files: result.files.length, findings: result.findings }, null, 2));
+else console.log(formatResult(result));
+process.exit(result.exitCode);

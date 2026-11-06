@@ -23,17 +23,18 @@ test('native-only fixture files do not select quality judges', () => {
   expect(selectTests(['qa-only/SKILL.md.tmpl'], E2E_TOUCHFILES).selected).not.toContain(id);
 });
 
-test('scratch identity helper selects only queued-Skip and preserves its fast-profile deferral', () => {
+test('scratch identity helper selects only the two native ship fixtures and preserves their fast-profile deferral', () => {
   const changedFiles = ['test/helpers/scratch-repo.ts'];
-  expect(selectTests(changedFiles, E2E_TOUCHFILES).selected).toEqual([id]);
+  const scratchIds = [id, 'ship-frozen-scope-convergence'];
+  expect(selectTests(changedFiles, E2E_TOUCHFILES).selected.sort()).toEqual([...scratchIds].sort());
   const full = computePaidCaseSelection({ profile: 'full', env: {}, changedFiles });
-  expect(full.selection).toEqual({ e2e: [id], judges: [] });
+  expect([...(full.selection.e2e ?? [])].sort()).toEqual([...scratchIds].sort());
+  expect(full.selection.judges).toEqual([]);
   const pr = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles });
   expect(pr.selection).toEqual({ e2e: [], judges: [] });
   expect(pr.coverage?.mode).toBe('pr');
-  expect(pr.coverage?.deferred).toEqual([{
-    id, tier: 'gate', reason: 'Broad gate census/release coverage; outside the fast PR profile',
-  }]);
+  expect(pr.coverage?.deferred.map(({ id }) => id).sort()).toEqual([...scratchIds].sort());
+  expect(pr.coverage?.deferred.map(({ tier, reason }) => `${tier}: ${reason}`)).toEqual(scratchIds.map(() => 'gate: Broad gate census/release coverage; outside the fast PR profile'));
 });
 
 test.each(['test/helpers/qa-checkpoint-evidence.ts', 'test/fixtures/qa-only-charter-public.json'])

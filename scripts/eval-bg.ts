@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * eval-bg — the one entry point for background paid evals (`bun run eval:bg:<lane>`).
  *
@@ -295,6 +295,22 @@ export function launchDetached(opts: { log: string; label: string; timeoutSecond
   return result.stdout.trim();
 }
 
+/** The run id a local lane exports: the run-scoped log's name, reduced to [A-Za-z0-9_.-] as the native-capture cases require. */
+export function localRunId(log: string): string {
+  return path.basename(log, '.log').replace(/[^\w.-]/g, '-');
+}
+
+/**
+ * The local backend: CI sets EVALS_RUN_ID per slice, and the native-capture
+ * cases refuse to start without it, so a local lane exports one too (an
+ * exported value is kept). The id is logged under the header.
+ */
+export function launchLocal(opts: { log: string; label: string; timeoutSeconds: number; header: string; command: string[]; env?: NodeJS.ProcessEnv }): string {
+  const env = opts.env ?? process.env;
+  const runId = env.EVALS_RUN_ID || localRunId(opts.log);
+  return launchDetached({ ...opts, header: `${opts.header}\n[eval-bg] EVALS_RUN_ID=${runId}`, env: { ...env, EVALS_RUN_ID: runId } });
+}
+
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const pollMs = () => Number(process.env.GSTACK_EVAL_BG_POLL_MS) || 30_000;
 
@@ -362,7 +378,8 @@ log; it ends with "### gstack-detach EXIT=<code> ###" (0 passed, 1 failed,
 
 Backend: a clean HEAD pushed to ${CANONICAL_REPO} dispatches the CI workflow and
 follows it; anything else runs locally under bin/gstack-detach, capped at
-ceil(1.5 x planned serial seconds / EVALS_JOBS) + 20 min (at most 4 h).
+ceil(1.5 x planned serial seconds / EVALS_JOBS) + 20 min (at most 4 h), with
+EVALS_RUN_ID set to the log's name unless one is exported.
   --local / --dispatch   force a backend (also GSTACK_EVAL_BG_MODE=local|dispatch);
                          --dispatch refuses instead of falling back
   --timeout SECS         override the computed local cap
@@ -417,7 +434,7 @@ async function main(argv: string[]): Promise<number> {
   const header = `[eval-bg] backend=local lane=${lane} tested=${tested} cap=${cap.seconds}s jobs=${jobs}${timeoutOverride !== null ? ' (--timeout)' : ''} (${choice.reason})`;
   console.log(header);
   if (cap.capped) console.log(`[eval-bg] WARNING: planned work exceeds the ${LOCAL_CAP_SECONDS}s local cap; the tail may not run. Dispatch to CI or raise EVALS_JOBS.`);
-  console.log(launchDetached({ log, label, timeoutSeconds: cap.seconds, header, command: ['bun', 'run', LANE_SPECS[lane].script] }));
+  console.log(launchLocal({ log, label, timeoutSeconds: cap.seconds, header, command: ['bun', 'run', LANE_SPECS[lane].script] }));
   return 0;
 }
 

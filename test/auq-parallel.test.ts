@@ -62,7 +62,8 @@ function exercise(spec: Spec) {
         allowedTools: ['Read', 'Write', 'AskUserQuestion'], permissionMode: 'default', settingSources: [],
         systemPrompt: { type: 'preset', preset: 'claude_code' } });
       expect(input.skill).toBe(fs.readFileSync(path.join(ROOT, input.id === 'verbose'
-        ? 'test/fixtures/auq-pre-cut-plan-ceo-review-SKILL.md' : 'plan-ceo-review/SKILL.md'), 'utf8'));
+        ? 'test/fixtures/auq-pre-cut-plan-ceo-review-SKILL.md' : 'plan-ceo-review/SKILL.md'), 'utf8')
+        .replaceAll('~/.claude/skills/gstack/plan-ceo-review/sections/', path.join(input.cwd, 'plan-ceo-review', 'sections') + '/'));
       expect(input.sections.length > 0).toBe(input.id !== 'verbose');
       expect(input.prompt).toContain(path.join(input.cwd, 'plan-ceo-review/SKILL.md'));
       expect(input.prompt).toContain(path.join(input.cwd, 'plan.md'));
@@ -110,7 +111,8 @@ test.each([
   expect(facts.receipts.filter((receipt: any) => receipt.outcome === 'timeout')).toHaveLength(3 - scenario.passed);
   expect(facts.receipts.every((receipt: any) => receipt.timeoutMs === 240_000 && !receipt.answered)).toBe(true);
   expect(facts.active).toBe(0); expect(facts.answers).toBe(0); expect(facts.pendingTimers).toBe(0);
-  expect(facts.leftovers).toEqual([]); expect(facts.ownedStateLeftovers).toEqual([]);
+  expect(facts.leftovers).toEqual([]);
+  expect(facts.ownedStateLeftovers, JSON.stringify({ fixtures: facts.fixtures, inputs: facts.inputs.map((input: any) => [input.id, input.config, input.state]), events: facts.events.filter((event: any) => ['query-close', 'capture-settle', 'cleanup'].includes(event.kind)) })).toEqual([]);
   expect(facts.events.filter((event: any) => event.kind === 'query-close')).toHaveLength(scenario.queries);
   expect(facts.events.filter((event: any) => event.kind === 'cleanup')).toHaveLength(3);
 }, 20_000);

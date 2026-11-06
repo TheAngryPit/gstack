@@ -1467,3 +1467,19 @@ describe('Y whole-plan complexity setup decision', () => {
   });
 });
 });
+
+describe('plan finding severity labels (#3349)', () => {
+const relabel = (captured: { call: unknown }, label: string) => {
+  const c = structuredClone(captured.call) as NativePlanQuestionCall, q = c.questions[0]!, picked = c.answers![q.question]!;
+  q.question = label ? q.question.replace('[P1] (confidence', `${label} (confidence`) : q.question.replace('[P1] ', '');
+  c.answers = { [q.question]: picked };
+  return engFirstReviewAUQ(nativePlanCallFingerprint(c, Date.parse(c.answeredAt!), true));
+};
+const captures = [['eng-annotated-cache-au', captured_eng_annotated_cache_au], ['eng-declarative-as', captured_eng_declarative_as]] as const;
+test.each(captures)('%s opens review under either severity scale', (_, captured) => {
+  for (const label of ['[P1]', '[CRITICAL]', '[INFORMATIONAL]']) expect(relabel(captured, label)).toBe(true);
+});
+test.each(captures)('%s rejects labels outside both scales', (_, captured) => {
+  for (const label of ['[HIGH]', '[critical]', '[Critical]', '[P4]', '[CRITICAL|INFORMATIONAL]', '']) expect(relabel(captured, label)).toBe(false);
+});
+});

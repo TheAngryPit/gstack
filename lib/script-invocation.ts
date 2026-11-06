@@ -32,6 +32,7 @@ import { spawnSync, type SpawnSyncOptions, type SpawnSyncOptionsWithStringEncodi
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { bunIsolationArgs } from './bun-isolation';
 import { resultLine } from './result-codes';
 
 export const BIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin');
@@ -205,7 +206,7 @@ function windowsBash(o: InvocationOptions): { ok: true; bash: string } | { ok: f
 
 /** How to run a gstack shebang bin on this platform. */
 export function scriptInvocation(script: string, args: readonly string[], o: InvocationOptions = {}): Invocation {
-  if (/^#!.*\bbun\b/.test(readShebang(script))) return { ok: true, cmd: o.bunExe ?? bunExecutable(), argv: [script, ...args] };
+  if (/^#!.*\bbun\b/.test(readShebang(script))) return { ok: true, cmd: o.bunExe ?? bunExecutable(), argv: [...bunIsolationArgs((o.platform ?? process.platform) as NodeJS.Platform), script, ...args] };
   if ((o.platform ?? process.platform) !== 'win32') return { ok: true, cmd: script, argv: [...args] };
   const bash = windowsBash(o);
   return bash.ok ? { ok: true, cmd: bash.bash, argv: [slash(script), ...args] } : bash;
@@ -242,8 +243,8 @@ export type WtreeResult = { tree: string } | { error: string; kind: 'launch' | '
 
 /**
  * The working-tree content fingerprint (bin/gstack-wtree): tracked and
- * untracked non-ignored files, as a 40- or 64-hex git tree id (SHA-1 or
- * SHA-256 repositories). `launch` means gstack-wtree never ran (no bash, a
+ * untracked non-ignored files except an untracked root .bun/ folder, as a
+ * 40- or 64-hex git tree id (SHA-1 or SHA-256 repositories). `launch` means gstack-wtree never ran (no bash, a
  * spawn error; `tried` lists each Windows bash candidate when none was
  * found); `exit` means it ran and failed (its stderr says why).
  */

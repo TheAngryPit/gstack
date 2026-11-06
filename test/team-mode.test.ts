@@ -329,7 +329,7 @@ describe('gstack-team-init', () => {
 
     const pre = JSON.parse(fs.readFileSync(path.join(tmpDir, '.claude', 'settings.json'), 'utf-8')).hooks.PreToolUse;
     expect(pre).toEqual([
-      { matcher: 'Skill|skill', hooks: [{ type: 'command', command: 'team-audit' }, { type: 'command', command: registeredCommand() }] },
+      { matcher: 'Skill|skill', hooks: [{ type: 'command', command: 'team-audit' }, { type: 'command', command: registeredCommand(), onFailure: 'block' }] },
       { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] },
     ]);
     expect(registeredCommand()).not.toContain('$');
@@ -456,11 +456,11 @@ describe('setup --team / --no-team / -q', () => {
     try {
       for (const rel of [
         'setup', 'VERSION', 'SKILL.md', 'qa/SKILL.md', 'bin/gstack-config', 'bin/gstack-patch-names',
-        'bin/gstack-state-root.sh', 'bin/gstack-bun-version.sh', 'bin/gstack-path-spelling.sh', 'bin/gstack-claude-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-render-claude.sh', 'bin/gstack-host-renders.sh',
+        'bin/gstack-state-root.sh', 'bin/gstack-bun-version.sh', 'bin/gstack-path-spelling.sh', 'bin/gstack-skill-name.sh', 'bin/gstack-claude-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-render-claude.sh', 'bin/gstack-host-renders.sh',
         'scripts/resolve-codex-generation-model.ts', 'scripts/models.ts', 'scripts/preflight-codex-overlap.ts',
         'scripts/discover-skills.ts', 'scripts/external-skill-names.ts', 'scripts/host-config.ts',
         'lib/claude-code-migration.ts', 'lib/model-policy.ts', 'lib/model-catalog.ts',
-        'lib/model-policy-notice.ts', 'lib/state-root.ts',
+        'lib/model-policy-notice.ts', 'lib/state-root.ts', 'lib/bun-isolation.ts',
       ]) {
         const dest = path.join(cwd, rel);
         fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -484,8 +484,9 @@ describe('setup --team / --no-team / -q', () => {
       // resolver, flag parser, logging, skill registration and completion run
       // unchanged. Unexpected commands (including a build) fail the test.
       fs.writeFileSync(path.join(commands, 'bun'), `#!/usr/bin/env bash
+[ "$1 $2" = '--no-env-file --config=/dev/null' ] && shift 2
 case "$*" in
-  'install --frozen-lockfile') exit 0 ;;
+  'install --production --frozen-lockfile') exit 0 ;;
   'build --help') echo 'Fixture Bun has no CSO compile flags'; exit 0 ;;
   *'/bin/gstack-migrate-claude-code --install-dir '*)
     [[ "$#" -eq 5 && "$2" = --install-dir && "$4" = --skills-dir ]] || exit 90

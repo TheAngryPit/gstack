@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eu
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 CSO_BUILD_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$CSO_BUILD_ROOT"
@@ -227,7 +228,7 @@ cso_build_evaluation_candidate() {
   cp -R lib scripts "$source_root/"
   cp -R test/helpers "$source_root/test/"
   cp "$candidate_catalog" "$source_root/lib/cso/runtime-catalog.json"
-  (cd "$source_root" && "$BUN_CMD" scripts/cso-runtime-promotion.ts check-evaluation lib/cso/runtime-catalog.json)
+  (cd "$source_root" && "$BUN_CMD" --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" scripts/cso-runtime-promotion.ts check-evaluation lib/cso/runtime-catalog.json)
   (cd "$source_root" && cso_compile_bun lib/cso/cli.ts "$CSO_EVALUATION_UNIT/gstack-cso-core")
   (cd "$source_root" && cso_compile_bun scripts/cso-eval-producer.ts "$CSO_EVALUATION_UNIT/cso-eval-producer")
   cso_compile_watchdog "$CSO_EVALUATION_UNIT/gstack-cso-watchdog"

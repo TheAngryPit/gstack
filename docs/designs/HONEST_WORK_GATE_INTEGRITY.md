@@ -178,8 +178,14 @@ draft are cut: the artifact path is tool-owned, a child's self-reported
 path list is both a pathspec-injection surface and a self-report, and the
 only history need is calibration, which `--commit <sha>` covers by scanning
 one commit's first-parent delta without the working tree.) Positional
-base defaults the way `gstack-diff-scope` does (`origin/HEAD` → `main` →
-`master`); an already-qualified ref is used as given. stdout: one
+base defaults the way `gstack-diff-scope` does (the remote's `HEAD` target,
+origin first, then the other remotes → `main` → `master`); an
+already-qualified ref is used as given, and a branch name resolves through
+its remote-tracking twin (`origin/main` for `main`), so a stale local `main`
+never adds commits the branch only inherited (GST-883). Only when no remote
+has the branch does the local ref stand, noted once on stderr (a repository
+with no remote at all uses it quietly). Branches are read by full ref name,
+so a tag named `main` or `origin/main` cannot stand in for them. stdout: one
 `GATE_SUMMARY: listed=N read=N tagged={RH-1:2,RH-15:1} unmatched=N
 coverage=<patterns> languages_unlisted=<…> candidate=<sha+wtree>` line, then
 the read-level listing (bounded; the full listing goes to `--out`).
@@ -207,9 +213,10 @@ hunks and 200 KB; `GATE_SUMMARY` reports `eligible`, `inspected`,
 like UNAVAILABLE, and never as `none detected`.
 
 **Exit contract.** 0 with or without hunks; 2 only when the base is
-unresolvable (`GATE_ERROR=no_base ref=<ref>` with the concrete recovery:
-`git fetch <remote> <branch>` from the detected remote, or "deepen the
-shallow history") or the tool itself failed. Unmatched paths are reported
+unresolvable locally and as `<remote>/<ref>` (`GATE_ERROR=no_base ref=<ref>`
+with the concrete recovery: `git fetch <remote> +<branch>:refs/remotes/<remote>/<branch>`
+into the remote-tracking ref, `--unshallow` on a shallow clone, or a plain
+fetch/deepen for a sha or relative ref) or the tool itself failed. Unmatched paths are reported
 in `GATE_SUMMARY: unmatched=N` and listed, never an exit 2. The template
 block that calls it branches on the exit explicitly, never
 `2>/dev/null || true`:
@@ -350,9 +357,21 @@ a test count natively.
   saved log is capped at 2 MB and would truncate the summary) and parses
   it into `tests_ran` for the supported runners only: bun (reusing
   `shard-engine`'s classifier; executed = pass + fail, so an all-skip run is
-  ZERO-RUN), jest/vitest, pytest, rspec, and Go's zero-only case (every
-  package `[no test files]`); the last summary per runner wins. Everything
-  else is `unknown`. `check` reports ZERO-RUN as STALE-equivalent and
+  ZERO-RUN), jest/vitest, pytest, rspec, Go's zero-only case (every
+  package `[no test files]`), gstack's shard runner (the sum of its per-shard
+  `[test:free] PASS — N tests` epilogues, or a files-from run's
+  `FILES-FROM RESULT: … tests=N`), and a `gstack-pregate --remote` lane (its
+  `PREGATE_REMOTE: tree=… tests=N failed=M` row or the obligation's
+  `cleared by remote-gate tree=… tests=N` receipt line); when the shard runner
+  spoke its verdict stands for the whole tail (the tail is stdout then stderr,
+  so position cannot order bun's stderr counts against the runner's stdout
+  epilogues), and any summary when it did not speak follows the
+  last-summary-wins rule. Everything else is `unknown`. The shard runner and the
+  remote gate print only bun's terminal totals, which count skipped tests, so
+  for those two `tests_ran` is ran-with-skips rather than executed: the shard
+  runner refuses a shard whose bun summary counts fewer files than planned, but
+  a shard whose files all loaded and executed nothing still passes with that
+  total. `check` reports ZERO-RUN as STALE-equivalent and
   unknown as non-blocking. The TRANSPARENCY INVARIANT holds: `run`'s exit is
   always the child's; detection lives in the receipt and in `check`.
 - After Step 7's test-generation child returns and after Step 9.4's parent

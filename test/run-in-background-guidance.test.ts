@@ -107,8 +107,8 @@ exec ${quote(Bun.which('cat')!)} "$@"
 
   const findings = (id: string) => `${id}: current findings\nNo issues found.\nRecommendation: fix ${id} because this is the current finding.\n`;
   // INV-1: the verdict-form validator prints its verdict before the completed status.
-  const unavailable = (id: string) => `${findings(id)}VERDICT: unavailable\nFINDINGS: none\nREASON: execution_failed\n`;
-  const completed = (id: string) => `${findings(id)}VERDICT: clean\nFINDINGS: none\nOUTSIDE_STATUS: completed provider=codex host=claude\n`;
+  const unavailable = (id: string) => `${findings(id)}VERDICT: unavailable\nFINDINGS: none\nOUTSIDE_USAGE: unknown\nREASON: execution_failed\n`;
+  const completed = (id: string) => `${findings(id)}VERDICT: clean\nFINDINGS: none\nOUTSIDE_USAGE: unknown\nOUTSIDE_STATUS: completed provider=codex host=claude\n`;
 
   test('fresh shells retain the current stderr and clean its exact temporary file', () => {
     const f = fixture();
@@ -339,9 +339,9 @@ const GENERATED_WITH_GUIDANCE = [
   // CSO's private startup does not import the shared synchronous-dispatch
   // guidance and its bounded worker policy is specified in its own skeleton.
   'design-consultation/sections/proposal-and-preview.md',
-  'design-review/SKILL.md',
+  'design-review/sections/outside-voices.md',
   'document-release/sections/release-body.md',
-  'office-hours/SKILL.md',
+  'office-hours/sections/second-opinion.md',
   'office-hours/sections/design-and-handoff.md',
   'plan-ceo-review/SKILL.md',
   'plan-ceo-review/sections/review-sections.md',

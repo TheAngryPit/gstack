@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { classifyOutsideReview, validateOutsideReview, type OutsideGate } from '../lib/outside-review-result';
+import { classifyOutsideReview, usageFromEvents, validateOutsideReview, type OutsideGate } from '../lib/outside-review-result';
 import { gateOutcomeLine, type GateReason } from '../lib/gate-outcomes';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -30,6 +30,65 @@ function cli(args: string[]) {
 // A clean review states that it found nothing; an untagged finding is unverified (DX-11).
 const RECOMMEND = 'No issues found in changed.ts.\nRecommendation: approve because changed.ts keeps its data.';
 const UNTAGGED = 'Recommendation: fix the guard because changed.ts loses data.';
+
+// A model may write the completion recommendation as a Markdown section instead of an inline line (#3980).
+describe('a ## Recommendation heading carries the completion recommendation (#3980)', () => {
+  const review = (tail: string, head = 'Severity: Low. A future caller may need a guard.') =>
+    classifyOutsideReview({ text: `${head}\n\n${tail}`, gate: 'review' });
+
+  test('an advisory review with a heading is clean and keeps its severity', () => {
+    const result = review('## Recommendation\n\nShip as-is because current callers already enforce the invariant.');
+    expect(result.verdict).toBe('clean');
+    expect(result.findings.highest).toBe('P3');
+    expect(review('## Recommendation\n\n**Ship as-is** because current callers already enforce the invariant.').verdict).toBe('clean');
+  });
+
+  test('a blocker under the heading still blocks', () => {
+    const result = review('## Recommendation\n\nFix the write because it loses data.', 'Severity: High. The write drops rows.');
+    expect(result.verdict).toBe('findings');
+    expect(result.findings.highest).toBe('P1');
+  });
+
+  test('a label or verdict on the line under the heading still blocks, with or without an inline line', () => {
+    for (const [under, highest] of [['P1: Fix the race because it loses data.', 'P1'], ['Critical: the migration drops rows because it skips the copy.', 'P0'],
+      ['Verdict: not ready', 'P2']] as const) {
+      for (const inline of ['', '\n\nRecommendation: fix it because it loses data.']) {
+        const result = classifyOutsideReview({ text: `[P2] nit\n\n## Recommendation\n\n${under}${inline}`, gate: 'review' });
+        expect(result.findings.highest).toBe(highest);
+        expect(result.verdict).toBe(inline || highest !== 'P2' ? 'findings' : 'unavailable');
+      }
+    }
+  });
+
+  test('a no-findings rationale under the heading concludes the review', () => {
+    const result = classifyOutsideReview({ text: '### Recommendation:\nApprove because no issues were found.', gate: 'proposal' });
+    expect(result.verdict).toBe('clean');
+    expect(classifyOutsideReview({ text: '## Recommendation\n\nApprove because I found no issues.', gate: 'review' }).verdict).toBe('clean');
+  });
+
+  test('a heading over a no-findings line with no because-clause reads as it did before the heading fold', () => {
+    for (const text of ['## Recommendation\n\nNo issues found.', 'Reviewed the diff.\n\n## Recommendation\n\nNo issues found in the change.']) {
+      expect(classifyOutsideReview({ text, gate: 'structured' }).verdict).toBe('clean');
+      expect(classifyOutsideReview({ text, gate: 'review' }).reason).toBe('missing_markers');
+    }
+  });
+
+  test('the inline form still works', () => {
+    const result = review('Recommendation: Ship as-is because current callers already enforce the invariant.');
+    expect(result.verdict).toBe('clean');
+    expect(result.findings.highest).toBe('P3');
+  });
+
+  test('a reply with no recommendation, an empty section, no rationale or a fenced example is still missing', () => {
+    for (const tail of ['No recommendation here.', '## Recommendation', '## Recommendation\n\nShip as-is.',
+      '## Recommendation\n\n- Ship as-is because callers enforce it.',
+      '```text\n## Recommendation\n\nShip as-is because this is an example.\n```']) {
+      const result = review(tail);
+      expect(result.verdict).toBe('unavailable');
+      expect(result.reason).toBe('missing_markers');
+    }
+  });
+});
 
 describe('classifyOutsideReview: separate execution, findings and verdict', () => {
   const cases: Array<[string, { text: string; gate: OutsideGate; stderr?: string; exit?: number }, string, string | null, string | undefined]> = [
@@ -62,6 +121,67 @@ describe('classifyOutsideReview: separate execution, findings and verdict', () =
   test('a non-zero exit names the exit code and the first stderr line', () => {
     const result = classifyOutsideReview({ text: '', gate: 'review', exit: 1, stderr: '\nerror: 401 Unauthorized\nmore' });
     expect(result.detail).toBe('exit 1: error: 401 Unauthorized');
+  });
+});
+
+// #3294: "clean" comes only from a no-findings statement that concludes the reply,
+// never from a "no X" phrase among untagged findings anywhere in it.
+describe('a no-findings statement counts only as the reply\'s conclusion (#3294)', () => {
+  const REPORTER = 'I found no actionable regressions in the staged, unstaged, or untracked changes.';
+  const FINDING = 'The fallback path now swallows ENOENT and returns an empty config.';
+
+  test("the reporter's exact codex review reply reads clean through the reporter's CLI invocation", () => {
+    expect(classifyOutsideReview({ text: REPORTER, gate: 'structured' }).verdict).toBe('clean');
+    const r = cli(['--label', 'probe', '--exit', '0', '--stderr', file(''), 'structured', file(REPORTER)]);
+    expect([r.status, r.stdout]).toEqual([0, 'VERDICT: clean\nFINDINGS: none\n']);
+  });
+
+  test('clean conclusions, with the added regressions/defects vocabulary and the requested marker formatted', () => {
+    for (const text of ['No regressions found.', 'I did not find any defects.', 'There are no actionable regressions.',
+      'NO_FINDINGS', '**NO_FINDINGS**', '`NO_FINDINGS`', '- NO_FINDINGS',
+      `The change adds a retry cap and its tests.\n${REPORTER}`, 'Reviewed the retry helper.\n\nNo issues found in this change.',
+      'After reviewing the patch, I found no issues.', 'I found no issues in this read-only change.',
+      'Summary of the retry helper\nNo issues found.', 'I found no actionable regressions in the staged\nchanges.',
+      // Clean `codex review --uncommitted` replies captured from codex-cli 0.160.0 with gpt-6-sol.
+      'The change validates the retry limit before execution. No actionable regression was found.',
+      'The change validates `max` before retrying. No affected callers or tests are present in the repository, and no actionable regression is evident.']) {
+      expect({ text, verdict: classifyOutsideReview({ text, gate: 'structured' }).verdict }).toEqual({ text, verdict: 'clean' });
+    }
+  });
+
+  test('mixed replies: untagged findings beside a "no X" phrase are unverified, never clean', () => {
+    for (const text of [
+      'The parser change has no new issues. However, db/002_drop_idx.sql drops users_email_idx, which will regress login latency under load.',
+      'Renaming the flag is no problem for callers, but the fallback path now swallows ENOENT and returns an empty config.',
+      `No issues in the parser.\n\n${FINDING}`,
+      `${FINDING}\n\nNo issues in the parser.`,
+      `${FINDING} No regressions in the existing tests.`,
+      'No regressions in the existing tests, but the fallback path now swallows ENOENT.',
+      `${FINDING}\nI found no issues other than the fallback path.`,
+      `${FINDING}\nNo other issues.`,
+      'No issues found, except that the fallback path now swallows ENOENT.',
+      'No issues in the parser, and the fallback path now swallows ENOENT.',
+      'Missing configuration now silently disables authentication. No regressions were found by the existing tests.',
+      'Missing configuration now silently disables authentication. No issues are apparent in the parser.',
+      'The fallback path now swallows ENOENT, and no issues elsewhere.',
+      'The diff adds a NO_FINDINGS check, but the regex misses lowercase input.',
+      `${FINDING}\n\`\`\`\nNo issues found.\n\`\`\``,
+    ]) {
+      for (const gate of ['structured', 'review'] as const) {
+        const r = classifyOutsideReview({ text: gate === 'review' ? `${text}\nRecommendation: ship because it looks fine.` : text, gate });
+        expect({ text, gate, verdict: r.verdict, reason: r.reason }).toEqual({ text, gate, verdict: 'unverified', reason: 'untagged_review' });
+      }
+    }
+  });
+
+  test("a review's Recommendation because-clause concludes under the same rules", () => {
+    const verdict = (text: string) => classifyOutsideReview({ text, gate: 'review' }).verdict;
+    expect(verdict('Recommendation: ship because I found no regressions in this change.')).toBe('clean');
+    expect(verdict(`The change adds a retry cap.\nRecommendation: ship because no issues remain.`)).toBe('clean');
+    expect(verdict('No issues in the parser.\nRecommendation: fix the fallback because it swallows ENOENT.')).toBe('unverified');
+    expect(verdict(`${FINDING}\nRecommendation: ship because no regressions in the existing tests.`)).toBe('unverified');
+    expect(verdict(`${FINDING}\nRecommendation: ship because no issues remain, but the fallback needs a follow-up.`)).toBe('unverified');
+    expect(verdict('Recommendation: address the migration because no regressions were found in the parser change,\nbut the migration drops users_email_idx.')).toBe('unverified');
   });
 });
 
@@ -198,6 +318,36 @@ describe('B1: a review whose sandbox could not start is unavailable, not clean',
     expect(r.status).toBe(1);
     expect(r.stdout).toContain('REASON: sandbox_unavailable');
     expect(r.stderr).toStartWith(`Codex outside review unavailable: Codex's sandbox could not start here (${BWRAP}`);
+  });
+});
+
+describe('Codex token usage from --json events (#2948)', () => {
+  const turn = (usage: Record<string, number>) => JSON.stringify({ type: 'turn.completed', usage });
+
+  test('one turn: every counter the event carries, nothing invented', () => {
+    expect(usageFromEvents(turn({ input_tokens: 12016, cached_input_tokens: 0, cache_write_input_tokens: 12013, output_tokens: 5, reasoning_output_tokens: 0 })))
+      .toEqual({ input_tokens: 12016, cached_input_tokens: 0, cache_write_input_tokens: 12013, output_tokens: 5, reasoning_output_tokens: 0, usd: 'unknown' });
+  });
+
+  test('the latest turn wins (codex reports the running session total); malformed and unrelated lines are skipped', () => {
+    const events = [turn({ input_tokens: 100, output_tokens: 10 }), 'not json', '{"type":"item.completed","item":{"type":"agent_message"}}', turn({ input_tokens: 150, output_tokens: 15, reasoning_output_tokens: 2 })].join('\n');
+    expect(usageFromEvents(events)).toEqual({ input_tokens: 150, output_tokens: 15, reasoning_output_tokens: 2, usd: 'unknown' });
+  });
+
+  test('a cumulative total_token_usage snapshot wins over per-turn usage, latest first', () => {
+    const snap = (n: number) => JSON.stringify({ msg: { type: 'token_count', info: { total_token_usage: { input_tokens: n, output_tokens: n / 10, total_tokens: n * 1.1 } } } });
+    expect(usageFromEvents([turn({ input_tokens: 7 }), snap(100), snap(300)].join('\n'))).toEqual({ input_tokens: 300, output_tokens: 30, total_tokens: 330, usd: 'unknown' });
+  });
+
+  test('the CLI prints OUTSIDE_USAGE only when given --events, on every verdict', () => {
+    const events = path.join(TMP, 'usage-events.jsonl');
+    fs.writeFileSync(events, turn({ input_tokens: 1200, cached_input_tokens: 200, output_tokens: 340 }) + '\n');
+    const withEvents = cli(['--events', events, 'review', file('No issues found.')]);
+    expect(withEvents.stdout).toContain('OUTSIDE_USAGE: input=1200 cached_input=200 output=340\n');
+    const empty = path.join(TMP, 'no-usage.jsonl');
+    fs.writeFileSync(empty, '{"type":"thread.started"}\n');
+    expect(cli(['--events', empty, 'review', file('')]).stdout).toContain('OUTSIDE_USAGE: unknown\n');
+    expect(cli(['--verdict', 'review', file('No issues found.')]).stdout).not.toContain('OUTSIDE_USAGE');
   });
 });
 

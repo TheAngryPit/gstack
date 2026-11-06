@@ -11,7 +11,7 @@ describe('official recommendation and lifecycle structures', () => {
     expect(anthropic.recommendations).toEqual({ frontier: 'claude-fable-5-1', smart: 'claude-opus-5-5' });
     expect(anthropic.lineup).not.toContain('claude-mythos-5-1');
     const openai = parseOfficialSource('openai-lifecycle', freshnessFixture('openai-lifecycle'));
-    expect(openai.lifecycle?.map(row => row.modelId)).toEqual(['gpt-5.3-codex', 'gpt-old', 'gpt-unicode-date', 'gpt-iso-date', 'gpt-date-floor']);
+    expect(openai.lifecycle?.map(row => row.modelId)).toEqual(['gpt-5.3-codex', 'gpt-4o-2024-08-06', 'gpt-4o-2024-11-20', 'gpt-old', 'gpt-unicode-date', 'gpt-iso-date', 'gpt-date-floor']);
     expect(openai.lifecycle?.find(row => row.modelId === 'gpt-date-floor')).toMatchObject({ deadline: null, supportFloor: '2024-06-13' });
   });
 
@@ -55,6 +55,16 @@ describe('official recommendation and lifecycle structures', () => {
     const report = assessFreshness(freshnessObservation('100', undefined, { 'openai-lifecycle': text }));
     expect(report.state.lifecycle).toHaveLength(1);
     expect(report.state.lifecycle[0]).toMatchObject({ modelId: 'gpt-6-astra', deadline: '2027-04-01' });
+  });
+
+  test('OpenAI deprecated cells with a display name before the backticked IDs yield every ID', () => {
+    const openai = parseOfficialSource('openai-lifecycle', freshnessFixture('openai-lifecycle'));
+    expect(openai.lifecycle?.filter(row => row.modelId.startsWith('gpt-4o-'))).toEqual([
+      { modelId: 'gpt-4o-2024-08-06', state: 'deprecated', deadline: '2027-02-16', supportFloor: null },
+      { modelId: 'gpt-4o-2024-11-20', state: 'deprecated', deadline: '2027-02-16', supportFloor: null },
+    ]);
+    const unticked = freshnessFixture('openai-lifecycle').replace('GPT-4o (`gpt-4o-2024-08-06`, `gpt-4o-2024-11-20`)', 'GPT-4o (gpt-4o-2024-08-06, gpt-4o-2024-11-20)');
+    expect(() => parseOfficialSource('openai-lifecycle', unticked)).toThrow('unrecognized-deprecated-model-cell');
   });
 
   test('missing required structures and semantic drift fail closed', () => {

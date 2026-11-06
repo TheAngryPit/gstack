@@ -15,7 +15,7 @@ different things even when they mention the same skill.
 | --- | --- | --- |
 | Selection, budgets, process ownership, cleanup, native-event parsing and recorded failure controls | Free runner and fixture regressions | A live model choosing or completing the right workflow |
 | Generated files, host parity, section manifests and complete input identity | Free generation and structural tests | An agent actually loading the required section |
-| Prompt clarity and rubric quality | The registered quality judge for that complete prompt | Tool execution, native acknowledgments or a finished report |
+| Facts several skills must state alike (review-bot history paths, columns, record types, categories) | Free cross-file fact tests (`test/review-bot-history-facts.test.ts`) | An agent acting on those facts in a live run |
 | Native first-question format and substance | Live SDK/PTY question capture | An answered question or a completed workflow; receipts explicitly say `workflowCompleted: false` |
 | Stochastic consistency and verbose/carved comparison | Independent captures, with separate stability and A/B oracles | One successful sample reused as three trials, or one prompt version standing in for the other |
 | Decisions, findings and report completion | Per-skill native workflow fixtures | The first question alone, screen text without native evidence, or a generic question count |
@@ -60,7 +60,7 @@ depends on measured duration or an explicit `QUICK_CORE` entry, not this table.
 | CLI/API/webhook QA without browser setup | `qa-functional-fixture`, `qa-functional-evidence`, `qa-lazy-sections` | `skill-e2e-qa-functional`: CLI and webhook report sessions | Linux/macOS free; selected PR gate; Windows only where curated |
 | Report-only preserves local and remote authority | `qa-only-capability`, `qa-functional-observer`, `qa-functional-observer-atomic`, `qa-caller-authority` | Independent report-only sessions with synthetic owned endpoints/auth | Linux kernel observation; free callback controls plus selected PR gate |
 | Repair reproduces the defect, adds a failing regression and rechecks adjacent behavior | `qa-fix-loop-fixture`, `qa-functional-evidence` | `skill-e2e-qa-functional-fix`: CLI and webhook repair sessions | Free controls plus selected PR gate |
-| Review and Ship actually explore | `qa-exploratory-callers`, `qa-caller-report-observer`, `qa-checkpoint-evidence` | `skill-e2e-qa-callers`: actual Review/Ship callers | Free captures plus selected PR gate |
+| Review and Ship actually explore | `qa-exploratory-callers`, `qa-caller-report-observer`, `qa-caller-review-plan`, `qa-checkpoint-evidence` | `skill-e2e-qa-callers`: actual Review/Ship callers | Free captures plus selected PR gate |
 | Smoke expiry preserves required plan checks | `qa-deadline`, `qa-deadline-selection`, `qa-browser-deadline-evidence` | `ship-exploratory-plan-checks` | Free deadline/dispatch controls plus selected PR gate |
 | Late changes invalidate affected results | `qa-caller-freshness-order`, `qa-deadline-publication-observer`, `shared-libs-revalidation-prompt` | `ship-exploratory-late-input` and the existing late-input documentation handoff | Free stale-input controls plus selected PR gate |
 | Documentation completes before publication and respects protected files | `docsync-authority`, `docsync-atomic-writes`, `docsync-report-interface`, `docsync-lifecycle-interface` | `skill-e2e-ship-docsync`, `skill-e2e-docsync-spawned` | Free state/permission controls; registered gate/periodic scenarios retain their tiers |

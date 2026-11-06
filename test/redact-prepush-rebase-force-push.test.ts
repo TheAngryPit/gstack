@@ -31,22 +31,12 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
+import { gitEnv } from "./helpers/git-env";
 
 const PREPUSH = path.resolve(import.meta.dir, "..", "bin", "gstack-redact-prepush");
 
 let repo: string;
 let remote: string;
-
-// Same blanking as test/redact-prepush-scan-range.test.ts (#2967). A
-// hooksPath written into the fixture repo still runs.
-function gitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  env.GIT_CONFIG_GLOBAL = "/dev/null";
-  env.GIT_CONFIG_NOSYSTEM = "1";
-  env.GIT_CONFIG_COUNT = "0";
-  delete env.GIT_CONFIG_PARAMETERS;
-  return env;
-}
 
 function git(args: string[], cwd = repo): string {
   const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30_000, env: gitEnv() });

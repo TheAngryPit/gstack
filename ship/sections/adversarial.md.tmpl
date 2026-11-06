@@ -1,3 +1,17 @@
+**Step 9's last full-pass plan governs this step:** run the native pass only on
+`DISPATCH: adversarial-native` and the outside voice only on
+`DISPATCH: outside-voice`. Without the native line (light depth at runtime 0;
+above 0 the plan lists it beside the batched specialist), print `ADVERSARIAL: skipped (review plan)`;
+with neither line, take decision 3 of Finish the adversarial phase. The native pass takes its line's
+`checklists=` and `classes=` as render flags and runs on its `model=` (`lane`: yours). On `DISPATCH: targeted`, also run the targeted reader
+(`gstack-review-dispatch render --role targeted --classes <TARGETED classes> --base <base> --diff-base <merge base>`, the merge base on every pass, never RANGE_BASE) like the voices; `verify --targeted-out .gstack/tmp/targeted.json` feeds the receipt's `--review-targeted`. Under a token cap,
+reserve the planned voices as one batch (`gstack-ship-budget check --next dispatch:<roles>`)
+and add `--reservation <id>` to the `--start adversarial-review` call below.
+After `NEXT: voices` (gate class: Step 11 before any stop), Finish the adversarial phase takes neither
+decision 2 nor 3: rerun Step 9's repeat decision with `--adversarial-ran` (a queued blocking finding as
+`--blocking-open`); its `NEXT:` stands: only `stop` (Step 9.4's decision 2)
+or a granted fix-check (item 3.5, then Step 11.5) follows voices.
+
 {{ADVERSARIAL_STEP}}
 
 {{LEARNINGS_LOG}}
@@ -9,14 +23,13 @@
 Step 8 used broad release terms. Before VERSION/CHANGELOG, search for versioning
 or changelog pitfalls tied to this branch's headline feature.
 
-Use ONE noun naming the skill, module, feature or changed binary. The keyword must
-be alphanumeric or hyphen only; simplify other characters. For example, use
-`token-or-search`, not `feat: token-or search`.
+Use ONE alphanumeric-or-hyphen noun naming the skill, module, feature or changed
+binary: `token-or-search`, not `feat: token-or search`.
 
 ```bash
 { _LE=$(~/.claude/skills/gstack/bin/gstack-learnings-search --query "<your-keyword>" --limit 5 2>&1 >&3 3>&-); _LR=$?; } 3>&1
 [ "$_LR" = 0 ] || { _LE=${_LE%%$'\n'*}; echo "LEARNINGS: unavailable (${_LE:-exit $_LR})"; }
 ```
 
-Name an applicable learning and its effect on the version bump or CHANGELOG in
-one sentence. If none applies, continue without a reference.
+Name an applicable learning and its effect on the bump or CHANGELOG in
+one sentence, or continue without one.

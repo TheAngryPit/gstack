@@ -124,6 +124,13 @@ describe('install default Bun (A2, A-g)', () => {
     expect(verified).toContain(tested);
     expect(Bun.semver.order(installDefault, tested)).toBeGreaterThanOrEqual(0);
   });
+  test('every verified version has a SHA-256 for each target the Capy installer downloads', () => {
+    for (const version of verified) {
+      const r = spawnSync('bash', ['-c', `. "${path.join(ROOT, 'bin', 'gstack-bun-version.sh')}" && for t in linux-x64 linux-x64-baseline linux-aarch64; do gstack_bun_archive_sha256 "$t" "$1" || exit 1; done`, 'bash', version], { encoding: 'utf-8', timeout: 10_000 });
+      expect(r.status, `Bun ${version}: ${r.stderr}`).toBe(0);
+      expect(r.stdout.trim().split('\n').filter(line => /^[0-9a-f]{64}$/.test(line)), `Bun ${version}`).toHaveLength(3);
+    }
+  });
   test('one CI job runs the quick free tier on GSTACK_BUN_DEFAULT, and the free-tests aggregate requires it', () => {
     const onDefault = collectPins().filter(p => p.job === DEFAULT_BUN_JOB);
     expect(onDefault.map(p => p.version)).toEqual([installDefault]);

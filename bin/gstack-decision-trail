@@ -1,0 +1,118 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-decision-trail — append one row to a run's decision trail: a TSV with
+ * one line per decision (ts, phase, decision, why, evidence, result) that a
+ * reviewer reads top to bottom after the run. Append-only: a wrong call gets a
+ * new row that supersedes it, never an edit.
+ *
+ * Usage:
+ *   gstack-decision-trail [--run <id>] <file> <phase> <decision> <why> <evidence> <result>
+ *   gstack-decision-trail start <file> <run-id>
+ *   gstack-decision-trail --help
+ *
+ * The write rules are a port of pstack's show-me-your-work/scripts/log.sh
+ * (Copyright Lauren Tan, MIT; https://github.com/cursor/plugins,
+ * pstack/skills/show-me-your-work at 99b609a7), in TypeScript: the header is
+ * written once and only ever appended, cells lose their tabs and line breaks,
+ * and a cell whose first byte a spreadsheet would run as a formula (=, +, -, @)
+ * gets a leading apostrophe, so evidence taken from PR titles, filenames or
+ * generated text cannot execute when a reviewer opens the file. License text:
+ * licenses/MIT-pstack.txt; NOTICE.md carries the entry. The append rules live in
+ * lib/decision-trail.ts, shared with the autoplan runner.
+ *
+ * The start-row rule is gstack's mechanisation of the same skill's prose: a run
+ * (one agent conversation, with its later turns) that writes to a trail already
+ * holding rows opens with a `start` row naming the rows it did not write, and
+ * its evidence names the run (`run:<id>`). `start` is idempotent for the same
+ * id, and an append with `--run <id>` refuses until that run's start row is the
+ * newest start row in the file (DECISION_TRAIL_START_REQUIRED, exit 3).
+ */
+import { appendTrailRow as appendRow, readTrailRows as readRows, type TrailRow as Row } from "../lib/decision-trail";
+
+const USAGE = `Usage:
+  gstack-decision-trail [--run <id>] <file> <phase> <decision> <why> <evidence> <result>
+  gstack-decision-trail start <file> <run-id>
+  gstack-decision-trail --help
+
+Appends one tab-separated row (ts is stamped in UTC) to <file>, writing the
+header line first when the file is missing or empty. Cells are flattened to
+one line, and a cell starting with =, +, - or @ is prefixed with a quote so a
+spreadsheet cannot run it as a formula. Nothing is ever rewritten or removed.
+
+  phase     the phase or workstream the decision belongs to; 'start' is reserved
+  decision  what was chosen or done, one line, in plain words
+  why       the reason, as you would tell a teammate
+  evidence  a pointer that resolves: commit, PR, file:line, artifact path
+  result    the outcome: tests green, reverted, INCONCLUSIVE, open, ...
+
+start <file> <run-id> appends this run's start row (phase 'start', evidence
+'run:<run-id>') naming the rows earlier runs wrote. Running it again for the
+same run is a no-op while that start row is still the newest one. A run id is
+letters, digits and . _ : @ / - (a Capy jam_ id, a session id, a PR number).
+
+--run <id> on an append refuses with DECISION_TRAIL_START_REQUIRED (exit 3)
+when the trail has rows and the newest start row is another run's.
+`;
+
+const RUN_ID = /^[A-Za-z0-9._:@/-]+$/;
+function checkRunId(runId: string): void {
+  if (!RUN_ID.test(runId)) fail(`run id must match ${RUN_ID} (letters, digits, . _ : @ / -), got ${JSON.stringify(runId)}`, 2);
+}
+
+function newestStart(rows: Row[]): Row | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) if (rows[i]!.cells[1] === "start") return rows[i];
+  return undefined;
+}
+
+function fail(message: string, code: number): never {
+  process.stderr.write(`gstack-decision-trail: ${message}\n`);
+  process.exit(code);
+}
+
+const argv = process.argv.slice(2);
+// Only a leading --help asks for help: a cell whose text is "-h" is data and gets appended (quoted).
+if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+  process.stdout.write(USAGE);
+  process.exit(argv.length === 0 ? 2 : 0);
+}
+
+if (argv[0] === "start") {
+  const [, file, runId, ...extra] = argv;
+  if (!file || !runId || extra.length > 0) fail(`start takes <file> <run-id>\n${USAGE}`, 2);
+  checkRunId(runId);
+  const rows = readRows(file);
+  const newest = newestStart(rows);
+  if (newest && newest.cells[4] === `run:${runId}`) {
+    process.stdout.write(`start row for run ${runId} already present at ${file}:${newest.line}\n`);
+    process.exit(0);
+  }
+  const earlier = rows.length === 0
+    ? "no earlier rows"
+    : `${rows.length} earlier row${rows.length === 1 ? "" : "s"} (${rows[0]!.cells[0]}..${rows[rows.length - 1]!.cells[0]}) written by other runs`;
+  const line = appendRow(file, ["start", rows.length === 0 ? `run ${runId} opens this trail` : `run ${runId} joins this trail`, earlier, `run:${runId}`, "open"]);
+  process.stdout.write(`appended start row ${line} for run ${runId} to ${file}\n`);
+  process.exit(0);
+}
+
+let runId: string | undefined;
+const positional = [...argv];
+while (positional[0]?.startsWith("--")) {
+  const flag = positional.shift()!;
+  if (flag === "--run") {
+    runId = positional.shift();
+    if (!runId) fail("--run needs an id", 2);
+    checkRunId(runId);
+  } else fail(`unknown option ${flag}\n${USAGE}`, 2);
+}
+if (positional.length !== 6) fail(`expected <file> and five cells, got ${positional.length} argument${positional.length === 1 ? "" : "s"}\n${USAGE}`, 2);
+const [file, ...cells] = positional as [string, string, string, string, string, string];
+if (cells[0] === "start") fail("phase 'start' is reserved; use: gstack-decision-trail start <file> <run-id>", 2);
+
+if (runId) {
+  const rows = readRows(file);
+  if (rows.length > 0 && newestStart(rows)?.cells[4] !== `run:${runId}`) {
+    fail(`DECISION_TRAIL_START_REQUIRED: ${file} has ${rows.length} rows and run ${runId} has no start row after the newest one; run: gstack-decision-trail start ${file} ${runId}`, 3);
+  }
+}
+const line = appendRow(file, cells);
+process.stdout.write(`appended row ${line} to ${file}\n`);

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readWorkflowJudgeInput } from './helpers/workflow-judge-input';
-import { expectMentions } from './helpers/prompt-structure';
+import { expectAbsent, expectMentions } from './helpers/prompt-structure';
 
 const root = resolve(import.meta.dir, '..');
 const compact = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -91,5 +91,16 @@ for (const source of sources) describe(`CEO clarity routing — ${source.label}`
     const opening = section.split('### Section 1: Architecture Review')[1]!.split('Evaluate and diagram:')[0]!;
     expect(opening).toContain('**Current scope**');
     expectMentions(opening, [['do not', 'another', 'handoff']], 'opening');
+  });
+});
+
+describe('CEO completeness posture', () => {
+  // Value: protects=CEO Philosophy bullet bounds extra code by the accepted scope, so SCOPE/SELECTIVE EXPANSION still build accepted items;
+  // fails_when=the bullet says "no code beyond the requirement" again, contradicting EXPANSION; why_new=the rule group lacked 'accepted scope';
+  // seam=none; no_claim=model behavior in a real CEO review (keyword check on the template only)
+  test('the Philosophy bullet measures completeness in coverage, not code', () => {
+    const philosophy = readFileSync(resolve(root, 'plan-ceo-review/SKILL.md.tmpl'), 'utf8').split('## Philosophy')[1]!.split('## Prime Directives')[0]!;
+    expectMentions(philosophy, [['whole requirement', '90% shortcut', 'no code beyond', 'accepted scope', 'equal coverage', 'smaller diff']], 'philosophy');
+    expectAbsent(philosophy, ['COMPLETENESS IS CHEAP', '~150 LOC'], 'philosophy');
   });
 });

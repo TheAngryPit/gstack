@@ -18,8 +18,10 @@ const RESOLVED_DIR = realpathSync(DIR);
 
 // Publish readiness only after the grandchild has initialized and flushed both
 // inherited pipes; a PID returned by spawn alone does not establish that state.
+// The pid lands by rename, so a poller that sees the file sees the whole pid
+// (Free Tests 39694715116: an existence poll read the empty file as pid 0).
 writeFileSync(DESCENDANT, `
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, renameSync, writeFileSync } from 'node:fs';
 const record = stage => {
   if (process.env.FAKE_MODE === 'timeout') {
     try { appendFileSync(${JSON.stringify(DESCENDANT_STAGES)}, JSON.stringify({ stage, atUnixMs: Date.now(), processNs: process.hrtime.bigint().toString(), pid: process.pid }) + '\\n'); } catch {}
@@ -32,7 +34,8 @@ await new Promise(resolve => process.stdout.write(' ', resolve));
 record('stdout_flushed');
 await new Promise(resolve => process.stderr.write(' ', resolve));
 record('stderr_flushed');
-writeFileSync(process.env.PID_FILE!, String(process.pid));
+writeFileSync(process.env.PID_FILE! + '.tmp', String(process.pid));
+renameSync(process.env.PID_FILE! + '.tmp', process.env.PID_FILE!);
 record('pid_published');
 `);
 
@@ -131,9 +134,16 @@ function running(pid: number): boolean {
   try {
     process.kill(pid, 0);
     // Linux can leave a killed orphan briefly as a zombie before init reaps it.
-    if (process.platform === 'linux') return readFileSync(`/proc/${pid}/stat`, 'utf8').split(' ')[2] !== 'Z';
+    if (process.platform === 'linux') return !['Z', 'X'].includes(readFileSync(`/proc/${pid}/stat`, 'utf8').split(' ')[2]);
     return true;
   } catch { return false; }
+}
+
+/** The descendant's published pid: a positive integer in the pid file, or undefined while unpublished. */
+function publishedPid(): number | undefined {
+  let text: string;
+  try { text = readFileSync(PID, 'utf8'); } catch { return undefined; }
+  return /^[1-9]\d*$/.test(text) ? Number(text) : undefined;
 }
 
 async function expectDescendantDead() {
@@ -142,7 +152,7 @@ async function expectDescendantDead() {
     for (let i = 0; i < 20 && running(pid); i++) await Bun.sleep(25);
     expect(running(pid)).toBe(false);
   } finally {
-    if (running(pid)) process.kill(pid, 'SIGKILL');
+    cleanupDescendant();
   }
 }
 
@@ -295,8 +305,10 @@ describe('Claude Code restricted execution', () => {
     try {
       expect(fireTimeout).toBeDefined();
       const readyBy = Date.now() + 2000;
-      while (!existsSync(PID) && Date.now() < readyBy) await Bun.sleep(5);
-      expect(running(Number(readFileSync(PID, 'utf8')))).toBe(true);
+      while (publishedPid() === undefined && Date.now() < readyBy) await Bun.sleep(5);
+      const descendantPid = publishedPid();
+      expect(descendantPid, 'descendant never published its pid within the readiness window').toBeDefined();
+      expect(running(descendantPid!)).toBe(true);
       const start = Date.now();
       const expire = fireTimeout!;
       fireTimeout = undefined;
@@ -351,8 +363,7 @@ describe('Claude Code restricted execution', () => {
       expect(result.error?.code).toBe('output-drain');
       expect(Date.now() - start).toBeLessThan(2000);
     } finally {
-      const pid = Number(readFileSync(PID, 'utf8'));
-      if (running(pid)) process.kill(pid, 'SIGKILL');
+      cleanupDescendant();
     }
   });
 

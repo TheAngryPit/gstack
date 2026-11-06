@@ -117,7 +117,9 @@ SKILL.md files are **generated** from `.tmpl` templates. To update docs:
 
 1. Edit the `.tmpl` file (e.g. `SKILL.md.tmpl` or `browse/SKILL.md.tmpl`)
 2. Run `bun run gen:skill-docs` (or `bun run build` which does it automatically)
-3. Commit both the `.tmpl` and generated `.md` files
+3. Commit both the `.tmpl` and generated `.md` files, including a tier 2+ skill's
+   `sections/preamble.md` (the shared preamble, rendered by
+   `scripts/resolvers/preamble-hoist.ts`; change the preamble resolvers, never that file)
 
 The same `gen:skill-docs` run writes two more generated files from `lib/`:
 `review/design-checklist.md` (from `lib/design-catalog.ts`, through
@@ -127,7 +129,7 @@ and commit both; never edit the generated file
 (`test/design-checklist-sync.test.ts` fails on drift).
 
 Generation uses each host's `defaultModel` (`claude` for most hosts, `gpt`
-for Codex, `gemini` for Antigravity's `agy`) unless `--model` is explicit. Codex installs additionally read the
+for Codex, `gemini` for Antigravity's `agy` and Gemini CLI) unless `--model` is explicit. Codex installs additionally read the
 top-level model from `${CODEX_HOME:-~/.codex}/config.toml`; rerun
 `./setup --host codex` after changing that model. Note: `bun run build` and a
 bare `gen:skill-docs --host codex` render the host default (gpt) — if your
@@ -146,7 +148,7 @@ a skill's own bash.
 
 **Size budgets:** generated SKILL.md files warn above 160KB (~40K tokens);
 `test/catalog-budget.test.ts` caps the always-loaded skill catalog at
-`CATALOG_BUDGET_TOKEN_EQUIVALENTS` (1,197 today; each new skill ratchets it); and
+`CATALOG_BUDGET_TOKEN_EQUIVALENTS` (1,452 today; each new skill ratchets it); and
 `test/context-budget-ratchet.test.ts` pins per-skill token ceilings against
 `test/fixtures/context-budget.json` (for legitimate growth or a landed
 reduction, re-run `bun test/helpers/capture-context-budget.ts` and commit the
@@ -372,18 +374,22 @@ is not a reason to choose MINOR. Choose **MINOR (X.Y+1.0.0)** or **MAJOR
 ("ridiculous"), such as an incompatible public-interface change or a genuinely
 new product-scale release. Make that judgment without another approval question.
 
-Use `bin/gstack-next-version` to check the live release queue before publishing.
-If a slot is claimed, advance to the next available version at the chosen bump
-level and use `bin/gstack-version-bump` to synchronize release metadata. A higher
-base version does not itself require a MINOR bump. Keep the PR ready for Garry to
-merge; autonomous version decisions do not authorize merging, deploying or
-skipping required validation.
+gstack's policy sets `changelog_fragments` (#3654), so a branch never writes a
+version and never checks `bin/gstack-next-version` for a slot. The merge
+train's stamp (`train land`) assigns base + PATCH at merge. To ask for more,
+open the branch's fragment with `bump: minor` (or `major`) front matter. A
+higher base version does not itself require a MINOR bump. Keep the PR READY for
+the merge train; autonomous version decisions do not authorize merging,
+deploying or skipping required validation.
 
-**VERSION and CHANGELOG are branch-scoped.** Each shipping branch gets its own
-bump and one entry, written at `/ship` time, that describes what THIS branch
-adds versus main, for users, with no branch-internal versions or development
-narrative. VERSION stays 4-digit; package.json carries the 3-digit npm
-translation owned by `bin/gstack-version-bump`, so never hand-edit it. Read
+**The CHANGELOG entry is a branch fragment.** Each shipping branch writes one
+entry at `/ship` time as `changelog.d/<branch-slug>.md` (entry text only, no
+`## [x]` heading) that describes what THIS branch adds versus main, for users,
+with no branch-internal versions or development narrative. A branch never edits
+VERSION, package.json or a released CHANGELOG.md section: the merge stamp folds
+the fragment into CHANGELOG.md under its version, keeps VERSION 4-digit and
+writes package.json's 3-digit npm translation through `bin/gstack-version-bump`
+([changelog fragments](docs/ship-policy.md#changelog-fragments)). Read
 [docs/CHANGELOG_STYLE.md](docs/CHANGELOG_STYLE.md) BEFORE writing an entry: it
 holds the versioning invariant, the merge-main checks, what stays out and the
 entry format. Always credit community contributions with
@@ -402,10 +408,10 @@ When estimating or discussing effort, always show both human-team and CC+gstack 
 | Architecture / design | 2 days | 4 hours | ~5x |
 | Research / exploration | 1 day | 3 hours | ~3x |
 
-Completeness is cheap. Don't recommend shortcuts when the complete implementation
-is achievable. Boil the ocean — the complete thing is the goal; only genuinely
-unrelated multi-quarter migrations are separate scope, never an excuse for a
-shortcut. See the Completeness Principle in the skill preamble for the full
+Complete coverage, minimal code. Don't recommend shortcuts that leave part of
+the requirement uncovered, and don't add code beyond it: when options cover the
+same, prefer the smaller diff. Only genuinely unrelated multi-quarter migrations
+are separate scope, never an excuse for a coverage gap. See the Completeness Principle in the skill preamble for the full
 philosophy.
 
 ## Search before building
@@ -544,11 +550,11 @@ Key routing rules:
 - Architecture → invoke /plan-eng-review
 - Design system/plan review → invoke /design-consultation or /plan-design-review
 - Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
+- Bugs/errors → invoke /investigate, unless one read-only check confirms the cause and a narrow fix (then fix it and run the focused test)
 - QA/testing site behavior → invoke /qa or /qa-only
 - Code review/diff check → invoke /review
 - Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
+- Ship/deploy/PR → invoke /ship (merge + deploy: the user types /land-and-deploy)
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
 
@@ -594,8 +600,9 @@ match the actual code on disk in this worktree.
 
 Two indexed corpora available via the `gbrain` CLI:
 - This worktree's code (auto-pinned via `.gbrain-source`).
-- `~/.gstack/` curated memory (registered as `gstack-brain-<user>` source via
-  the existing federation pipeline).
+- `~/.gstack/` curated memory: the `gstack-artifacts-<user>` source, named after
+  the repo `gstack-artifacts-init` creates (lowercased and cut to 32 characters;
+  `gbrain sources list` shows the exact id).
 
 Prefer gbrain when:
 - "Where is X handled?" / semantic intent, no exact string yet:
@@ -605,7 +612,7 @@ Prefer gbrain when:
 - "What calls Y?" / "What does Y depend on?":
     `gbrain code-callers <symbol>` / `gbrain code-callees <symbol>`
 - "What did we decide last time?" / past plans, retros, learnings:
-    `gbrain search "<terms>" --source gstack-brain-<user>`
+    `gbrain search "<terms>" --source gstack-artifacts-<user>`
 
 Grep is still right for known exact strings, regex, multiline patterns, and
 file globs. Run `/sync-gbrain` after meaningful code changes; for ongoing

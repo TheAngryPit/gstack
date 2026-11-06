@@ -105,7 +105,7 @@ describe('B4: DESIGN_READY requires a binary that starts', () => {
 
   test('office-hours visual exploration uses the same probe', () => {
     const w = world(HOSTS[0].root, 'kill -9 $$');
-    const r = run(fenceAfter(path.join(HOSTS[0].dir('office-hours'), 'SKILL.md'), '## Visual Design Exploration'), w);
+    const r = run(fenceAfter(path.join(HOSTS[0].dir('office-hours'), 'sections', 'visual-design.md'), '## Visual Design Exploration'), w);
     expect(r.stdout.trim()).toStartWith('DESIGN_NOT_AVAILABLE: ');
     expect(r.stdout).toContain('exited 137 (killed at launch');
   });

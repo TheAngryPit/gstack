@@ -63,7 +63,7 @@ The plan-ceo-review-plan-mode (:89, :108), plan-devex-review-plan-mode (:181-222
 | auq-format-gate | test/skill-e2e-ask-user-question-format-compliance.test.ts:58 | question ~ `options differ in kind` | AUQ tool input | yes | (c) |
 | auq-format-gate | test/skill-e2e-ask-user-question-format-compliance.test.ts:61, :68 | recommendation substance ≥ 4 | — | — | judge |
 | plan-tune-inspect | test/skill-e2e-plan-tune.test.ts:167-169, :185 | output names ≥2 of 3 seeded question IDs or aliases | question-log is seeded fixture input | yes (inspection report) | (c) |
-| plan-review-report | test/skill-e2e-plan.test.ts:463-491 | plan.md `## GSTACK REVIEW REPORT`, CEO/Eng/Design rows, ends with `NO UNRESOLVED DECISIONS` or a bullet | rows come from the seeded review log; the table is rendered | yes | (c) |
+| plan-review-report | test/skill-e2e-plan.test.ts:472-500 | plan.md `## GSTACK REVIEW REPORT`, CEO/Eng/Design rows, ends with `NO UNRESOLVED DECISIONS` or a bullet | rows come from the seeded review log; the table is rendered | yes | (c) |
 
 ### test/skill-e2e-design.test.ts (gate cases)
 
@@ -89,14 +89,14 @@ The plan-ceo-review-plan-mode (:89, :108), plan-devex-review-plan-mode (:181-222
 |---|---|---|---|---|---|
 | shared-libs-read-only | test/skill-e2e-shared-libs.test.ts:113-120 | report ~ uncommitted/overlay/raw, tip and branch SHAs, retry-worker/route, no blob link for branch-only file | none (read-only by contract) | yes | (c) |
 | shared-libs-unsupported-git | test/skill-e2e-shared-libs.test.ts:136, :144 | report ~ unavailable/unsupported/limited; not "no commits/PRs found" | none | yes | (c) |
-| shared-libs-review-path-eligibility | test/skill-e2e-shared-libs-paths.test.ts:133-134 | `trace + output` ~ submodule/160000, check-ignore/ignored (output alone satisfies) | Bash command trace (first operand) | no | (b) |
+| shared-libs-review-path-eligibility | test/skill-e2e-shared-libs-paths.test.ts:134-135 | `trace + output` ~ submodule/160000, check-ignore/ignored (output alone satisfies) | Bash command trace (first operand) | no | (b) |
 
 ### test/skill-e2e-ship-docsync.test.ts, test/skill-e2e-docsync-spawned.test.ts
 
 | Case | Check (file:line) | Matches | Structured source | User-visible | Disposition |
 |---|---|---|---|---|---|
 | ship-docsync-store | test/skill-e2e-ship-docsync.test.ts:74, :78 | ship report ~ `Documentation…blocked`; not `Documentation: current` | no receipt, no publish call (:75-77) | yes (report status) | (c) |
-| ship-docsync-completion, ship-docsync-current | test/skill-e2e-ship-docsync.test.ts:81, :97 | parsed docs contract, then report contains `contract.documentation_section` | docs dispatch JSON (ship/sections/documentation.md.tmpl:52-56) | yes | (a) |
+| ship-docsync-completion, ship-docsync-current | test/skill-e2e-ship-docsync.test.ts:85, :105 | parsed docs contract, then report contains `contract.documentation_section` | docs dispatch JSON (ship/sections/documentation.md.tmpl:52-56) | yes | (a) |
 | ship-docsync-late-result, -missing-marker, -missing-asset, -launch-failure, -timeout-unsettled, -failure | test/helpers/docsync-fault-eval.ts:28, :30 | non-success report ~ `Documentation…blocked`, no `Documentation: current` outside inline code | actor event log decides dispatch count and publication first (:22-27) | yes | (c) |
 | ship-docsync-recovery, -stale-before, -stale-after | test/helpers/docsync-fault-eval.ts:31 | report contains the accepted audit id | actor state `acceptedId` | yes | (a) |
 | docsync-spawned | test/skill-e2e-docsync-spawned.test.ts:60 | `contract.blockers` ~ security/sensitive | parsed docs contract | no | (a) |

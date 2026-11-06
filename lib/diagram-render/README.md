@@ -14,6 +14,8 @@ The built page is **committed** (eng-review D2): rendering works with zero
 network at install time and render time, and there is no npm supply-chain
 surface in `./setup`. The drift test (`test/diagram-render-drift.test.ts`)
 fails CI if `dist/` is edited by hand or falls out of sync with `BUILD_INFO.json`.
+It also checks that the bundled DOMPurify is the `package.json` override and that
+the bundle carries no Google API key.
 
 ## Page API (window functions)
 
@@ -40,6 +42,12 @@ cd lib/diagram-render && bun install
 bun run build
 # 3. commit package.json + bun.lock + dist/ together
 ```
+
+`scripts/build.ts` empties the one `VITE_APP_FIREBASE_CONFIG` literal in
+`@excalidraw/excalidraw`'s npm bundle (a public Firebase client key the offline page
+never uses), because a key-shaped literal fails the pre-gate secret scan. The build
+fails if that literal is not matched exactly once or an `AIza…` key survives, so an
+excalidraw bump that changes its shape needs the strip rule updated.
 
 Render contract details (securityLevel strict, htmlLabels false, print-css font
 lock, `<base href>` + `</scri` escaping) are documented in `src/entry.ts` and

@@ -9,6 +9,7 @@ This page lists all API deprecations, along with recommended replacements.
 | Shutdown date | Model / system | Recommended replacement |
 | --- | --- | --- |
 | Apr 1, 2027 | `gpt-5.3-codex` | `gpt-6-sol` |
+| Feb 16, 2027 | GPT-4o (`gpt-4o-2024-08-06`, `gpt-4o-2024-11-20`) | `gpt-6-sol` |
 
 ## Past deprecations
 

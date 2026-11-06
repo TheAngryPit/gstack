@@ -9,6 +9,7 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { readSkillStartup } from './helpers/skill-startup';
 import { generatePreamble } from '../scripts/resolvers/preamble';
 import {
   EVIDENCE_KERNEL_BULLETS, EVIDENCE_KERNEL_HEADING, KERNEL_MAX_BYTES, generateEvidenceDirective,
@@ -23,14 +24,15 @@ const ctx = (tier: number, explainLevel?: 'default' | 'terse'): TemplateContext 
 } as TemplateContext);
 
 describe('Claims Need Evidence kernel', () => {
-  test('renders five bullets within the byte budget, with the reuse pointer and the stderr rule', () => {
+  test('renders five bullets within the byte budget, with the stderr rule and no cross-skill step pointer', () => {
     const rendered = generateEvidenceDirective();
     expect(rendered.startsWith(`${EVIDENCE_KERNEL_HEADING}\n`)).toBe(true);
     const bullets = rendered.split('\n').filter(line => line.startsWith('- '));
     expect(bullets).toHaveLength(5);
     expect(EVIDENCE_KERNEL_BULLETS).toHaveLength(5);
     expect(Buffer.byteLength(bullets.join('\n'), 'utf8')).toBeLessThanOrEqual(KERNEL_MAX_BYTES);
-    expectTokens(rendered, ['Reuse rules: Step 16', 'stderr', '"done, unverified"'], 'kernel');
+    expectTokens(rendered, ['stderr', '"done, unverified"'], 'kernel');
+    expect(rendered).not.toMatch(/\bStep \d/);
     expectMentions(rendered, [
       ['limitation', 'verbatim error'],
       ['execution', 'command', 'fingerprint'],
@@ -67,7 +69,7 @@ describe('Claims Need Evidence kernel', () => {
     expect(skills.length).toBeGreaterThan(20);
     for (const skill of skills) {
       const tier = Number(/preamble-tier:\s*(\d)/.exec(fs.readFileSync(path.join(ROOT, skill, 'SKILL.md.tmpl'), 'utf8'))?.[1]);
-      const rendered = fs.readFileSync(path.join(ROOT, skill, 'SKILL.md'), 'utf8');
+      const rendered = readSkillStartup(path.join(ROOT, skill, 'SKILL.md'));
       expect(rendered, `${skill} still carries the retired heading`).not.toContain('Claimed Limitations Need Evidence');
       if (tier >= 2) expect(rendered, `${skill} (tier ${tier}) lacks the kernel; run bun run gen:skill-docs`).toContain(EVIDENCE_KERNEL_HEADING);
     }

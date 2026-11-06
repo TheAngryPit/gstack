@@ -21,6 +21,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SHARED_POINTER_HEADING, SHARED_PREAMBLE_FILE } from './helpers/skill-startup';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 
@@ -77,7 +78,8 @@ describe('section manifest ↔ filesystem consistency', () => {
       });
 
       test('no generated orphan: every sections/X.md has a sections/X.md.tmpl → FAIL', () => {
-        const orphans = sectionMds.filter(md => !sectionTmpls.includes(`${md}.tmpl`));
+        const pointsToShared = fs.readFileSync(path.join(ROOT, skill, 'SKILL.md'), 'utf-8').includes(`\n${SHARED_POINTER_HEADING}\n`);
+        const orphans = sectionMds.filter(md => !(md === SHARED_PREAMBLE_FILE && pointsToShared) && !sectionTmpls.includes(`${md}.tmpl`));
         expect(orphans).toEqual([]);
       });
 

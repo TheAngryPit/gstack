@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { outsideVoiceCommand, outsideVoicePreflight, outsideVoiceInvocation } from '../scripts/resolvers/outside-voice';
+import { outsideVoiceCommand, outsideVoiceFor, outsideVoicePreflight, outsideVoiceInvocation } from '../scripts/resolvers/outside-voice';
 import { generateAdversarialStep, generateCodexDocReview, generateCodexPlanReview } from '../scripts/resolvers/outside-voice-steps';
 import { validateOutsideReview } from '../lib/outside-review-result';
 import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
@@ -100,7 +100,7 @@ test('CEO and Eng describe the actual disabled route and completion validator', 
       if (skillName === 'plan-eng-review') {
         const routing = output.slice(output.indexOf('**Outcome routing:**'), output.indexOf('**Disabled is a terminal branch'));
         expect(routing).toMatch(/\| Disabled \|[^\n]*No prompt, outside process or native replacement\./);
-        expect(routing).toMatch(/\| Other preflight mode, including harness mismatch \|[^\n]*Native fallback\./);
+        expect(routing).toMatch(/\| Any other mode \(`not_installed`, `under_current_harness`\) \|[^\n]*Native fallback\./);
         expect(routing).toMatch(/\| Outside execution or output validation fails \|[^\n]*finish termination, then use Native fallback\./);
         expect(routing).toMatch(/\| Native fallback unavailable or fails \|[^\n]*No clean-review credit\./);
         const fallback = output.slice(output.indexOf('**Native fallback'), output.indexOf('Dispatch via the Agent tool'));
@@ -128,6 +128,42 @@ test('CEO and Eng describe the actual disabled route and completion validator', 
   expect(validateOutsideReview('Recommendation: proceed because no findings remain.', 'review').completed).toBe(true);
   expect(validateOutsideReview('SCORE: 10\nAMBIGUITIES: NONE', 'review').completed).toBe(false);
   expect(validateOutsideReview('Recommendation: proceed', 'review').completed).toBe(false);
+});
+
+// Value: protects=the plan-review run header offers only CODEX_MODE values its own preflight prints (gates 40477638211 and
+// 40454750574 judged "(or unverified)" a branch nothing can enter), while the doc review keeps "(or unverified)" exactly where
+// its codex preflight can print it; fails_when=a run header admits a mode no fence echoes or assigns, the routing row stops
+// naming the non-ready modes the fence prints, or the doc review loses the branch on a host whose preflight still prints it;
+// why_new=the routing-row pins above check one row's wording, not that the header, the routing row and the fence agree on the
+// mode set; seam=none; no_claim=the judged clarity of the surrounding prose.
+test('plan-review and doc-review run headers admit only the CODEX_MODE values their preflight prints', () => {
+  const fenceModes = (output: string) => [...new Set([...output.matchAll(/\`\`\`bash\n([\s\S]*?)\n\`\`\`/g)]
+    .flatMap(fence => [...fence[1].matchAll(/(?:echo 'CODEX_MODE: |_CODEX_MODE=")([a-z_]+)/g)].map(match => match[1])))].sort();
+  const headers = (output: string) => [...output.matchAll(/^\*\*If \`CODEX_MODE:[^\n]*$/gm)].map(match => match[0]);
+  for (const host of ALL_HOST_CONFIGS) {
+    for (const skillName of ['plan-ceo-review', 'plan-eng-review', 'plan-devex-review']) {
+      const ctx: TemplateContext = { host: host.name, skillName, tmplPath: `${skillName}/SKILL.md.tmpl`, paths: HOST_PATHS[host.name] };
+      const output = generateCodexPlanReview(ctx);
+      const where = `${host.name} ${skillName}`;
+      expect(fenceModes(output), where).toEqual(['disabled', 'not_installed', 'ready', 'under_current_harness']);
+      expect(headers(output), where).toEqual([`**If \`CODEX_MODE: ready\` — run ${outsideVoiceFor(ctx).label}:**`]);
+      const run = output.slice(output.indexOf(headers(output)[0]), output.indexOf('**Native fallback'));
+      expect(run, where).not.toMatch(/\bor `?unverified|CODEX_MODE[^\n]*unverified/);
+      if (skillName !== 'plan-devex-review') expect(run, where).toContain('Run this block for \`ready\`, in the one foreground Bash call');
+      const routing = output.indexOf('**Outcome routing:**');
+      if (routing >= 0) {
+        const row = output.slice(routing).match(/^\| Any other mode \(([^)]*)\) \|/m);
+        expect(row, where).not.toBeNull();
+        expect(row![1].match(/\`([a-z_]+)\`/g)!.map(mode => mode.replaceAll('\`', '')).sort(), where)
+          .toEqual(fenceModes(output).filter(mode => mode !== 'ready' && mode !== 'disabled'));
+      }
+    }
+    const ctx: TemplateContext = { host: host.name, skillName: 'document-release', tmplPath: 'document-release/SKILL.md.tmpl', paths: HOST_PATHS[host.name] };
+    const doc = generateCodexDocReview(ctx);
+    const admitsUnverified = fenceModes(doc).includes('unverified');
+    expect(admitsUnverified, host.name).toBe(outsideVoiceFor(ctx).id === 'codex');
+    expect(headers(doc), host.name).toEqual([`**If \`CODEX_MODE: ready\`${admitsUnverified ? ' (or \`unverified\`)' : ''} — run ${outsideVoiceFor(ctx).label}:**`]);
+  }
 });
 
 describe('own-harness review fallback instructions', () => {
@@ -271,4 +307,32 @@ describe('outside reviewer runtime discovery in fresh shells', () => {
     expect(JSON.parse(fs.readFileSync(f.capture, 'utf8')).prompt).toBe(fs.readFileSync(prompt, 'utf8'));
     expect(fs.existsSync(path.join(f.repo, 'NEVER'))).toBe(false);
   });
+});
+
+// Value: protects=the adversarial DIFF_SIZE sums insertions+deletions across files and ignores binary rows;
+//   fails_when=the numstat/awk sum reads the wrong field or a binary "-" row breaks it; why_new=no test ran the
+//   size block; seam=none; no_claim=the size thresholds that consume DIFF_SIZE
+test('adversarial DIFF_SIZE counts changed lines from numstat', () => {
+  const ctx: TemplateContext = { host: 'claude', skillName: 'ship', tmplPath: 'ship/SKILL.md.tmpl', paths: HOST_PATHS.claude };
+  const fence = generateAdversarialStep(ctx).match(/```bash\n(DIFF_BASE=[\s\S]*?)\n```/);
+  expect(fence).not.toBeNull();
+  const repo = fs.mkdtempSync(path.join(TEMP, 'diff-size-'));
+  const git = (...args: string[]) => {
+    const r = spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: repo, encoding: 'utf8', timeout: 30_000 });
+    expect(r.status).toBe(0);
+  };
+  git('init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'one\ntwo\n');
+  git('add', '-A');
+  git('commit', '-qm', 'base');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  git('checkout', '-q', '-b', 'feature');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'one\nTWO\n');            // 1 insertion + 1 deletion
+  fs.writeFileSync(path.join(repo, 'b.txt'), 'x\ny\nz\n');              // 3 insertions
+  fs.writeFileSync(path.join(repo, 'c.bin'), Buffer.from([0, 1, 2, 0])); // binary: "-\t-" in numstat
+  git('add', '-A');
+  git('commit', '-qm', 'change');
+  const r = spawnSync('bash', ['-c', fence![1].replaceAll('<base>', 'main')], { cwd: repo, encoding: 'utf8', timeout: 30_000 });
+  expect(r.stderr).toBe('');
+  expect(r.stdout.trim()).toBe('DIFF_SIZE: 5');
 });

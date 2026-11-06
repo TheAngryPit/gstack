@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Fixture, put, runSetup } from './install-fixture';
+import { readSkillStartup } from './skill-startup';
 
 export const MARKER = 'Effort-match the step';
 
@@ -21,7 +22,7 @@ export const MARKER = 'Effort-match the step';
 export function failableBun(f: Fixture) {
   put(join(f.commands, 'bun'), `#!/usr/bin/env bash
 case "$*" in
-  'install --frozen-lockfile') exit 0 ;;
+  'install --production --frozen-lockfile') exit 0 ;;
   'run build') echo 'Unexpected build in an install fixture' >&2; exit 90 ;;
   *gen:skill-docs*--out-dir*) if [ -f "$HOME/fail-render" ]; then echo 'render failed (fixture)' >&2; exit 7; fi ;;
 esac
@@ -56,4 +57,4 @@ export function record(render: string): Record<string, string> {
   return Object.fromEntries(readFileSync(file, 'utf8').trim().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)));
 }
 
-export const served = (skills: string) => readFileSync(join(skills, 'autoplan/SKILL.md'), 'utf8');
+export const served = (skills: string) => readSkillStartup(join(skills, 'autoplan/SKILL.md'));

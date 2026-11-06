@@ -42,8 +42,26 @@ if (!result.success) {
 }
 const js = await result.outputs[0].text();
 
+// @excalidraw/excalidraw's npm bundle carries excalidraw.com's public Firebase
+// client config (an `AIza…` key) in an env literal nothing in the package
+// reads. The offline page never opens a collab session, and a key-shaped
+// literal in a committed file fails the pre-gate secret scan on every rebuild,
+// so the literal is emptied. Exactly one match is expected: a bump that changes
+// the shape must fail here rather than put the key back silently.
+const FIREBASE_CONFIG = /VITE_APP_FIREBASE_CONFIG:'\{[^']*\}'/g;
+const firebaseHits = js.match(FIREBASE_CONFIG)?.length ?? 0;
+if (firebaseHits !== 1) {
+  console.error(`expected exactly one VITE_APP_FIREBASE_CONFIG literal in the excalidraw bundle, found ${firebaseHits}; update the strip rule in scripts/build.ts`);
+  process.exit(1);
+}
+const strippedJs = js.replace(FIREBASE_CONFIG, "VITE_APP_FIREBASE_CONFIG:'{}'");
+if (/AIza[0-9A-Za-z_-]{35}/.test(strippedJs)) {
+  console.error("a Google API key literal survived the strip; update the strip rule in scripts/build.ts");
+  process.exit(1);
+}
+
 // Escape inline-script terminators (see header note).
-const inlineJs = js.replaceAll("</scri", "<\\/scri");
+const inlineJs = strippedJs.replaceAll("</scri", "<\\/scri");
 
 const head = `<!doctype html>
 <html>

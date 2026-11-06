@@ -1,11 +1,13 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * Requalification triggers: the inputs a runtime qualification was measured
  * under. A promoted catalog records them; a catalog whose recorded triggers
  * differ from the current source is older than its inputs and must be
  * requalified (or its runtimes withdrawn) before it ships.
  */
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { canonical, sha256 } from '../lib/cso/contracts';
 import { ISOLATION_POLICY_HASH } from '../lib/cso/docker';
@@ -31,6 +33,37 @@ export async function imageSourceFiles(root = ROOT): Promise<string[]> {
   return [...new Set([...closure, ...context])].sort();
 }
 
+/**
+ * Digest of every image source byte. A compiled helper's leading `#!` line never
+ * runs inside the image, so it is hashed as absent; every other byte counts.
+ * `legacy` hashes the shebang too, the rule staging runs recorded before this normalization (through run 39325583697).
+ */
+function preparationSha256(root: string, files: string[], legacy = false): string {
+  const helpers = new Set<string>(IMAGE_HELPER_ENTRYPOINTS);
+  return sha256(canonical(files.map(file => {
+    const bytes = fs.readFileSync(path.join(root, file));
+    if (legacy || !helpers.has(file) || bytes[0] !== 0x23 || bytes[1] !== 0x21) return [file, sha256(bytes)];
+    const newline = bytes.indexOf(0x0a);
+    return [file, sha256(newline === -1 ? Buffer.alloc(0) : bytes.subarray(newline + 1))];
+  })));
+}
+
+/** preparationSha256 of a committed tree under the current rule and the legacy rule. */
+export async function committedPreparation(commit: string, root = ROOT): Promise<{ current: string; legacy: string }> {
+  if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('INVALID_STAGED_COMMIT');
+  const archive = spawnSync('git', ['-C', root, 'archive', '--format=tar', commit], { timeout: 60_000, maxBuffer: 512 * 1024 * 1024 });
+  if (archive.status !== 0) throw new Error(`STAGED_COMMIT_UNAVAILABLE: ${commit} is not in this checkout; fetch full history`);
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'cso-staged-source-'));
+  try {
+    const extract = spawnSync('tar', ['-x', '-C', tree], { input: archive.stdout, timeout: 60_000 });
+    if (extract.status !== 0) throw new Error('STAGED_COMMIT_UNAVAILABLE: archive extraction failed');
+    const files = await imageSourceFiles(tree);
+    return { current: preparationSha256(tree, files), legacy: preparationSha256(tree, files, true) };
+  } finally {
+    fs.rmSync(tree, { recursive: true, force: true });
+  }
+}
+
 export async function requalificationTriggers(root = ROOT): Promise<RequalificationTriggers> {
   const files = await imageSourceFiles(root);
   const buildInputs = JSON.parse(fs.readFileSync(path.join(root, IMAGE_CONTEXT, 'build-inputs.json'), 'utf8'));
@@ -38,7 +71,7 @@ export async function requalificationTriggers(root = ROOT): Promise<Requalificat
   return {
     helperAbi: CSO_HELPER_ABI,
     isolationPolicyHash: ISOLATION_POLICY_HASH,
-    preparationSha256: sha256(canonical(files.map(file => [file, sha256(fs.readFileSync(path.join(root, file)))]))),
+    preparationSha256: preparationSha256(root, files),
     buildInputsRevision: buildInputs.revision,
   };
 }

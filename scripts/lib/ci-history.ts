@@ -95,21 +95,29 @@ export interface CiJob { id: number; name: string; conclusion: string | null; st
 
 const PAGE = 100;
 
+/** The runs API's `created` filter, by UTC day (both ends inclusive): `>=since`, or `since..until` when the window has an end. */
+export function createdFilter(since: string, until?: string): string {
+  return `created=${encodeURIComponent(until ? `${since.slice(0, 10)}..${until.slice(0, 10)}` : `>=${since.slice(0, 10)}`)}`;
+}
+
 /**
- * Every completed run of `workflow` created at or after `since`, newest first,
- * paging until a page is short or older than `since`. A failure on any page
- * throws: a partial history is never reported as a complete one.
+ * Every completed run of `workflow` created at or after `since` (and before
+ * `until` when given), newest first, paging until a page is short (the
+ * `created` filter bounds the range server-side). A run whose created_at does
+ * not parse is skipped. A failure on any page throws: a partial history is
+ * never reported as a complete one.
  */
 export function listWorkflowRuns(client: GhClient, repo: string, workflow: string,
-  opts: { since: string; branch?: string; event?: string; maxPages?: number }): CiRun[] {
+  opts: { since: string; until?: string; branch?: string; event?: string; maxPages?: number }): CiRun[] {
   const out: CiRun[] = [];
-  const query = [`status=completed`, `per_page=${PAGE}`, `created=${encodeURIComponent(`>=${opts.since.slice(0, 10)}`)}`,
+  const query = [`status=completed`, `per_page=${PAGE}`, createdFilter(opts.since, opts.until),
     ...(opts.branch ? [`branch=${encodeURIComponent(opts.branch)}`] : []), ...(opts.event ? [`event=${encodeURIComponent(opts.event)}`] : [])];
   for (let page = 1; page <= (opts.maxPages ?? 20); page++) {
     const body = client.getJson(`repos/${repo}/actions/workflows/${workflow}/runs?${query.join('&')}&page=${page}`) as { workflow_runs?: any[] };
     const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
     for (const run of runs) {
-      if (String(run.created_at) < opts.since) continue;
+      const created = Date.parse(String(run.created_at));
+      if (!(created >= Date.parse(opts.since)) || (opts.until && created >= Date.parse(opts.until))) continue;
       if ((opts.branch && run.head_branch !== opts.branch) || (opts.event && run.event !== opts.event)) continue;
       out.push({ id: Number(run.id), attempt: Number(run.run_attempt ?? 1), sha: String(run.head_sha ?? ''), branch: String(run.head_branch ?? ''),
         event: String(run.event ?? ''), status: String(run.status ?? ''), conclusion: run.conclusion ?? null,
@@ -251,7 +259,38 @@ export function readFlakeLedgerDir(dir: string): FlakeLedgerEntry[] {
 export const FLAKE_POLICY = { maxRate: 0.05, minRuns: 20 } as const;
 
 export interface FlakyFile { file: string; flakyRuns: number; entries: number; rate: number; enforced: boolean; failing: boolean }
-export interface FlakeWindow { runs: number; flakyRuns: number; since: string; files: FlakyFile[]; enforceable: boolean }
+/** `skipped`: reused main pushes left out of the window (reuseChecker); `note`: runs that could not be checked. */
+export interface FlakeWindow { runs: number; flakyRuns: number; since: string; files: FlakyFile[]; enforceable: boolean; skipped?: number; note?: string }
+
+/** The most job listings one reuseChecker spends. */
+export const REUSE_LOOKUPS_MAX = 40;
+
+/**
+ * Finds runs that reused their merged pull request's verified run (#3709): such
+ * a run uploads no artifact and its `reuse` job succeeds, because every suite
+ * job was skipped. It holds no flake evidence, so flake counts leave it out of
+ * their runs and their denominator (#3725). A run with any artifact costs no
+ * call. A run with none costs one job listing, at most REUSE_LOOKUPS_MAX per
+ * checker; past the cap, or when the listing fails, the run counts as it did
+ * before #3725 and note() says so.
+ */
+export function reuseChecker(client: GhClient, repo: string) {
+  let lookups = 0;
+  let unchecked = 0;
+  let reason = '';
+  return {
+    reused(run: Pick<CiRun, 'id' | 'attempt'>, artifactNames: string[]): boolean {
+      if (artifactNames.length) return false;
+      if (lookups >= REUSE_LOOKUPS_MAX) { unchecked++; reason ||= `cap of ${REUSE_LOOKUPS_MAX} job listings reached`; return false; }
+      lookups++;
+      try {
+        return listRunJobs(client, repo, run.id, run.attempt).some(job => job.name === 'reuse' && job.conclusion === 'success');
+      } catch (error) { unchecked++; reason ||= unavailableReason(error); return false; }
+    },
+    note: (): string | undefined => (unchecked
+      ? `${unchecked} run(s) with no artifacts not checked for main-push reuse (${reason}); counted as before #3725` : undefined),
+  };
+}
 
 /**
  * Rank files by the share of runs in which they needed the retry pass. A file
@@ -278,9 +317,10 @@ export function rankFlakyFiles(runEntries: Map<number, FlakeLedgerEntry[]>, runC
 /**
  * Read the flake ledgers of main's completed free-tests runs: the runs created
  * in the last `sinceDays`, widened to the newest `minRuns` runs (within
- * `maxLookbackDays`) so the 5% rule has a window of at least 20 runs. A run
- * with no `flake-ledger-*` artifact had no flaky passes (the upload is skipped
- * when the ledger file does not exist).
+ * `maxLookbackDays`) so the 5% rule has a window of at least 20 runs. Reused
+ * main pushes (reuseChecker) are left out and older runs take their place. A
+ * run with no `flake-ledger-*` artifact had no flaky passes (the upload is
+ * skipped when the ledger file does not exist).
  */
 export function readCiFlakeLedgers(opts: { client: GhClient; repo: string; sinceDays: number; now: number; cacheDir: string;
   minRuns?: number; maxLookbackDays?: number; workflow?: string }): FlakeWindow {
@@ -289,16 +329,25 @@ export function readCiFlakeLedgers(opts: { client: GhClient; repo: string; since
   const all = listWorkflowRuns(opts.client, opts.repo, opts.workflow ?? 'free-tests.yml',
     { since: iso(Math.max(opts.sinceDays, opts.maxLookbackDays ?? 60)), branch: 'main' })
     .filter(run => run.conclusion === 'success' || run.conclusion === 'failure');
-  const recent = all.filter(run => run.createdAt >= iso(opts.sinceDays));
-  const window = recent.length >= minRuns ? recent : all.slice(0, minRuns);
+  const since = iso(opts.sinceDays);
+  const recent = all.filter(run => run.createdAt >= since).length;
   const fetcher = historyFetcher(opts.client);
+  const reuse = reuseChecker(opts.client, opts.repo);
+  const window: CiRun[] = [];
+  let skipped = 0;
+  for (const [index, run] of all.entries()) {
+    if (index >= recent && window.length >= minRuns) break;
+    if (reuse.reused(run, fetcher.listArtifacts(opts.repo, run.id).map(artifact => artifact.name))) skipped++;
+    else window.push(run);
+  }
   const runEntries = new Map<number, FlakeLedgerEntry[]>();
   for (const run of window) {
     const dirs = downloadRunArtifacts({ repo: opts.repo, run, cacheDir: opts.cacheDir, fetcher, match: name => name.startsWith('flake-ledger-') });
     const entries = dirs.flatMap(readFlakeLedgerDir);
     if (entries.length) runEntries.set(run.id, entries);
   }
-  return rankFlakyFiles(runEntries, window.length, window[window.length - 1]?.createdAt ?? iso(opts.sinceDays));
+  const note = reuse.note();
+  return { ...rankFlakyFiles(runEntries, window.length, window[window.length - 1]?.createdAt ?? since), skipped, ...(note ? { note } : {}) };
 }
 
 /** Markdown table of one run's merged flake ledgers, for a job summary. */

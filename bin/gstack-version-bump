@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 // gstack-version-bump — deterministic version-state classifier + writer for /ship.
 //
 // Extracted from ship Step 12 prose (v2 plan T9, hybrid CLI extraction). The
@@ -25,8 +25,22 @@
 //       the caller must handle), exit 2 on bad args / unresolvable base /
 //       broken version source.
 //
-//   write --version <X.Y.Z.W> [--version-path <p>] [--regen-digest]
+//   write --version <X.Y.Z.W> [--version-path <p>] [--regen-digest] [--changelog <p>] [--manifest-form npm|full]
 //       Validates the 4-digit pattern, writes VERSION + package.json.version.
+//       --manifest-form full: the manifest and its npm lockfiles carry the
+//       version as written instead of the npm-valid translation (default
+//       npm). For repos whose declared convention is a four-part manifest
+//       (gbrain); gstack-restamp passes it only when the policy lists the
+//       manifest as a stamp file and the base's copy holds four parts. No
+//       effect when the version path is itself a JSON manifest.
+//       --changelog <p> (opt-in): re-head the branch's `## [Unreleased]`
+//       entry in <p> as `## [<version>] - <UTC date>` at the top, with
+//       lib/changelog-check's reheadChangelog — the same function
+//       gstack-restamp uses, so a later restamp finds the heading already in
+//       place (or moves it again as the branch's own stamp). No [Unreleased]
+//       section, or an absent file, is a no-op. Duplicate headings refuse with
+//       exit 2 before anything is written. restamp never passes the flag: under
+//       stamp-at-merge it stays the only owner of the re-heading.
 //       --regen-digest (opt-in): additionally run the target repo's own
 //       scripts/gen-agents-digest.ts when present, so the version-stamped
 //       committed digest stays freshness-green through the bump. Executes
@@ -66,6 +80,8 @@
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { bunIsolationArgs } from "../lib/bun-isolation";
+import { checkChangelog, parseChangelog, reheadChangelog } from "../lib/changelog-check";
 import {
   extractVersion,
   isJsonVersionPath,
@@ -391,7 +407,7 @@ function regenAgentsDigest(versionPath: string, optedIn: boolean): boolean | nul
   const gen = join(root, "scripts", "gen-agents-digest.ts");
   if (!existsSync(gen) || !existsSync(join(root, "agents-digest", "gstack-AGENTS.md"))) return null;
   try {
-    execFileSync("bun", [gen], { cwd: root, stdio: "pipe", timeout: 30_000 });
+    execFileSync("bun", [...bunIsolationArgs(), gen], { cwd: root, stdio: "pipe", timeout: 30_000 });
     return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -403,12 +419,50 @@ function regenAgentsDigest(versionPath: string, optedIn: boolean): boolean | nul
   }
 }
 
+interface ChangelogPlan { rel: string; text: string | null; detail: string }
+
+/**
+ * --changelog: computed before any write, so a CHANGELOG the re-heading
+ * cannot handle (duplicate headings) refuses with nothing written. Only an
+ * existing [Unreleased] section moves; released sections are never renamed.
+ */
+function planChangelog(cwd: string, args: string[], version: string): ChangelogPlan | null {
+  if (!args.includes("--changelog")) return null;
+  const rel = argVal(args, "--changelog");
+  if (!rel || rel.startsWith("--")) fail("write: --changelog needs a path (for example --changelog CHANGELOG.md)", 2);
+  assertRepoContained(cwd, rel, "--changelog");
+  const p = join(cwd, rel);
+  if (!existsSync(p)) return { rel, text: null, detail: `${rel} absent` };
+  const text = readFileSync(p, "utf-8");
+  if (!parseChangelog(text).sections.some((s) => s.unreleased)) return { rel, text: null, detail: "no [Unreleased] section" };
+  const r = reheadChangelog(text, { from: null, to: version, date: new Date().toISOString().slice(0, 10), file: rel });
+  if (r.error) fail(`write: ${r.error.path}: ${r.error.message}. Nothing written.`, 2);
+  if (!r.moved) return { rel, text: null, detail: `already headed ${version}` };
+  const errors = checkChangelog(r.text, version, rel);
+  if (errors.length) fail(`write: ${errors[0]!.path}: ${errors[0]!.message}. Nothing written.`, 2);
+  return { rel, text: r.text, detail: `Unreleased -> ${version}` };
+}
+
+function writeChangelog(cwd: string, plan: ChangelogPlan | null): { changelog: { path: string; moved: boolean; detail: string } } | Record<string, never> {
+  if (!plan) return {};
+  if (plan.text !== null) {
+    try {
+      writeFileSync(join(cwd, plan.rel), plan.text);
+    } catch {
+      fail(`write: the version files were written but ${plan.rel} was not. Re-run write with the same --version and --changelog.`, 3);
+    }
+  }
+  return { changelog: { path: plan.rel, moved: plan.text !== null, detail: plan.detail } };
+}
+
 function cmdWrite(args: string[], cwd: string): void {
   const version = argVal(args, "--version");
   if (!version) fail("write requires --version <X.Y.Z.W>", 2);
   if (!VERSION_RE.test(version!)) {
     fail(`NEW_VERSION (${version}) does not match MAJOR.MINOR.PATCH[.MICRO]. Aborting.`, 2);
   }
+  const manifestForm = argVal(args, "--manifest-form") ?? "npm";
+  if (manifestForm !== "npm" && manifestForm !== "full") fail("write: --manifest-form needs npm|full", 2);
   const src = versionSource(cwd, argVal(args, "--version-path"));
   if (src.outcome === "broken") failBroken(src, "write");
   if (src.outcome !== "valid") {
@@ -430,6 +484,7 @@ function cmdWrite(args: string[], cwd: string): void {
     // npm rejects forever — with no drift state to catch it (a JSON source is
     // self-consistent by construction).
     const jsonV = npmVersion(version!);
+    const changelogPlan = planChangelog(cwd, args, jsonV);
     let manifestWritten = false;
     let lockSynced: string[] = [];
     try {
@@ -465,6 +520,7 @@ function cmdWrite(args: string[], cwd: string): void {
         // here: a JSON-manifest version source implies no plain VERSION file
         // for the digest generator to stamp.
         agentsDigest: null,
+        ...writeChangelog(cwd, changelogPlan),
       }) + "\n",
     );
     return;
@@ -472,6 +528,7 @@ function cmdWrite(args: string[], cwd: string): void {
 
   const pkgPath = resolvePkgPath(cwd, argVal(args, "--package-json-path"));
   const hasPkg = existsSync(pkgPath);
+  const changelogPlan = planChangelog(cwd, args, version!);
   writeFileSync(versionPath, version + "\n");
   const digestRegen = regenAgentsDigest(versionPath, args.includes("--regen-digest"));
   let lockSynced: string[] = [];
@@ -479,7 +536,8 @@ function cmdWrite(args: string[], cwd: string): void {
   // 3-digit translation — npm rejects a fourth component, so mirroring the
   // raw 4-digit form breaks `npm ci` in any repo npm actually manages.
   // VERSION keeps the full 4-digit form; it stays the source of truth.
-  const manifestV = npmVersion(version!);
+  // --manifest-form full keeps a repo's declared four-part manifest as is.
+  const manifestV = manifestForm === "full" ? version! : npmVersion(version!);
   if (hasPkg) {
     let pkgWritten = false;
     try {
@@ -510,6 +568,7 @@ function cmdWrite(args: string[], cwd: string): void {
       packageLock: lockSynced.length > 0,
       // null = not the gstack repo (no digest to regen); true/false = regen outcome
       agentsDigest: digestRegen,
+      ...writeChangelog(cwd, changelogPlan),
     }) + "\n",
   );
 }

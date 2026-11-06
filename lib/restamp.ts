@@ -24,7 +24,10 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { bunIsolationArgs } from './bun-isolation';
 import { checkChangelog, mergeChangelogs, parseChangelog, reheadChangelog } from './changelog-check';
+import { effectiveBump, foldIntoUnreleased, readFragments, type FragmentSet } from './changelog-fragments';
+import { releaseRefusal } from './restamp-release';
 import { type ResultCodeName } from './result-codes';
 import { runScriptSync, wtreeFingerprint } from './script-invocation';
 import {
@@ -55,7 +58,8 @@ export interface RestampOptions {
   repoRoot: string; base: string; version?: string; next?: boolean; bump?: Bump; queueMode?: QueueMode;
   after?: { pr: string; ref?: string }; pr?: string; expectBase?: string; expectOrder?: string[]; was?: string;
   policyFrom: 'base' | 'head'; allowRepoCommands: boolean; dryRun: boolean; now?: Date; env?: NodeJS.ProcessEnv;
-  gh?: (args: string[]) => { ok: boolean; out: string }; failAfter?: string; gateWorktree?: string;
+  gh?: (args: string[]) => { ok: boolean; out: string }; failAfter?: string; gateWorktree?: string; baseRef?: string;
+  /** Versions at release (lib/restamp-release.ts): fold every fragment on the base, from a clean checkout of it. */ release?: boolean;
 }
 export interface RestampResult {
   status: 'stamped' | 'noop' | 'dry-run' | 'refused' | 'failed' | 'gate-ahead';
@@ -67,7 +71,7 @@ export interface RestampResult {
 
 function sha256(buf: Buffer | string): string { return createHash('sha256').update(buf).digest('hex'); }
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; out: string; err: string; status: number | null } {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, env: env ?? process.env });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, env: env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
   return { ok: r.status === 0, out: (r.stdout ?? '').replace(/\n$/, ''), err: (r.stderr ?? '').trim(), status: r.status };
 }
 class Refusal extends Error { constructor(public code: ResultCodeName, message: string, public extra: Partial<RestampResult> = {}) { super(message); } }
@@ -127,27 +131,48 @@ function queueOrderCheck(o: RestampOptions, baseSha: string): void {
     actual[pr] = merged ? (inBase ? 'merged' : 'merged-not-in-base') : String(info.state ?? 'unknown').toLowerCase();
   }
   const stale = [...ahead.filter(pr => actual[pr] !== 'merged'), ...behind.filter(pr => actual[pr]?.startsWith('merged'))];
-  if (stale.length) {
-    throw new Refusal('QUEUE_STALE', `queue order moved: ${stale.map(pr => `#${pr}=${actual[pr]}`).join(', ')}`, {
-      expected: { order: o.expectOrder, base: o.expectBase ?? null }, actual: { prs: actual, base: baseSha },
-      recompute: `gstack-restamp --next --base ${o.base} --expect-base ${baseSha}${mine ? ` --pr ${mine}` : ''} --expect-order ${o.expectOrder.join(',')}`,
-    });
-  }
+  if (!stale.length) return;
+  // The recompute command is the corrected order, never the stale list again: this PR first (a list that left it out read
+  // every entry as a predecessor), PRs merged into the local base dropped, an unmerged predecessor kept ahead because it
+  // still has to merge first. A predecessor GitHub calls merged that the local base does not carry stays ahead too: the
+  // recompute pins --expect-base to that local base, and dropping the PR would let it allocate the version the
+  // predecessor already took (pre-landing review, pass 1); the lane fetches the base and the entry reads merged.
+  const corrected = correctedOrder(o.expectOrder, mine, actual);
+  const waitingOn = ahead.filter(pr => actual[pr] !== 'merged' && actual[pr] !== 'merged-not-in-base');
+  const unfetched = ahead.filter(pr => actual[pr] === 'merged-not-in-base');
+  const why = mine && idx < 0 ? `; --pr ${mine} is not in --expect-order, so every listed PR read as a predecessor: list this PR first, then the remaining order`
+    : [waitingOn.length ? `${waitingOn.map(pr => `#${pr}`).join(', ')} must merge before this PR stamps` : '',
+      unfetched.length ? `${unfetched.map(pr => `#${pr}`).join(', ')} merged but the local ${o.base} does not carry the merge yet: git fetch origin ${o.base}, then rerun` : '']
+      .filter(Boolean).map(s => `; ${s}`).join('');
+  throw new Refusal('QUEUE_STALE', `queue order moved: ${stale.map(pr => `#${pr}=${actual[pr]}`).join(', ')}${why}`, {
+    expected: { order: o.expectOrder, base: o.expectBase ?? null }, actual: { prs: actual, base: baseSha },
+    recompute: `gstack-restamp --next --base ${o.base} --expect-base ${baseSha.slice(0, 12)}${mine ? ` --pr ${mine}` : ''} --expect-order ${corrected.join(',')}`,
+    ...(unfetched.length ? { fix: `git fetch origin ${o.base}` } : {}),
+  });
+}
+
+/**
+ * The --expect-order to run next: this PR first when the list left it out, every PR merged into the local base dropped,
+ * the rest (open PRs and merges the local base does not carry yet) in their order.
+ */
+export function correctedOrder(order: readonly string[], mine: string | null, actual: Record<string, string>): string[] {
+  const rest = order.filter(pr => actual[pr] !== 'merged');
+  return mine && !order.includes(mine) ? [mine, ...rest] : rest;
 }
 
 interface Plan {
   policy: ShipPolicy; policyLabel: string; queueMode: QueueMode; oldVersion: string; newVersion: string; versionRel: string;
-  baseVersion: string; branchStamp: string | null; forkVersion: string; baseSha: string; baseRef: string; claims: string; level: Bump; predecessor?: { pr: string; head: string };
+  baseVersion: string; branchStamp: string | null; forkVersion: string; recorded: ReadonlySet<string>; baseSha: string; baseRef: string; claims: string; level: Bump; predecessor?: { pr: string; head: string };
 }
 
 function planVersions(o: RestampOptions, loaded: LoadedPolicy, policyLabel: string): Plan {
-  const baseRef = `origin/${o.base}`;
+  const baseRef = o.baseRef ?? `origin/${o.base}`;
   const baseSha = git(o.repoRoot, ['rev-parse', '--verify', '--quiet', `${baseRef}^{commit}`]);
   if (!baseSha.ok) throw new Refusal('POLICY_SOURCE_UNAVAILABLE', `${baseRef} is not a resolvable commit; nothing written`, { fix: `git fetch origin ${o.base} --depth=1` });
   if (o.expectBase && !baseSha.out.startsWith(o.expectBase)) {
     throw new Refusal('QUEUE_STALE', `base moved: expected ${o.expectBase}, ${baseRef} is ${baseSha.out}`, {
       expected: { base: o.expectBase }, actual: { base: baseSha.out },
-      recompute: `gstack-restamp --next --base ${o.base} --expect-base ${baseSha.out.slice(0, 12)}${o.expectOrder?.length ? ` --expect-order ${o.expectOrder.join(',')}` : ''}`,
+      recompute: `gstack-restamp --next --base ${o.base} --expect-base ${baseSha.out.slice(0, 12)}${o.pr ? ` --pr ${o.pr}` : ''}${o.expectOrder?.length ? ` --expect-order ${correctedOrder(o.expectOrder, o.pr ?? null, {}).join(',')}` : ''}`,
     });
   }
   queueOrderCheck(o, baseSha.out);
@@ -174,11 +199,11 @@ function planVersions(o: RestampOptions, loaded: LoadedPolicy, policyLabel: stri
   } else if (o.version) {
     if (!parseVersion(o.version)) throw new Refusal('RESTAMP_VERSION_SOURCE', `--version ${o.version} is not MAJOR.MINOR.PATCH[.MICRO]; nothing written`);
     newVersion = o.version;
-  } else if (queueMode === 'stamp-at-merge') {
+  } else if (queueMode === 'stamp-at-merge' || o.release) {
     newVersion = bumped(atBase.version, level);
     claims = 'ignored (stamp-at-merge)';
   } else {
-    const r = spawnSync(process.execPath, [path.join(BIN_DIR, 'gstack-next-version'), '--base', o.base, '--bump', level, '--current-version', atBase.version], { cwd: o.repoRoot, encoding: 'utf8', timeout: 120_000, env: o.env ?? process.env });
+    const r = spawnSync(process.execPath, [...bunIsolationArgs(), path.join(BIN_DIR, 'gstack-next-version'), '--base', o.base, '--bump', level, '--current-version', atBase.version], { cwd: o.repoRoot, encoding: 'utf8', timeout: 120_000, env: o.env ?? process.env });
     let q: any = null;
     try { q = JSON.parse(r.stdout ?? ''); } catch {}
     const usable = r.status === 0 && q && typeof q.version === 'string' && parseVersion(q.version) && (q.offline === false || q.fallback === 'git');
@@ -191,7 +216,7 @@ function planVersions(o: RestampOptions, loaded: LoadedPolicy, policyLabel: stri
   }
   // The branch's own tentative stamp: its VERSION when it moved past base; else nothing (mentions come from the lines it added).
   const branchStamp = oldVersion !== atBase.version ? oldVersion : null;
-  return { policy, policyLabel, queueMode, oldVersion, newVersion, versionRel: atBase.rel, baseVersion: atBase.version, branchStamp, forkVersion: forkVersion(o.repoRoot, baseRef, atBase.version), baseSha: baseSha.out, baseRef, claims, level, predecessor };
+  return { policy, policyLabel, queueMode, oldVersion, newVersion, versionRel: atBase.rel, baseVersion: atBase.version, branchStamp, forkVersion: forkVersion(o.repoRoot, baseRef, atBase.version), recorded: recordedVersions(o.repoRoot, baseRef, atBase.version), baseSha: baseSha.out, baseRef, claims, level, predecessor };
 }
 
 /** The version writer's own files: the version source, the manifest (root or pinned) and the npm lockfiles beside it. */
@@ -201,6 +226,19 @@ export function versionFiles(root: string, versionRel: string): string[] {
   const dir = path.dirname(pkgRel) === '.' ? '' : path.dirname(pkgRel) + '/';
   return [versionRel, pkgRel, ...NPM_LOCKFILES.map(l => dir + l)];
 }
+/**
+ * The manifest's path when the repo's convention is a four-part manifest: the policy lists it as a
+ * stamp file and the base's copy holds a four-part version (gbrain). Read at the base, like the
+ * policy, so a branch an older restamp cut to three parts heals. Otherwise null, and the writer
+ * stores the npm-valid three-part form (decision 11; gstack's own manifest).
+ */
+function manifestKeepsFourParts(plan: Plan, root: string): string | null {
+  const pkgRel = versionFiles(root, plan.versionRel)[1]!;
+  if (pkgRel === plan.versionRel || !matchesAny([...plan.policy.stamp_paths, ...plan.policy.stamp_files], pkgRel)) return null;
+  const atBase = git(root, ['show', `${plan.baseSha}:${pkgRel}`]);
+  const version = atBase.ok ? extractVersion(atBase.out, pkgRel) : '';
+  return version && versionWidth(version) === 4 ? pkgRel : null;
+}
 function allowedOutput(plan: Plan, root: string, rel: string): boolean {
   const p = plan.policy;
   if (versionFiles(root, plan.versionRel).includes(rel)) return true;
@@ -208,18 +246,23 @@ function allowedOutput(plan: Plan, root: string, rel: string): boolean {
   return matchesAny(p.stamp_paths, rel) || matchesAny(p.stamp_files, rel) || matchesAny(p.release_outputs, rel);
 }
 
-interface Hunk { removed: string[]; added: string[]; at: number }
+interface Hunk { removed: string[]; added: string[]; at: number; addedAt: number[]; removedAt: number[] }
 export interface FileDiff { path: string; binary: boolean; hunks: Hunk[]; status: 'M' | 'A' | 'D' | 'R'; modeChanged?: boolean }
 
 /**
  * Parse `git diff --unified=0` into per-file hunks of removed/added lines (shared with lib/tree-receipt.ts).
  * File headers come only before a file's first hunk: inside a hunk every `-`/`+` line is content, so a
  * body line that begins `--` or `++` (`---`/`+++` in the diff) is never dropped as a header.
+ * `addedAt` holds each added line's 1-based position on the new side, counted through any context
+ * line the hunk carries (`diff.interHunkContext` can join hunks under `--unified=0`), and `removedAt` each removed
+ * line's position on the old side, counted the same way.
  */
 export function parseUnifiedDiff(text: string): FileDiff[] {
   const files: FileDiff[] = [];
   let cur: FileDiff | null = null;
   let hunk: Hunk | null = null;
+  let cursor = 0;
+  let oldCursor = 0;
   for (const line of text.split('\n')) {
     if (line.startsWith('diff --git ')) {
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
@@ -232,76 +275,145 @@ export function parseUnifiedDiff(text: string): FileDiff[] {
     else if (!hunk && (line.startsWith('old mode ') || line.startsWith('new mode '))) cur.modeChanged = true;
     else if (line.startsWith('rename to ')) cur.status = 'R';
     else if (line.startsWith('Binary files')) cur.binary = true;
-    else if (line.startsWith('@@')) { hunk = { removed: [], added: [], at: Number(/^@@ -\d+(?:,\d+)? \+(\d+)/.exec(line)?.[1] ?? 0) }; cur.hunks.push(hunk); }
-    else if (hunk && line.startsWith('-')) hunk.removed.push(line.slice(1));
-    else if (hunk && line.startsWith('+')) hunk.added.push(line.slice(1));
+    else if (line.startsWith('@@')) {
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
+      hunk = { removed: [], added: [], at: Number(m?.[2] ?? 0), addedAt: [], removedAt: [] }; cursor = hunk.at; oldCursor = Number(m?.[1] ?? 0); cur.hunks.push(hunk);
+    }
+    else if (hunk && line.startsWith('-')) { hunk.removed.push(line.slice(1)); hunk.removedAt.push(oldCursor); oldCursor += 1; }
+    else if (hunk && line.startsWith('+')) { hunk.added.push(line.slice(1)); hunk.addedAt.push(cursor); cursor += 1; }
+    else if (hunk && line.startsWith(' ')) { cursor += 1; oldCursor += 1; }
   }
   return files;
 }
 
-/** The lines a branch itself added, per stamp file: `git diff --unified=0 <since> -- <files>` in `cwd` against its working tree. */
-export function branchAddedLines(cwd: string, since: string, files: string[]): Map<string, Set<string>> {
-  const out = new Map<string, Set<string>>();
+/** The lines a branch itself added to one file: their text, and their 1-based positions in the working-tree file. */
+export interface AddedLines { text: Set<string>; at: Set<number>; /** Lines the diff shows that `notOwn` names: the base's, left out. */ notOwn: number }
+
+/**
+ * The lines a branch itself added, per stamp file: `git diff --unified=0 <since> -- <files>` in `cwd`
+ * against its working tree (or against `to` when given). Positions are the parser's per-line count
+ * on the new side (context lines included, and `--inter-hunk-context=0` keeps a
+ * `diff.interHunkContext` setting from joining hunks), so a base line whose text equals an added
+ * line, or a CRLF checkout whose diff is LF-normalized, is told apart by position. A line in
+ * `notOwn` for the file (the base's own additions since `since`) is never the branch's: when the
+ * base is merged into the working tree uncommitted, HEAD still forks before that merge and the
+ * diff from the fork carries every line the base added since, main's own release keys included
+ * (train 24, 2026-10-27: `DOCS_CAPS_KEY_VERSION` from #3511 moved in both slots).
+ */
+export function branchAddedLines(cwd: string, since: string, files: string[], to?: string, notOwn?: Map<string, AddedLines>): Map<string, AddedLines> {
+  const out = new Map<string, AddedLines>();
   if (files.length === 0) return out;
-  const diff = git(cwd, ['diff', '--unified=0', '--no-color', '--no-ext-diff', since, '--', ...files]);
+  const diff = git(cwd, ['diff', '--unified=0', '--inter-hunk-context=0', '--no-color', '--no-ext-diff', since, ...(to ? [to] : []), '--', ...files]);
+  // A failed diff must not read as "the branch added nothing" (or "the base added nothing"), which would move the base's lines again.
+  if (!diff.ok) throw new Refusal('POLICY_SOURCE_UNAVAILABLE', `cannot diff ${since.slice(0, 12)}..${to ? to.slice(0, 12) : 'the worktree'} for the stamp_paths stage (${(diff.err || diff.out).split('\n')[0]}); nothing written`);
   for (const f of parseUnifiedDiff(diff.out)) {
-    const set = out.get(f.path) ?? new Set<string>();
-    for (const h of f.hunks) for (const a of h.added) set.add(a);
-    out.set(f.path, set);
+    const own = out.get(f.path) ?? { text: new Set<string>(), at: new Set<number>(), notOwn: 0 };
+    const base = notOwn?.get(f.path)?.text;
+    for (const h of f.hunks) h.added.forEach((a, i) => { if (base?.has(a)) { own.notOwn += 1; return; } own.text.add(a); own.at.add(h.addedAt[i]!); });
+    out.set(f.path, own);
   }
   return out;
 }
 
+export const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const VERSION_RE = '(?<v>\\d+(?:\\.\\d+){1,3})(?![0-9.])';
 /**
- * The branch's tentative stamps: versions it mentions in a stamp pattern, on
- * lines it added itself, newer than the version at its fork point and not
- * the allocated one. A released version is never newer than the fork point
- * of a branch written against it, and the repo's own version width must
- * match, so a 3-digit dependency pin in a 4-digit repo is never a candidate.
+ * The built-in stamp forms as scanners, the version in the `v` group: `(was X)`, `since: X` and `vX`.
+ * A quote may wrap X in the first two (`since: 'X'`, `(was "X")`); an opened quote must close right
+ * after X, so `since: '1.2.3-beta'` and `since: '1.2.3"` are not the form.
  */
-export function tentativeMentions(added: Map<string, Set<string>>, forkVersion: string, newVersion: string): string[] {
+const BUILT_IN_MENTIONS: readonly RegExp[] = [
+  new RegExp(`\\(was (['"]?)${VERSION_RE}(?=\\1\\))`, 'g'),
+  new RegExp(`since:\\s*(['"]?)${VERSION_RE}(?=\\1)`, 'g'),
+  new RegExp(`(?<![A-Za-z0-9.])v${VERSION_RE}`, 'g'),
+];
+/** A policy `stamp_patterns` template (one `{version}` slot) as a scanner, the version in the `v` group at a version boundary. */
+function templateMention(template: string): RegExp {
+  const [pre, post] = template.split(VERSION_SLOT) as [string, string];
+  return new RegExp(`${escapeRegExp(pre)}(?<![0-9.])${VERSION_RE}${escapeRegExp(post)}`, 'g');
+}
+
+/**
+ * The branch's tentative stamps: versions it mentions in a stamp form (the
+ * built-in ones and the policy's `stamp_patterns` templates), on lines it
+ * added itself, newer than the version at its fork point and not the
+ * allocated one. A released version is never newer than the fork point of a
+ * branch written against it, and the repo's own version width must match, so
+ * a 3-digit dependency pin in a 4-digit repo is never a candidate. With
+ * `recorded`, a built-in form above the allocated version counts only when the
+ * branch recorded it (GST-1245); a `stamp_patterns` slot keeps the fork bound.
+ */
+export function tentativeMentions(added: Map<string, Set<string>>, forkVersion: string, newVersion: string, templates: readonly string[] = [], recorded?: ReadonlySet<string>): string[] {
   const fork = parseVersion(forkVersion);
+  const ceiling = parseVersion(newVersion);
   if (!fork) return [];
   const width = versionWidth(forkVersion);
+  const scanners = [...BUILT_IN_MENTIONS, ...templates.map(templateMention)];
   const found = new Set<string>();
   for (const lines of added.values()) {
     for (const text of lines) {
-      for (const m of text.matchAll(/(?:\(was |since:\s*|(?<![A-Za-z0-9.])v)(\d+(?:\.\d+){1,3})(?![0-9.])/g)) {
-        const raw = m[1]!;
-        const v = parseVersion(raw);
-        if (!v || versionWidth(raw) !== width || raw === newVersion || cmpVersion(v, fork) <= 0) continue;
-        found.add(raw);
+      for (const re of scanners) {
+        for (const m of text.matchAll(re)) {
+          const raw = m.groups!.v!;
+          const v = parseVersion(raw);
+          if (!v || versionWidth(raw) !== width || raw === newVersion || cmpVersion(v, fork) <= 0) continue;
+          if (recorded && !recorded.has(raw) && BUILT_IN_MENTIONS.includes(re) && (!ceiling || cmpVersion(v, ceiling) > 0)) continue;
+          found.add(raw);
+        }
       }
     }
   }
   return [...found];
 }
 
+/** The versions one line mentions in a stamp form (the built-in forms unless `builtIn` is false, and the policy's `stamp_patterns` templates). */
+export function stampMentions(text: string, templates: readonly string[] = [], builtIn = true): Set<string> {
+  const found = new Set<string>();
+  for (const re of [...(builtIn ? BUILT_IN_MENTIONS : []), ...templates.map(templateMention)]) for (const m of text.matchAll(re)) found.add(m.groups!.v!);
+  return found;
+}
+
 /** The version at the branch's original fork point: the first parent of its oldest own commit (base when it has none). */
-export function forkVersion(repoRoot: string, baseRef: string, fallback: string): string {
-  const first = git(repoRoot, ['rev-list', '--reverse', '--first-parent', `${baseRef}..HEAD`]).out.split('\n')[0]?.trim();
+export function forkVersion(repoRoot: string, baseRef: string, fallback: string, head = 'HEAD'): string {
+  const first = git(repoRoot, ['rev-list', '--reverse', '--first-parent', `${baseRef}..${head}`]).out.split('\n')[0]?.trim();
   if (!first) return fallback;
   const v = versionAtRef(repoRoot, `${first}^`);
   return 'version' in v ? v.version : fallback;
 }
 
 /**
+ * The versions the branch itself recorded (GST-1245): its version source at its fork point and at each commit in
+ * `baseRef..head`, every parent walked, so a train or land merge (`-p <base> -p <pin>`) still reads the pin's own claims.
+ */
+export function recordedVersions(repoRoot: string, baseRef: string, fallback: string, head = 'HEAD'): Set<string> {
+  const out = new Set([forkVersion(repoRoot, baseRef, fallback, head)]);
+  for (const c of git(repoRoot, ['rev-list', `${baseRef}..${head}`]).out.split('\n').filter(Boolean)) {
+    const v = versionAtRef(repoRoot, c);
+    if ('version' in v) out.add(v.version);
+  }
+  return out;
+}
+
+/**
  * Exact `(was X)`, `since: X`, `vX` rewrites plus the policy's literal
  * `stamp_patterns` templates (one `{version}` slot, matched at a version
- * boundary); anything else in the file stays.
+ * boundary); anything else in the file stays. A quote around X in the
+ * `(was X)` and `since: X` forms (`since: 'X'`, `(was "X")`, the shape of a
+ * quoted source row) is matched and kept as written when it closes right after
+ * X (`since: '1.2.3-beta'` and `since: '1.2.3"` are not the form); `vX`
+ * already accepts a quote before the `v`.
  */
-export function rewriteStamps(text: string, oldVersion: string, newVersion: string, templates: readonly string[] = []): { text: string; count: number } {
-  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const v = esc(oldVersion);
-  const patterns: Array<[RegExp, string]> = [
-    [new RegExp(`\\(was ${v}\\)`, 'g'), `(was ${newVersion})`],
-    [new RegExp(`(since:\\s*)${v}(?![0-9.])`, 'g'), `$1${newVersion}`],
-    [new RegExp(`(?<![A-Za-z0-9.])v${v}(?![0-9.])`, 'g'), `v${newVersion}`],
-    ...templates.map(t => { const [pre, post] = t.split(VERSION_SLOT) as [string, string]; return [new RegExp(`${esc(pre)}(?<![0-9.])${v}(?![0-9.])${esc(post)}`, 'g'), `${pre}${newVersion}${post}`.replace(/\$/g, '$$$$')] as [RegExp, string]; }),
+export function rewriteStamps(text: string, oldVersion: string, newVersion: string, templates: readonly string[] = [], builtIn = true): { text: string; count: number } {
+  const v = escapeRegExp(oldVersion);
+  const patterns: Array<[RegExp, (...m: string[]) => string]> = [
+    [new RegExp(`\\(was (['"]?)${v}\\1\\)`, 'g'), (_, q) => `(was ${q}${newVersion}${q})`],
+    [new RegExp(`(since:\\s*)(['"]?)${v}(?![0-9.])(?=\\2)`, 'g'), (_, pre, q) => `${pre}${q}${newVersion}`],
+    [new RegExp(`(?<![A-Za-z0-9.])v${v}(?![0-9.])`, 'g'), () => `v${newVersion}`],
+    ...templates.map(t => { const [pre, post] = t.split(VERSION_SLOT) as [string, string]; return [new RegExp(`${escapeRegExp(pre)}(?<![0-9.])${v}(?![0-9.])${escapeRegExp(post)}`, 'g'), () => `${pre}${newVersion}${post}`] as [RegExp, () => string]; }),
   ];
   let count = 0;
   let out = text;
-  for (const [re, rep] of patterns) {
+  for (const [re, rep] of builtIn ? patterns : patterns.slice(3)) {
     count += (out.match(re) ?? []).length;
     out = out.replace(re, rep);
   }
@@ -332,7 +444,7 @@ function linkIgnoredDeps(repoRoot: string, staging: string): void {
  */
 function runRestampCommand(command: string, plan: Plan, staging: string, env: NodeJS.ProcessEnv, before: Set<string>, s: StageRecord): void {
   const seeded = git(staging, ['write-tree']).out;
-  const r = spawnSync('sh', ['-c', `${command} "$1"`, 'sh', plan.newVersion], { cwd: staging, encoding: 'utf8', timeout: 600_000, env: { ...env, GSTACK_RESTAMP_VERSION: plan.newVersion } });
+  const r = spawnSync('sh', ['-c', `${command} "$1"`, 'sh', plan.newVersion], { cwd: staging, encoding: 'utf8', timeout: 600_000, env: { ...env, GSTACK_RESTAMP_VERSION: plan.newVersion, GSTACK_RESTAMP_BASE_SHA: plan.baseSha } });
   git(staging, ['read-tree', seeded]);
   if (r.status !== 0) { s.status = 'failed'; s.detail = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim().slice(0, 300); throw new Refusal('RESTAMP_RELEASE_TOOL_FAILED', `restamp_command exited ${r.status}: ${s.detail}; nothing written to the branch`); }
   const outside = changedPaths(staging).filter(p => !before.has(p) && !allowedOutput(plan, staging, p));
@@ -354,9 +466,10 @@ function runStages(o: RestampOptions, plan: Plan, staging: string, since: string
   const v = stage('version');
   if (command) { v.status = 'skipped'; v.detail = 'restamp_command owns the version'; }
   else {
-    const w = spawnSync(process.execPath, [path.join(BIN_DIR, 'gstack-version-bump'), 'write', '--version', plan.newVersion], { cwd: staging, encoding: 'utf8', timeout: 120_000, env });
+    const full = manifestKeepsFourParts(plan, staging);
+    const w = spawnSync(process.execPath, [...bunIsolationArgs(), path.join(BIN_DIR, 'gstack-version-bump'), 'write', '--version', plan.newVersion, ...(full ? ['--manifest-form', 'full'] : [])], { cwd: staging, encoding: 'utf8', timeout: 120_000, env });
     if (w.status !== 0) { v.status = 'failed'; v.detail = (w.stderr ?? '').trim().slice(0, 300); throw new Refusal('RESTAMP_VERSION_SOURCE', `gstack-version-bump write failed: ${v.detail}; nothing written`); }
-    v.status = 'done'; v.detail = `wrote ${plan.newVersion}`;
+    v.status = 'done'; v.detail = `wrote ${plan.newVersion}` + (full ? ` (${full} keeps four parts: a policy stamp file the base holds in four)` : '');
   }
   injected('version');
 
@@ -376,52 +489,110 @@ function runStages(o: RestampOptions, plan: Plan, staging: string, since: string
   if (clPath && fs.existsSync(clPath)) {
     const date = (o.now ?? new Date()).toISOString().slice(0, 10);
     const from = o.was ?? plan.branchStamp;
-    const r = reheadChangelog(fs.readFileSync(clPath, 'utf8'), { from, to: plan.newVersion, date, file: clRel! });
+    const dir = plan.policy.changelog_fragments?.dir;
+    const frags = dir ? readFragments(staging, null, dir, o.release ? null : plan.baseSha, clRel) : null;
+    if (frags?.errors.length) { cl.status = 'failed'; cl.detail = `${frags.errors[0]!.path}: ${frags.errors[0]!.message}`; throw new Refusal('CHANGELOG_FRAGMENT_INVALID', `${cl.detail}; nothing written to the branch`); }
+    for (const f of frags?.fragments ?? []) fs.rmSync(path.join(staging, f.path));
+    const r = reheadChangelog(foldIntoUnreleased(fs.readFileSync(clPath, 'utf8'), frags?.fragments ?? []), { from, to: plan.newVersion, date, file: clRel! });
     if (r.error) { cl.status = 'failed'; cl.detail = r.error.message; throw new Refusal(r.error.code, `${clRel}: ${r.error.message}; nothing written to the branch`); }
     if (r.moved) fs.writeFileSync(clPath, r.text);
-    const check = checkChangelog(fs.readFileSync(clPath, 'utf8'), plan.newVersion, clRel!);
-    if (check.length) { cl.status = 'failed'; cl.detail = check[0]!.message; throw new Refusal(check[0]!.code, `${check[0]!.path}: ${check[0]!.message}; nothing written to the branch`); }
-    cl.status = 'done'; cl.detail = r.moved ? `${r.from} -> ${r.to}` : `already headed ${plan.newVersion}`;
+    // Inherited duplicates are allowed at the larger count of two base readings: the base tip and
+    // `since`, the commit the branch's own lines are counted from (its fork point, or the predecessor's
+    // head in a gate-ahead stamp), so neither a duplicate main collapsed after the fork nor one it
+    // gained since refuses the PR. A reading the base cannot show (the PR adds the file) is named.
+    const readings = [...new Set([plan.baseSha, since])].map(sha => ({ sha, cl: git(o.repoRoot, ['show', `${sha}:${clRel}`]) }));
+    const readable = readings.filter(x => x.cl.ok);
+    const unreadable = readings.filter(x => !x.cl.ok).map(x => `${x.sha.slice(0, 12)}:${clRel}`);
+    const baseNote = unreadable.length === 0 ? '' : readable.length === 0
+      ? `; base ${clRel} unreadable at ${unreadable.join(', ')}, so every duplicate heading counts`
+      : `; base ${clRel} unreadable at ${unreadable.join(', ')}, inherited headings counted at ${readable.map(x => x.sha.slice(0, 12)).join(', ')} only`;
+    const check = checkChangelog(fs.readFileSync(clPath, 'utf8'), plan.newVersion, clRel!, readable.map(x => x.cl.out + '\n'));
+    if (check.length) { cl.status = 'failed'; cl.detail = check[0]!.message + baseNote; throw new Refusal(check[0]!.code, `${check[0]!.path}: ${check[0]!.message}${baseNote}; nothing written to the branch`); }
+    cl.status = 'done'; cl.detail = (r.moved ? `${r.from} -> ${r.to}` : `already headed ${plan.newVersion}`) + (frags?.fragments.length ? `; folded ${frags.fragments.map(f => f.path).join(', ')}` : '') + baseNote;
   } else { cl.status = 'skipped'; cl.detail = clRel ? `${clRel} absent` : 'changelog: null'; }
   injected('changelog');
 
-  const sp = stage('stamp_paths');
-  const stampGlobs = [...plan.policy.stamp_paths, ...plan.policy.stamp_files];
-  const templates = plan.policy.stamp_patterns;
-  if (stampGlobs.length === 0) { sp.status = 'skipped'; sp.detail = 'no stamp_paths in policy'; }
-  else {
-    const files = git(staging, ['ls-files', '-z']).out.split('\0').filter(f => f && matchesAny(stampGlobs, f));
-    for (const rel of files) {
-      const why = assertInsideRoot(staging, rel);
-      if (why) throw new Refusal('POLICY_CONTAINMENT', `${why}; nothing written`);
-    }
-    const added = branchAddedLines(staging, since, files);
-    const explicit = new Set([...(o.was ? [o.was] : []), ...(plan.branchStamp ? [plan.branchStamp] : [])].filter(v => v !== plan.newVersion));
-    const tentative = new Set(tentativeMentions(added, plan.forkVersion, plan.newVersion).filter(v => !explicit.has(v)));
-    let touched = 0;
-    let total = 0;
-    for (const rel of files) {
-      const abs = path.join(staging, rel);
-      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) continue;
-      const own = added.get(rel);
-      if (explicit.size === 0 && !own) continue;
-      let count = 0;
-      const out = fs.readFileSync(abs, 'utf8').split('\n').map(line => {
-        let text = line;
-        for (const old of explicit) { const r = rewriteStamps(text, old, plan.newVersion, templates); text = r.text; count += r.count; }
-        if (own?.has(line)) for (const old of tentative) { const r = rewriteStamps(text, old, plan.newVersion, templates); text = r.text; count += r.count; }
-        return text;
-      }).join('\n');
-      if (count) { fs.writeFileSync(abs, out); touched += 1; total += count; }
-    }
-    const olds = [...explicit, ...tentative];
-    sp.status = olds.length ? 'done' : 'skipped';
-    sp.detail = olds.length ? `${total} mention(s) in ${touched} file(s) (${olds.join(', ')} -> ${plan.newVersion})` : `no tentative mention newer than the fork version ${plan.forkVersion}`;
-  }
+  rewriteStampPaths(o, plan, staging, since, stage('stamp_paths'));
   injected('stamp_paths');
 
   const mi = stage('mirror');
   mi.status = 'skipped'; mi.detail = plan.policy.mirror ? `tier 2: declared ${plan.policy.mirror}, not run` : 'no mirror in policy';
+}
+
+/**
+ * The stamp_paths stage. An explicit old version (the branch's own stamp, or
+ * `--was`) is rewritten on every line of every stamp file; a tentative one
+ * (a mention newer than the fork version, or of the fork version itself: a
+ * row written at the version the branch forked from instead of a next one,
+ * GST-963) only on lines the branch added; above the new version an unrecorded
+ * one moves only inside a `stamp_patterns` slot (GST-1245): a third party's `vX` stays.
+ * With no explicit version the branch's VERSION equals the base's: either it
+ * never stamped, or it stamped X and the base reached X on its own (a PR that
+ * lost its slot and merged the base). Then a stamp-form mention of the base
+ * version on a line the branch added is its own tentative stamp, stale now,
+ * and moves; the same version on a line the base already carries is the
+ * base's release and stays. The detail names both counts per file.
+ */
+function rewriteStampPaths(o: RestampOptions, plan: Plan, staging: string, since: string, sp: StageRecord): void {
+  const stampGlobs = [...plan.policy.stamp_paths, ...plan.policy.stamp_files];
+  const templates = plan.policy.stamp_patterns;
+  if (stampGlobs.length === 0) { sp.status = 'skipped'; sp.detail = 'no stamp_paths in policy'; return; }
+  const files = git(staging, ['ls-files', '-z']).out.split('\0').filter(f => f && matchesAny(stampGlobs, f));
+  for (const rel of files) {
+    const why = assertInsideRoot(staging, rel);
+    if (why) throw new Refusal('POLICY_CONTAINMENT', `${why}; nothing written`);
+  }
+  const baseAdded = o.release ? new Map<string, AddedLines>() : branchAddedLines(o.repoRoot, since, files, plan.baseSha);
+  const added = branchAddedLines(staging, since, files, undefined, baseAdded);
+  const explicit = new Set([...(o.was ? [o.was] : []), ...(plan.branchStamp ? [plan.branchStamp] : [])].filter(v => v !== plan.newVersion));
+  const tentative = new Set(tentativeMentions(new Map([...added].map(([rel, own]) => [rel, own.text])), plan.forkVersion, plan.newVersion, templates, plan.recorded).filter(v => !explicit.has(v)));
+  const equalBase = !o.was && !plan.branchStamp && plan.baseVersion !== plan.newVersion ? plan.baseVersion : null;
+  if (equalBase) tentative.add(equalBase);
+  if (plan.forkVersion !== plan.newVersion && !explicit.has(plan.forkVersion)) tentative.add(plan.forkVersion);
+  const slotOnly = new Set([...tentative].filter(v => !plan.recorded.has(v) && cmpVersion(parseVersion(v)!, parseVersion(plan.newVersion)!) > 0));
+  const moved = new Map<string, number>();
+  const baseSide: string[] = [];
+  let touched = 0;
+  let total = 0;
+  for (const rel of files) {
+    const abs = path.join(staging, rel);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) continue;
+    const own = added.get(rel);
+    if (explicit.size === 0 && !own) continue;
+    let count = 0;
+    let ownBase = 0;
+    let keptBase = 0;
+    const rewrite = (text: string, old: string, builtIn = true): string => {
+      const r = rewriteStamps(text, old, plan.newVersion, templates, builtIn);
+      count += r.count;
+      if (r.count) moved.set(old, (moved.get(old) ?? 0) + r.count);
+      return r.text;
+    };
+    const out = fs.readFileSync(abs, 'utf8').split('\n').map((line, i) => {
+      const mine = own?.at.has(i + 1) ?? false;
+      if (equalBase) {
+        const n = rewriteStamps(line, equalBase, plan.newVersion, templates).count;
+        if (mine) ownBase += n; else keptBase += n;
+      }
+      let text = line;
+      for (const old of explicit) text = rewrite(text, old);
+      if (mine) for (const old of tentative) text = rewrite(text, old, !slotOnly.has(old));
+      return text;
+    }).join('\n');
+    if (ownBase || keptBase) baseSide.push(`${rel}: ${ownBase} moved, ${keptBase} kept`);
+    if (count) { fs.writeFileSync(abs, out); touched += 1; total += count; }
+  }
+  const olds = [...explicit, ...tentative].filter(v => moved.has(v));
+  sp.status = olds.length ? 'done' : 'skipped';
+  const equalNote = equalBase && baseSide.length
+    ? `; VERSION equals base ${equalBase}, so ${equalBase} moved only on lines this branch added and stayed on the base's own lines (${baseSide.join('; ')})`
+    : '';
+  const searched = explicit.size ? `no mention of ${[...explicit].join(', ')} in the stamp files and ` : '';
+  const baseOwn = [...added].filter(([, own]) => own.notOwn);
+  const baseOwnNote = baseOwn.length ? `; ${baseOwn.reduce((n, [, own]) => n + own.notOwn, 0)} line(s) the base added since the fork point are the base's, not this branch's, and stay (${baseOwn.map(([rel, own]) => `${rel}: ${own.notOwn}`).join('; ')})` : '';
+  sp.detail = (olds.length
+    ? `${total} mention(s) in ${touched} file(s) (${olds.join(', ')} -> ${plan.newVersion})${equalNote}`
+    : `${searched}no tentative mention at or newer than the fork version ${plan.forkVersion}${equalBase ? ` and none of base ${equalBase} on a line this branch added` : ''}${equalNote}`) + baseOwnNote;
 }
 
 function applyToBranch(o: RestampOptions, staging: string, wtree: string, files: string[], journal: Journal, journalPath: string): JournalWrite[] {
@@ -482,6 +653,15 @@ function applyToBranch(o: RestampOptions, staging: string, wtree: string, files:
   return writes;
 }
 
+/** The fragments this change adds (absent from origin/<base>), read from the working-tree fingerprint the staging worktree is seeded from. */
+function fragmentsOf(o: RestampOptions, dir: string, changelog: string | null): FragmentSet {
+  const fp = wtreeFingerprint({ cwd: o.repoRoot });
+  if ('error' in fp) throw new Refusal('RESTAMP_CONFLICT', `cannot fingerprint the working tree (${fp.error}); nothing written`);
+  const set = readFragments(o.repoRoot, fp.tree, dir, o.baseRef ?? `origin/${o.base}`, changelog);
+  if (set.errors.length) throw new Refusal('CHANGELOG_FRAGMENT_INVALID', `${set.errors[0]!.path}: ${set.errors[0]!.message}; nothing written`);
+  return set;
+}
+
 function removeWorktree(repoRoot: string, dir: string): void {
   git(repoRoot, ['worktree', 'remove', '--force', dir]);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -494,11 +674,16 @@ export function restamp(o: RestampOptions): RestampResult {
   try {
     const { loaded, label } = loadPolicy(o);
     if (loaded.errors.length) throw new Refusal(loaded.errors[0]!.code, `${SHIP_POLICY_PATH} (${label}): ${loaded.errors[0]!.message} at ${loaded.errors[0]!.path}; nothing written`);
+    if (loaded.policy.bump === 'never' && !o.bump && !o.version) throw new Refusal('RESTAMP_VERSION_SOURCE', `${SHIP_POLICY_PATH} (${label}): bump never names no level; a release stamp passes --bump <level> or --version <X>; nothing written`);
     const commands = declaredCommands(loaded.policy);
     if (commands.length && !o.allowRepoCommands) {
       throw new Refusal('REPO_COMMANDS_NOT_ALLOWED', `repo commands not executed (pass --allow-repo-commands): ${commands.map(c => `${c.key}: ${c.command}`).join('; ')}; nothing written`, { commands });
     }
-    const plan = planVersions(o, loaded, label);
+    const fragDir = loaded.policy.changelog_fragments?.dir ?? null;
+    if (o.release) { const why = releaseRefusal(o.repoRoot, o.base, o.baseRef, fragDir); if (why) throw new Refusal('RELEASE_STAMP_INVALID', why.message, { fix: why.fix }); }
+    const frags = !fragDir ? null : o.release ? readFragments(o.repoRoot, 'HEAD', fragDir, null, loaded.policy.changelog) : fragmentsOf(o, fragDir, loaded.policy.changelog);
+    if (o.release && !frags!.fragments.length) throw new Refusal('RELEASE_STAMP_EMPTY', `${fragDir} holds no fragment at origin/${o.base}, so there is nothing to release; nothing written`);
+    const plan = planVersions(frags && !o.bump ? { ...o, bump: effectiveBump(loaded.policy.bump === 'patch' ? 'patch' : 'micro', frags.fragments) } : o, loaded, label);
     const headSha = git(o.repoRoot, ['rev-parse', 'HEAD']).out;
     const common: Partial<RestampResult> = {
       oldVersion: plan.oldVersion, newVersion: plan.newVersion, base: { ref: plan.baseRef, sha: plan.baseSha }, policy: plan.policyLabel,
@@ -509,7 +694,9 @@ export function restamp(o: RestampOptions): RestampResult {
     if (!o.after && fs.existsSync(journalPath)) {
       try {
         const prior: Journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
-        if (prior.inputs?.new_version === plan.newVersion && prior.status !== 'complete' && prior.inputs.old_version !== plan.newVersion) { plan.oldVersion = prior.inputs.old_version; plan.branchStamp = prior.inputs.old_version !== plan.baseVersion ? prior.inputs.old_version : plan.branchStamp; }
+        // A retry after a partial apply sees the already-written VERSION as a branch stamp; the journal holds the
+        // original provenance (the branch's own stamp, or the base version when the branch had none), so restore it.
+        if (prior.inputs?.new_version === plan.newVersion && prior.status !== 'complete' && prior.inputs.old_version !== plan.newVersion) { plan.oldVersion = prior.inputs.old_version; plan.branchStamp = prior.inputs.old_version !== plan.baseVersion ? prior.inputs.old_version : null; }
       } catch {}
     }
 
@@ -530,7 +717,7 @@ export function restamp(o: RestampOptions): RestampResult {
     if (!seed.ok) throw new Refusal('RESTAMP_CONFLICT', `cannot seed the staging worktree: ${seed.err}; nothing written`);
     linkIgnoredDeps(o.repoRoot, staging);
 
-    runStages(o, plan, staging, git(o.repoRoot, ['merge-base', plan.baseRef, 'HEAD']).out || plan.baseSha, stages);
+    runStages(o, plan, staging, git(o.repoRoot, o.release ? ['log', '-1', '--format=%H', plan.baseSha, '--', plan.versionRel] : ['merge-base', plan.baseRef, 'HEAD']).out || plan.baseSha, stages);
     const files = changedPaths(staging).sort();
     git(staging, ['add', '-A']);
     const diff = git(staging, ['diff', '--cached', wtree]).out;
@@ -577,7 +764,9 @@ function gateAhead(o: RestampOptions, plan: Plan, stages: StageRecord[], common:
     if (resolvable) {
       for (const c of conflicts) {
         if (c === plan.policy.changelog) {
-          const merged = mergeChangelogs(git(dir, ['show', `:2:${c}`]).out + '\n', git(dir, ['show', `:3:${c}`]).out + '\n');
+          const stage = (n: number) => git(dir, ['show', `:${n}:${c}`]);
+          const [base, ours, theirs] = [stage(1), stage(2), stage(3)];
+          const merged = ours.ok && theirs.ok ? mergeChangelogs(ours.out + '\n', theirs.out + '\n', base.ok ? base.out + '\n' : undefined) : null;
           if (merged === null) { unresolved = [c]; break; }
           fs.writeFileSync(path.join(dir, c), merged);
         } else git(dir, ['checkout', '--theirs', '--', c]);

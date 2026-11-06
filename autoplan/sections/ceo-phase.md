@@ -11,11 +11,12 @@ announcement. Dispatching a reviewer never completes its step.
 - Premises: accept reasonable ones (P6). Queue clearly-wrong/challenged premises
   as User Challenges for Phase 4: assumption, reason and cost of proceeding.
   The user decides there; never stop mid-pipeline.
+- List each part the plan adds to gstack (skill, step, instruction, check, default) with its
+  evidence or owned, dated test plan; a missing one is a finding.
 - Alternatives: pick highest completeness (P1). If tied, pick simplest (P5).
   If top 2 are close → mark TASTE DECISION.
 - Scope expansion: in blast radius + <1d CC → approve (P2). Outside → defer to TODOS.md (P3).
   Duplicates → reject (P4). Borderline (3-5 files) → mark TASTE DECISION.
-- All 11 review sections: run fully, auto-decide each issue, log every decision.
 
 **Required execution checklist (CEO):**
 
@@ -38,8 +39,7 @@ Before every spec dispatch, including after each accepted spec fix, run:
 ```bash
 bun "<SNAPSHOT_TOOL>" amend-input ceo "<ACTIVE_PLAN>" "<CEO_STEP0_CHECKPOINT>" "<RESTORE_PATH>" "<methodologyPath>"
 ```
-This applies the recorded requirements and exports the complete current
-`Implementation plan`. Keep returned `checkpointPath` as the amendment baseline;
+Keep returned `checkpointPath` as the amendment baseline;
 use returned `reviewInputPath` as `<CEO_SPEC_INPUT>`. Read that file at every
 returned `readRanges` offset/limit through EOF, then read the CEO scope summary in full.
 Reconcile dispositions, scope counts, proposal IDs and actual heading/test references
@@ -126,7 +126,7 @@ if [ "$_OUTSIDE_EXIT" -eq 124 ]; then
 fi
 cat "$_OUTSIDE_TMP/stderr" >&2 || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }
 _OUTSIDE_RC=0
-bun "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
+bun --no-env-file --config=/dev/null "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
 case "$_OUTSIDE_RC" in
   0|3) ;;
   4) echo 'OUTSIDE_STATUS: unverified provider=codex host=claude'; exit 4 ;;

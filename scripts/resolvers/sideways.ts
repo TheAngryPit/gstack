@@ -50,6 +50,6 @@ export function undeclaredBehaviorLines(): { fields: string; rule: string } {
   return {
     fields: `Diff read: full (<n> files, <m> hunks) | partial (<unread paths>)
 Undeclared behavior changes: <behavior the diff changes that the PR body, commit messages and plan do not state> | none`,
-    rule: `\`Diff read\` records the full-diff read Step 3 required; \`Scope Check: CLEAN\`, and options B and C above, count as approved only with \`Diff read: full\` recorded. A partial read is \`DRIFT DETECTED\` naming the unread paths. \`Undeclared behavior changes\` lists every behavior the diff changes (a default, an exit code, a stored value, a route, a side effect) that the author's own summary omits; each is a Scope Check item for the reviewer, never silently CLEAN.`,
+    rule: `\`Diff read\` records Step 3's full-diff read; \`Scope Check: CLEAN\`, and options B and C above, count as approved only with \`Diff read: full\` recorded. A partial read is \`DRIFT DETECTED\` naming the unread paths. \`Undeclared behavior changes\` lists every behavior the diff changes (a default, an exit code, a stored value, a route, a side effect) that the author's own summary omits; each is a Scope Check item for the reviewer, never silently CLEAN.`,
   };
 }

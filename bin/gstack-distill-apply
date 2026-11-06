@@ -23,6 +23,7 @@
 #   gstack-distill-apply --proposal <N> --gbrain-published true
 #   gstack-distill-apply --list                        # show pending proposals
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select
@@ -57,7 +58,7 @@ if [ ! -f "$PROPOSAL_FILE" ]; then
 fi
 
 if [ "$ACTION" = "list" ]; then
-  PROPOSAL_FILE_PATH="$PROPOSAL_FILE" bun -e '
+  PROPOSAL_FILE_PATH="$PROPOSAL_FILE" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e '
     const fs = require("fs");
     const p = JSON.parse(fs.readFileSync(process.env.PROPOSAL_FILE_PATH, "utf-8"));
     const proposals = p.proposals || [];
@@ -100,7 +101,7 @@ MEMORY_FILE_PATH="$MEMORY_FILE" \
 PROFILE_FILE_PATH="$PROFILE_FILE" \
 PREF_BIN="$SCRIPT_DIR/gstack-question-preference" \
 GBRAIN_PUBLISHED="$GBRAIN_PUBLISHED" \
-bun -e '
+bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e '
   const fs = require("fs");
   const { spawnSync } = require("child_process");
   const idx = parseInt(process.env.PROPOSAL_IDX, 10);

@@ -65,9 +65,7 @@ ${ctx.skillName === 'ship' ? 'This verdict never skips Step 9 or its finding, ap
 Other rows provide context, not a substitute for Eng Review:
 - Recommend CEO Review for product/business or scope decisions, not routine fixes or cleanup.
 - Recommend Design Review for UI/UX work, not backend, infrastructure or prompt-only work.
-- Adversarial review always includes a native pass. Available, enabled outside
-  challenges supplement it; diffs of 200+ lines also get the structured P1 gate.
-- Outside Voice is the default-on plan review after CEO/Eng review. \`codex_reviews\`
+${ctx.skillName === 'ship' ? '- Step 9\'s review plan decides the adversarial passes (Step 11).\n' : '- Adversarial review always includes a native pass. Available, enabled outside\n  challenges supplement it; diffs of 200+ lines also get the structured P1 gate.\n'}- Outside Voice is the default-on plan review after CEO/Eng review. \`codex_reviews\`
   disables that extra step. Provider failure uses native fallback and records
   missing outside coverage; this dashboard row never gates shipping.
 

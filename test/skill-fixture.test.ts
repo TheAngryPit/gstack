@@ -31,6 +31,7 @@ import { E2E_TOUCHFILES, GLOBAL_TOUCHFILES, selectTests } from './helpers/touchf
 import { readShippedSkillRouting } from './helpers/shipped-skill-routing';
 import { hasNarrationLeak } from './helpers/skill-body-narration';
 import { expectMentions } from './helpers/prompt-structure';
+import { SHARED_POINTER_HEADING, readSkillStartup } from './helpers/skill-startup';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 
@@ -389,7 +390,8 @@ describe('real-skill pins: body/head extraction used by E2E fixtures', () => {
       expect(out).not.toContain('## Preamble (run first)');
       expect(out).not.toContain('## Preamble (after scope gate)');
       expect(out).not.toContain('## Telemetry (run last)');
-      const full = fs.readFileSync(path.join(ROOT, skill, 'SKILL.md'), 'utf-8');
+      expect(out).not.toContain(SHARED_POINTER_HEADING);
+      const full = readSkillStartup(path.join(ROOT, skill, 'SKILL.md'));
       expect(out.length).toBeLessThan(full.length * 0.75);
       expect(out.length).toBeGreaterThan(500);
     });
@@ -406,7 +408,7 @@ describe('real-skill pins: body/head extraction used by E2E fixtures', () => {
     const file = path.join(ROOT, 'plan-eng-review', 'SKILL.md');
     const full = fs.readFileSync(file, 'utf-8');
     const scopeStart = full.indexOf('## Scope gate');
-    const preamble = full.indexOf('## Preamble (after scope gate)');
+    const preamble = full.indexOf(SHARED_POINTER_HEADING);
     expect(scopeStart).toBeGreaterThan(0); expect(preamble).toBeGreaterThan(scopeStart);
     expect(extractSkillBody(file)).toContain(full.slice(scopeStart, preamble).trimEnd());
   });

@@ -7,6 +7,7 @@ description: |
   verifies production health via canary checks. Takes over after /ship
   creates the PR. Use when: "merge", "land", "deploy", "merge and verify",
   "land it", "ship it to production". (gstack)
+codex_default_prompt: "Use $gstack-land-and-deploy to merge this pull request once its checks pass, wait for CI and the deploy, and verify production health before calling it landed."
 allowed-tools:
   - Bash
   - Read
@@ -14,6 +15,7 @@ allowed-tools:
   - Glob
   - AskUserQuestion
 sensitive: true
+manual_only: true
 triggers:
   - merge and deploy
   - land the pr
@@ -21,12 +23,6 @@ triggers:
 ---
 
 {{PREAMBLE}}
-
-{{THIRD_PARTY_ACTIONS}}
-
-{{ASIDE_SETUP}}
-
-{{BROWSE_FALLBACK}}
 
 {{BASE_BRANCH_DETECT}}
 
@@ -177,49 +173,60 @@ readiness is not established.
 
 ## Step 3: Wait for CI (if pending)
 
-Poll in 4-minute rounds (300 s shell timeout), 15 minutes max; record the wait:
+One watcher call, never your own poll loop; a line per real event, else
+silence:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-ci-gate --repo "$REPO" --pr "$PR_NUMBER" --expect-head "$PR_HEAD" --wait 240
+~/.claude/skills/gstack/bin/gstack-pr-wait "$PR_NUMBER" --repo "$REPO" --until green
 ```
 
-Other verdicts follow Step 2. PENDING at 15 minutes: list the still-pending checks;
-ask A) wait 15 more minutes, B) exclude named `required=n` checks (Step 3.5
-approves each), or C) stop.
+Exit 0: green; rerun Step 2's gate (a moved head is a new push: restart at
+Step 1), then Step 3.4. Exit 1 (`PR_WAIT_BLOCKED`): **STOP**, show its lines;
+only a red `required=n` check can pass Step 3.5. Exit 2 (`PR_WAIT_REFUSED`): show it.
 
 ---
 
 ## Step 3.4: VERSION drift detection (workspace-aware ship)
 
-Check that another workspace has not claimed this PR's VERSION since `/ship`.
-
 ```bash
 BRANCH_VERSION=$(git show "$PR_HEAD:VERSION" 2>/dev/null | tr -d '\r\n[:space:]')
 BASE_VERSION=$(git show "$BASE_SHA:VERSION" 2>/dev/null | tr -d '\r\n[:space:]')
-QUEUE_JSON=$(bun run ~/.claude/skills/gstack/bin/gstack-next-version \
-  --base "$BASE_BRANCH" \
-  --exclude-pr "$PR_NUMBER" \
-  --bump patch \
-  --current-version "$BASE_VERSION" 2>/dev/null || echo '{"offline":true}')
-NEXT_SLOT=$(echo "$QUEUE_JSON" | jq -r '.version // empty')
-OFFLINE=$(echo "$QUEUE_JSON" | jq -r '.offline // false')
-NO_VERSION=$(echo "$QUEUE_JSON" | jq -r '.no_version // false')
+git fetch -q origin "$BASE_BRANCH"
+read -r MODE CL < <(~/.claude/skills/gstack/bin/gstack-ship-policy show-effective --base "$BASE_BRANCH" --json |
+  jq -r 'select(.valid).policy | "\(.queue_mode) \(.changelog)"')
+Q=$(bun --no-env-file --config=/dev/null run ~/.claude/skills/gstack/bin/gstack-next-version --base "$BASE_BRANCH" \
+  --exclude-pr "$PR_NUMBER" --bump patch --current-version "$BASE_VERSION" 2>/dev/null || echo '{"offline":true}')
+Q=$(echo "$Q" | jq -r --arg v "$BRANCH_VERSION" '[.claimed[]? | select(.version == $v).pr] as $c | if .no_version
+  then "NO_VERSION" elif $c != [] then "STOP also claimed by #\($c[0])" elif .offline or (.complete | not)
+  then "unavailable: claims unread" else "ok" end')
+cl() { sed -n 's/^## \[\([^]]*\)\].*/\1/p' | head -2 | xargs; }
+H=$(git show "$PR_HEAD:$CL" 2>/dev/null | cl); B=$(git show "$BASE_SHA:$CL" 2>/dev/null | cl)
+V=$(awk -v a="$BASE_VERSION" -v b="$BRANCH_VERSION" 'BEGIN { r = "^[0-9]+[.][0-9]+[.][0-9]+([.][0-9]+)?$"
+  if (a !~ r || b !~ r || split(a, x, ".") != (n = split(b, y, "."))) { print "bad"; exit }
+  for (i = 1; i <= n && x[i] == y[i]; i++); if (i > n || y[i] < x[i]) { print "low"; exit }
+  s = y[i] == x[i] + 1; for (j = i + 1; j <= n; j++) s = s && !y[j]; print s ? "one" : "up" }')
+if [ "$Q" = NO_VERSION ]; then R=$Q
+elif [ "$V" = bad ]; then R="unavailable: bad version"
+elif [ "$MODE" = stamp-at-merge ]; then
+  [ "$V" = one ] && { [ -z "$H" ] || [ "$H" = "$(echo $BRANCH_VERSION ${B%% *})" ]; } && R=ok || R="STOP stamp stale"
+elif [ "$V" = low ]; then R="STOP base is at or above it"
+elif [ -z "$MODE" ]; then R="unavailable: no policy"
+else R=$Q; fi
+echo "VERSION_CHECK: $R ($MODE: $BRANCH_VERSION, base $BASE_VERSION)"
 ```
 
-Use the existing conservative patch-level allocation; compare numeric version
-components, not lexical strings. A missing/unparseable version on only one side is
-unavailable, not green.
-
-0. `NO_VERSION=true` (no configured version source, the same signal `/ship` reads):
-   print `VERSION check: not applicable (<version_source.reason>)` and continue to
-   Step 3.5. Never expect a version-prefixed title, CHANGELOG version header or tag.
-1. `OFFLINE=true`, helper failure or invalid result: report VERSION check unavailable
-   with the reason; continue to Step 3.5. CI's version gate is the backstop.
-2. `BRANCH_VERSION >= NEXT_SLOT`: no drift; continue.
-3. `BRANCH_VERSION < NEXT_SLOT`: **STOP** with "VERSION drift detected", both versions
-   and instructions to rerun `/ship` from the feature branch. Its ALREADY_BUMPED path
-   reconciles VERSION, package.json, CHANGELOG header and PR title together. Do NOT
-   auto-bump or merge here: duplicate versions can overwrite another branch's release notes.
+- `NO_VERSION`: print `VERSION check: not applicable (<version_source.reason>)`; never
+  expect a version-prefixed title, CHANGELOG version header or tag.
+- `unavailable`: report it; continue to Step 3.5 (CI's version gate is the backstop).
+- `ok`: continue; a higher sibling claim or a MICRO bump is not drift.
+- `STOP stamp stale` (stamp-at-merge: not base + one bump, or the top CHANGELOG headings
+  are not it then the base's): **STOP**; on the PR branch run `gstack-restamp --next --base
+  <base> --pr <n> --expect-base <BASE_SHA> --allow-repo-commands`, push the stamp diff,
+  wait for CI, rerun.
+- Other `STOP`: **STOP** with "VERSION drift detected", the verdict and: rerun `/ship`
+  from the feature branch (its ALREADY_BUMPED path reconciles VERSION, package.json,
+  CHANGELOG header and PR title). Never auto-bump or merge here: duplicate versions can
+  overwrite another branch's release notes.
 
 ---
 
@@ -324,76 +331,7 @@ If browser access is unavailable, record SKIPPED with the reason for this target
 Staging choice A returns to its production route; C goes to Step 9 without claiming
 STAGING VERIFIED. Production goes to Step 9 with incomplete health evidence.
 
-Use the saved pre-merge scope and Step 5's precedence rule; URL/triggered-deploy paths
-still verify docs-only. Set `TARGET=production` unless entering from staging choice A/C.
-
-| Diff Scope | Canary Depth |
-|------------|-------------|
-| SCOPE_DOCS only | Smoke when Step 5 routes here; otherwise skipped there |
-| SCOPE_CONFIG only | Smoke: the Aside script below; `responseStatus` in `NAV=` must be 200 |
-| SCOPE_BACKEND only | Console errors + perf check |
-| SCOPE_FRONTEND (any) | Full: console + perf + screenshot |
-| Mixed scopes | Full canary |
-
-**Full canary sequence** — one `aside repl` script does the whole check (console hook first, then load, then evidence):
-
-```bash
-aside repl '
-const HOOK = `(() => { window.__gstackErrs = window.__gstackErrs || []; const oe = console.error; console.error = (...a) => { window.__gstackErrs.push(a.map(String).join(" ")); oe.apply(console, a); }; window.addEventListener("error", e => window.__gstackErrs.push("uncaught: " + e.message)); window.addEventListener("unhandledrejection", e => window.__gstackErrs.push("unhandledrejection: " + (e.reason && e.reason.message || e.reason))); })()`;
-const pg = await openTab("about:blank");
-await pg._sendToTarget("Page.addScriptToEvaluateOnNewDocument", { source: HOOK });
-await pg.goto("<url>");
-console.log("URL=" + pg.url());
-console.log("CONSOLE_ERRORS=" + JSON.stringify(await pg.evaluate(() => window.__gstackErrs)));
-console.log("NAV=" + await pg.evaluate(() => JSON.stringify(performance.getEntriesByType("navigation")[0])));
-console.log("TEXT_START"); console.log((await pg.evaluate(() => document.body.innerText)).slice(0, 20000)); console.log("TEXT_END");
-await pg.screenshot({ path: "post-deploy.jpg", type: "jpeg", quality: 60, fullPage: true });
-const a = await annotatedScreenshot(pg);
-await fs.writeFile(path.join(pwd, "post-deploy-annotated.png"), Buffer.from(a.base64Image, "base64"));
-console.log("ASIDE_DIR=" + pwd);
-await closeTab(pg);
-console.log("GSTACK_STEP_OK");
-'
-```
-
-Then copy the evidence out of the printed session directory:
-
-```bash
-mkdir -p .gstack/deploy-reports && cp "<ASIDE_DIR>/post-deploy.jpg" "<ASIDE_DIR>/post-deploy-annotated.png" .gstack/deploy-reports/
-```
-
-Read the output line by line:
-
-- `URL=` — the page loaded and stayed on the site (not a redirect to an error page). A line starting with `[error` or a missing `GSTACK_STEP_OK` means the load failed.
-- `CONSOLE_ERRORS=` — check for critical errors: entries containing `Error`, `Uncaught`, `Failed to load`, `TypeError`, `ReferenceError`. Ignore warnings.
-- `NAV=` — `responseStatus` is the HTTP status of the document (Chromium PerformanceNavigationTiming) — must be 200. `loadEventEnd` is the page load time. Check that it is under 10 seconds.
-- `TEXT_START` / `TEXT_END` — verify the page has real content (not blank, not a generic error page).
-- `post-deploy.jpg` and the annotated `post-deploy-annotated.png` are the evidence. Read the copied screenshot so the user sees it.
-
-**Health assessment:**
-- Page loads successfully with 200 status (`responseStatus` in `NAV=`) → PASS
-- No critical console errors → PASS
-- Page has real content (not blank or error screen) → PASS
-- Loads in under 10 seconds → PASS
-
-Assess only checks required by the selected depth; mark unperformed checks N/A.
-All required checks pass: record HEALTHY for this target. Staging returns through
-Step 5a's chosen A/C route; production goes to Step 9. Preserve deployment uncertainty.
-
-If any fail: show the evidence (screenshot path, console errors, perf numbers). Use AskUserQuestion:
-- **Re-ground:** "I found some issues on the live site after the deploy. Here's what I see: {specific issues}. This might be temporary (caches clearing, CDN propagating) or it might be a real problem."
-- **RECOMMENDATION:** Choose based on severity — B for critical (site down), A for minor (console errors).
-- A) Accept these observed issues for now — report DEGRADED, not healthy
-- B) That's broken — revert the merge and roll back to the previous version
-- C) Let me investigate more — open the site and look at logs before deciding
-
-**A:** Record DEGRADED and the user's acknowledgment, then Step 9 (do not silently
-continue from failed staging to production verification). **B:** Step 8, only with
-explicit rollback approval. **C:** Inspect the page/evidence and read-only logs;
-summarize findings, then ask for one recheck (repeat Step 7), rollback (Step 8), or
-finish DEGRADED (Step 9). These investigations never modify or redeploy code.
-When `ROLLBACK=true`, failures remain ROLLBACK PENDING; offer investigation or report,
-not another revert. Keep staging/production screenshots distinct when checking both.
+{{SECTION:canary}}
 
 ---
 
@@ -485,8 +423,8 @@ to check next. No deploy needed: merged, verification skipped for the stated rea
 Staging-only: production remains unverified, not necessarily undeployed. Rollback
 pending: identify who must resolve conflicts, merge the revert PR, or verify its deploy.
 REVERTED: cite rollback evidence; do not claim the original branch survived cleanup.
-Offer `/canary <url>` for extended monitoring, `/benchmark <url>` when performance
-matters, and `/document-release` when docs need updating.
+Offer `/canary <url>` for extended monitoring, `/benchmark <url>` for performance,
+and `/document-release` for docs.
 
 ---
 
@@ -502,8 +440,8 @@ Recheck read-only evidence; never redo a merge/deploy because a section was miss
 ## Important Rules
 
 - Never force-push, bypass CI, replay a confirmed merge, or hide missing evidence.
-- Auto-detect facts; ask when unknown or when an explicit approval gate applies.
-- Poll at each step's stated interval and deadline (4-minute CI rounds in Step 3; 30 seconds for merge readback and deploy status), with its progress messages.
+- Auto-detect facts; ask when unknown or an explicit approval gate applies.
+- Step 3 is one `gstack-pr-wait` call; elsewhere poll at the stated interval (30 s for merge readback and deploy) with progress lines.
 - After merge failures, offer approved rollback when appropriate; never revert a rollback automatically.
-- Verify once; `/canary` provides extended monitoring. Rechecks require the user's choice.
+- Verify once; `/canary` does extended monitoring; rechecks need the user's choice.
 - Use `--delete-branch`; reconcile failed cleanup non-destructively with confirmation.

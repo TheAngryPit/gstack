@@ -92,7 +92,7 @@ function harness(opts: {
   let clock = 1_000_000, sleeps = 0, tick = 0, exiting = false, starts = 0;
   const calls = { startEnv: [] as Record<string, string>[], agents: [] as number[], log: [] as string[], warn: [] as string[], error: [] as string[] };
   const deps: HeadedSupervisorDeps = {
-    env: buildHeadedServerEnv({ proxyUrl: 'socks5://127.0.0.1:9050', configHash: 'abc123' }),
+    env: buildHeadedServerEnv({ proxyUrl: 'socks5://127.0.0.1:9050', configHash: 'abc123', explicitDirect: false }),
     tickMs: opts.tickMs ?? 30_000,
     backoffMs: [1000, 2000, 4000, 8000, 30000],
     daemonLog: '/state/browse-daemon.log',
@@ -124,7 +124,7 @@ describe('runHeadedSupervisor (behavior)', () => {
     expect(h.calls.startEnv).toHaveLength(1);
     expect(h.calls.startEnv[0]).toEqual({
       BROWSE_HEADED: '1', BROWSE_PORT: '34567', BROWSE_PARENT_PID: '0',
-      BROWSE_PROXY_URL: 'socks5://127.0.0.1:9050', BROWSE_CONFIG_HASH: 'abc123',
+      BROWSE_PROXY_URL: 'socks5://127.0.0.1:9050', BROWSE_PROXY_USER: '', BROWSE_PROXY_PASS: '', BROWSE_CONFIG_HASH: 'abc123',
     });
     expect(h.calls.startEnv[0]).toBe(h.deps.env);
     expect(h.calls.agents).toEqual([5000]);
@@ -181,7 +181,7 @@ describe('runHeadedSupervisor (behavior)', () => {
 
 describe('buildHeadedServerEnv', () => {
   test('omits proxy and config hash when this invocation has none', () => {
-    expect(buildHeadedServerEnv({ proxyUrl: null, configHash: '' })).toEqual({ BROWSE_HEADED: '1', BROWSE_PORT: '34567', BROWSE_PARENT_PID: '0' });
+    expect(buildHeadedServerEnv({ proxyUrl: null, configHash: '', explicitDirect: false })).toEqual({ BROWSE_HEADED: '1', BROWSE_PORT: '34567', BROWSE_PARENT_PID: '0' });
   });
 });
 
