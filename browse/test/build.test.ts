@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -18,7 +18,7 @@ function expectBundle(): void {
 describe('build: server-node.mjs', () => {
   bundleTest('passes node --check', () => {
     expectBundle();
-    expect(() => execSync(`node --check ${SERVER_NODE}`, { stdio: 'pipe', timeout: 30_000 })).not.toThrow();
+    expect(() => execFileSync('node', ['--check', SERVER_NODE], { stdio: 'pipe', timeout: 30_000 })).not.toThrow();
   });
 
   bundleTest('does not inline @ngrok/ngrok (must be external)', () => {
