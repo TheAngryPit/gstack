@@ -886,7 +886,7 @@ describe('Gemini CLI host render', () => {
       expect(md).not.toContain('antigravity-cli/skills');
     }
     expect(read('gstack-review')).toContain('_r=~/.gemini/skills/gstack');
-    expect(read('gstack-upgrade')).toContain('$HOME/.gemini/skills/gstack/.source-path');
+    expect(read('gstack-upgrade')).toContain('$ACTIVE_ROOT/.source-path');
     expect(read('gstack-upgrade')).toContain('./setup --host gemini --refresh-registered');
   });
 

@@ -86,7 +86,7 @@ jobs:
             ':(exclude)browse/test/fixtures/**' \
             ':(exclude)docs/evals/**' \
             ':(exclude)test/helpers/security-bench*' \
-            | node .github/scripts/gate-secret-scan.mjs
+            | node .github/scripts/gate-secret-scan.mjs --per-file
 
       - name: Install ShellCheck
         run: |

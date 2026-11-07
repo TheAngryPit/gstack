@@ -24,6 +24,9 @@ export function adaptNativeTemplate(text: string, ctx: TemplateContext, source: 
   // before matching host-specific template paths so the same Codex adapters
   // run on every platform.
   source = source.replaceAll('\\', '/');
+  if (ctx.skillName === 'eval-plan') {
+    text = text.replace('say `claude -p` on a seat', 'for example an explicitly authorized subscription transport');
+  }
   if (ctx.skillName === 'office-hours') {
     text = text.replace('second opinion (Codex or Claude subagent)', 'second opinion (native reviewer)')
       .replace('against cross-model challenge (kept original premise when Codex disagreed', 'against independent-context challenge (kept original premise when the reviewer disagreed');

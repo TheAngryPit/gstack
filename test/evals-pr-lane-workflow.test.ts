@@ -1,3 +1,4 @@
+import { upstreamCondition } from './helpers/fork-paid-workflow';
 /**
  * PR paid-lane workflow pins (W1, CEO-13/14/34, ENG-7/11/12, DX-7, W8f):
  * coverage summaries, cancellation recovery off PR code, readiness-gated
@@ -20,7 +21,7 @@ describe('evals.yml PR coverage summary (CEO-13)', () => {
   test('the planner and the report write the coverage summary to the job summary', () => {
     expect(step('plan-slices', 'Summarize PR coverage')?.run).toContain('scripts/test-pr-profile.ts summary /tmp/paid-plan/manifest.json >> "$GITHUB_STEP_SUMMARY"');
     const report = step('slices-report', 'Summarize PR coverage and reuse')!;
-    expect(report.if).toBe('always()');
+    expect(upstreamCondition(report.if)).toBe(upstreamCondition('always()'));
     expect(report.run).toContain('summary /tmp/paid-report/manifest.json /tmp/paid-report/collector-outcomes.json');
   });
 
@@ -70,7 +71,7 @@ describe('evals.yml receipt recovery (CEO-14/34, ENG-7)', () => {
 
   test('every slice uploads its receipts even when cancelled; the report verdict carries report receipts', () => {
     const upload = step('eval-slices', 'Upload slice results')!;
-    expect(upload.if).toBe('always()');
+    expect(upstreamCondition(upload.if)).toBe(upstreamCondition('always()'));
     expect(upload.with).toMatchObject({ name: 'paid-slice-${{ matrix.slice }}-a${{ github.run_attempt }}', path: '/tmp/paid-slice-results' });
     const verdict = workflow.jobs['slices-report']!.steps.find(s => String(s.with?.name ?? '').startsWith('report-verdict'))!;
     expect(String(verdict.with!.path)).toContain('/tmp/paid-report/report-receipts');
@@ -83,7 +84,7 @@ describe('evals.yml readiness-gated dispatch (R1, GSTA-48)', () => {
 
   test('a tiny PR-only job waits for a quiet PR and green Free Tests before recovery and planning', () => {
     expect(readiness['runs-on']).toBe('ubuntu-24.04');
-    expect(readiness.if).toBe("github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && needs.route.outputs.mode != 'pr-summary'");
+    expect(upstreamCondition(readiness.if)).toBe(upstreamCondition("github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && needs.route.outputs.mode != 'pr-summary'"));
     expect(readiness.needs).toEqual(['route']);
     expect(readiness.permissions).toEqual({ contents: 'read', actions: 'read', 'pull-requests': 'read' });
     expect(Number(readiness['timeout-minutes'])).toBeGreaterThan(80);
@@ -117,7 +118,7 @@ describe('evals.yml gate verdict reuse wiring (R2a restamp-only, R2 main moved; 
   test('base-ref recovery proposes a candidate; it never fails the run', () => {
     const find = step('recover-receipts', 'Find a gate verdict to reuse (R2a/R2, base-ref code)')!;
     // GSTA-49 T1b: a dispatched screen finds too, with its route-checked head and its pinned merge commit as the tested sha.
-    expect(find.if).toBe("github.event_name == 'pull_request' || needs.route.outputs.mode == 'screen'");
+    expect(upstreamCondition(find.if)).toBe(upstreamCondition("github.event_name == 'pull_request' || needs.route.outputs.mode == 'screen'"));
     expect(find.env).toMatchObject({ GH_TOKEN: '${{ github.token }}', HEAD_SHA: '${{ github.event.pull_request.head.sha || needs.route.outputs.screen_head }}',
       TESTED_SHA: '${{ inputs.screen_merge_sha || github.sha }}' });
     expect(find.env?.BASE_SHA).toBeUndefined();
@@ -141,15 +142,15 @@ describe('evals.yml gate verdict reuse wiring (R2a restamp-only, R2 main moved; 
 
   test('the report prints a reused verdict fail-closed and only executed runs bind a verdict', () => {
     const report = workflow.jobs['slices-report']!;
-    expect(step('slices-report', 'Reconcile slices against the manifest (fail-closed)')!.if).toBe("needs.plan-slices.outputs.gate_reuse != 'true'");
+    expect(upstreamCondition(step('slices-report', 'Reconcile slices against the manifest (fail-closed)')!.if)).toBe(upstreamCondition("needs.plan-slices.outputs.gate_reuse != 'true'"));
     const reused = step('slices-report', 'Report the reused gate verdict (R2a/R2)')!;
-    expect(reused.if).toBe("needs.plan-slices.outputs.gate_reuse == 'true'");
+    expect(upstreamCondition(reused.if)).toBe(upstreamCondition("needs.plan-slices.outputs.gate_reuse == 'true'"));
     expect(reused.run).toContain('echo "exit=$code"');
     expect(report.outputs?.['reconcile-exit']).toBe('${{ steps.reconcile.outputs.exit || steps.reused.outputs.exit }}');
-    expect(step('slices-report', 'Fail the workflow when reconciliation failed')!.if).toBe("(steps.reconcile.outputs.exit || steps.reused.outputs.exit) != '0'");
+    expect(upstreamCondition(step('slices-report', 'Fail the workflow when reconciliation failed')!.if)).toBe(upstreamCondition("(steps.reconcile.outputs.exit || steps.reused.outputs.exit) != '0'"));
     const bind = step('slices-report', "Bind this run's verdict for reuse (R2a/R2)")!;
     // GSTA-49 T1b: a dispatched screen binds too; train, bisect and plain dispatches never bind.
-    expect(bind.if).toBe("always() && (github.event_name == 'pull_request' || needs.plan-slices.outputs.mode == 'screen') && needs.plan-slices.outputs.gate_reuse != 'true'");
+    expect(upstreamCondition(bind.if)).toBe(upstreamCondition("always() && (github.event_name == 'pull_request' || needs.plan-slices.outputs.mode == 'screen') && needs.plan-slices.outputs.gate_reuse != 'true'"));
     expect(bind.env?.TESTED_SHA).toBe('${{ inputs.screen_merge_sha || github.sha }}');
     expect(bind.env?.RECONCILE_EXIT).toBe('${{ steps.reconcile.outputs.exit }}');
     expect(bind.run).toContain('--tested-sha "$TESTED_SHA"');
@@ -189,7 +190,7 @@ describe('evals.yml dispatch contract for eval:bg (CEO-17/29, DX-1, ENG-8/12)', 
 
   test('a dispatch fails fast with a named fix when the checkout is not the expected revision', () => {
     const verify = step('plan-slices', 'Verify the dispatched revision')!;
-    expect(verify.if).toBe("github.event_name == 'workflow_dispatch'");
+    expect(upstreamCondition(verify.if)).toBe(upstreamCondition("github.event_name == 'workflow_dispatch'"));
     expect(verify.env?.EXPECTED_SHA).toBe('${{ inputs.expected_sha }}');
     expect(verify.run).toContain('Tested revision: ${actual}');
     expect(verify.run).toContain('but the dispatch expected ${EXPECTED_SHA}');
@@ -201,10 +202,10 @@ describe('evals.yml dispatch contract for eval:bg (CEO-17/29, DX-1, ENG-8/12)', 
   test('pr_receipts dispatches read PR receipts read-only through artifacts and never save', () => {
     expect(workflow.env.EVALS_FRESH).toContain("inputs.pr_receipts == ''");
     expect(workflow.jobs['recover-receipts']!.if).toContain("github.event_name == 'workflow_dispatch' && inputs.pr_receipts != ''");
-    expect(step('recover-receipts', "Restore this PR's verified judge and E2E results")?.if).toBe("github.event_name == 'pull_request'");
+    expect(upstreamCondition(step('recover-receipts', "Restore this PR's verified judge and E2E results")?.if)).toBe(upstreamCondition("github.event_name == 'pull_request'"));
     expect(step('recover-receipts', 'Recover receipts of cancelled runs (base-ref code)')?.env?.RECOVERY_MODE).toBe("${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'pr' }}");
     for (const name of ["Merge this run's receipts", "Save this PR's verified judge and E2E results"]) {
-      expect(step('slices-report', name)?.if).toBe("always() && github.event_name == 'pull_request'");
+      expect(upstreamCondition(step('slices-report', name)?.if)).toBe(upstreamCondition("always() && github.event_name == 'pull_request'"));
     }
     expect(step('eval-slices', 'Run slice ${{ matrix.slice }}')?.env?.EVALS_CACHE_PR).toBe('${{ github.event.pull_request.number || inputs.pr_receipts }}');
   });

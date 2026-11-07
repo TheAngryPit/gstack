@@ -219,7 +219,7 @@ describe('free-tests workflow wiring', () => {
     expect(workflow.env.FREE_SUITE_RUNNER).toMatch(/^ubicloud-standard-(2|4|8)$/);
     expect(workflow.env.FREE_SUITE_SHARDS).toMatch(/^[1-9][0-9]?$/);
     expect(planner.outputs.runner).toBe('${{ steps.plan.outputs.runner }}');
-    expect(workflow.jobs['free-suite']['runs-on']).toBe('${{ needs.free-plan.outputs.runner }}');
+    expect(workflow.jobs['free-suite']['runs-on']).toBe("${{ github.repository == 'garrytan/gstack' && needs.free-plan.outputs.runner || 'ubuntu-24.04' }}");
     expect(workflow.env.FREE_SUITE_JOBS).toMatch(/^[1-8]$/);
     expect(plan.env).toEqual({ RUNNER_OVERRIDE: '${{ inputs.free_runner }}', SHARDS_OVERRIDE: '${{ inputs.free_shards }}', JOBS_OVERRIDE: '${{ inputs.free_jobs }}' });
     expect(plan.run).not.toContain('${{');

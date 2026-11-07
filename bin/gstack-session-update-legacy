@@ -24,6 +24,13 @@
 # the release are shelved in refs/gstack/rescue/<oid>, never left as conflict
 # markers, and the next session start names them (at most once a day).
 #
+# Channel (bin/gstack-update-channel.sh, docs/releases.md): a team install
+# follows refs/heads/stable, the weekly tagged release, so it moves once a
+# week (plus hotfixes) instead of at every merge; update_channel=main follows
+# every merge as before. Until the first release is cut, origin has no stable
+# and the updater follows main (CHANNEL_FALLBACK in the log). An install
+# already past the release waits for stable to catch up; nothing moves back.
+#
 # Stages (B11): pull, setup and migrations are tracked separately. The
 # "just upgraded" marker is written only when every stage succeeded. A failed
 # stage is persisted in $STATE_DIR/session-update-pending and retried even
@@ -47,12 +54,21 @@ STATE_DIR="$(gstack_state_root; printf x)"; STATE_DIR="${STATE_DIR%x}"
 # Bun floor comparison (E1): the incoming release's floor is applied before
 # the live checkout moves. Missing helper fails open, like every error here.
 . "$(cd "$(dirname "$0")" && pwd)/gstack-bun-version.sh" 2>/dev/null
+# Update channel (docs/releases.md): a team install follows refs/heads/stable,
+# the weekly tagged release, unless update_channel says main. A missing
+# helper means main, the behaviour before channels existed.
+. "$(cd "$(dirname "$0")" && pwd)/gstack-update-channel.sh" 2>/dev/null || {
+  gstack_update_channel() { echo main; }
+  gstack_update_channel_refspec() { :; }
+  gstack_update_channel_missing() { return 1; }
+}
 THROTTLE_FILE="$STATE_DIR/.last-session-update"
 LOCK_DIR="$STATE_DIR/.setup-lock"
 LOG_FILE="$STATE_DIR/analytics/session-update.log"
 PENDING_FILE="$STATE_DIR/session-update-pending"
 HOOK_CHECK="$(cd "$(dirname "$0")" && pwd)/gstack-hook-check"
 FF_UPDATE="$(cd "$(dirname "$0")" && pwd)/gstack-ff-update"
+LEASE="$(cd "$(dirname "$0")" && pwd)/gstack-lease"
 RESCUE_FILE="$STATE_DIR/session-update-rescues"
 # Path spelling (Git Bash /c/x vs native C:/x) for the held-reason prefix strip.
 . "$(cd "$(dirname "$0")" && pwd)/gstack-path-spelling.sh" 2>/dev/null || { gstack_path_shell() { printf '%s\n' "$1"; }; gstack_path_native() { printf '%s\n' "$1"; }; }
@@ -115,7 +131,6 @@ hook_report() {
 hook_incoming_hold() {
   _hc_dir=$(mktemp -d "${TMPDIR:-/tmp}/gstack-session-hooks-XXXXXX" 2>/dev/null) \
     || { echo "hook-check-unavailable: cannot create a temp directory under ${TMPDIR:-/tmp}"; return 0; }
-  _hc_real_dir=$(cd "$_hc_dir" 2>/dev/null && pwd -P)
   _hc_out="" _hc_why=""
   if ! ( export GIT_INDEX_FILE="$_hc_dir.index"
          git -C "$GSTACK_DIR" read-tree "$1" && git -C "$GSTACK_DIR" -c core.symlinks=false checkout-index -a --prefix="$_hc_dir/" ) 2>"$_hc_dir.err"; then
@@ -151,7 +166,7 @@ hook_incoming_hold() {
 # each spelling a checker reports it (/tmp/x, /c/…/x or C:/…/x).
 hook_hold_path() {
   _hp=$1
-  for _hp_dir in "$_hc_dir" "$_hc_real_dir" "$(gstack_path_shell "$_hc_dir")" "$(gstack_path_native "$_hc_dir")" "$(gstack_path_shell "$_hc_real_dir")" "$(gstack_path_native "$_hc_real_dir")"; do
+  for _hp_dir in "$_hc_dir" "$(gstack_path_shell "$_hc_dir")" "$(gstack_path_native "$_hc_dir")"; do
     _hp=${_hp#"$_hp_dir"/}
   done
   printf '%s\n' "$_hp"
@@ -161,6 +176,25 @@ hook_hold_path() {
 rescue_note() {
   grep -q "^$1 " "$RESCUE_FILE" 2>/dev/null && return 0
   printf '%s %s -\n' "$1" "$2" >> "$RESCUE_FILE" 2>/dev/null
+}
+# channel_behind_release <release> <head> — true when the release commit is at
+# or behind this install's head: an ancestor of it, or, when the shallow
+# history cannot relate the two, a VERSION that is not higher.
+channel_behind_release() {
+  git -C "$GSTACK_DIR" merge-base --is-ancestor "$1" "$2" 2>/dev/null && return 0
+  git -C "$GSTACK_DIR" merge-base --is-ancestor "$2" "$1" 2>/dev/null && return 1
+  _cb_rel=$(git -C "$GSTACK_DIR" show "$1:VERSION" 2>/dev/null | head -1)
+  _cb_head=$(git -C "$GSTACK_DIR" show "$2:VERSION" 2>/dev/null | head -1)
+  [ -n "$_cb_rel" ] && [ -n "$_cb_head" ] || return 1
+  _cb_i=1
+  while :; do
+    _cb_a=$(printf '%s' "$_cb_rel" | cut -d. -f"$_cb_i"); _cb_b=$(printf '%s' "$_cb_head" | cut -d. -f"$_cb_i")
+    [ -z "$_cb_a" ] && [ -z "$_cb_b" ] && return 0
+    case "${_cb_a:-0}${_cb_b:-0}" in *[!0-9]*) return 1 ;; esac
+    [ "${_cb_a:-0}" -lt "${_cb_b:-0}" ] && return 0
+    [ "${_cb_a:-0}" -gt "${_cb_b:-0}" ] && return 1
+    _cb_i=$((_cb_i + 1))
+  done
 }
 pending_get() { sed -n "s/^$1=//p" "$PENDING_FILE" 2>/dev/null | head -1; }
 # pending_save — persist the P_* stage state; nothing pending removes the file.
@@ -212,6 +246,8 @@ case "$_P_PULL" in
     echo "gstack auto-update: update held ($_P_PULL); nothing was installed or changed, and your current hooks keep running. gstack retries at the next check. Fix now ($_WHERE): $_FF_FIX (setup checks every hook it registers). https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#auto-update-hook-check-unavailable" ;;
   unmerged-files*)
     echo "gstack auto-update: update held ($_P_PULL); an earlier merge, rebase or stash pop left conflicts in the install, and an update would bury them. Fix now ($_WHERE): $_FF_FIX (saves every edit, the unmerged files included, in a rescue ref before it updates). https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#auto-update-unmerged-files" ;;
+  tracked-by-project*|version-reverted*)
+    echo "gstack auto-update: update held ($_P_PULL); nothing was installed or changed. gstack retries at the next check. The full fix: bash $_Q/bin/gstack-ff-update --preflight $_Q. https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#auto-update-tracked-by-project" ;;
   autostash-unrecoverable*)
     echo "gstack auto-update: update held ($_P_PULL); your local edits are where they were and nothing was installed. Look first: git -C $_Q status --short. Fix now ($_WHERE): $_FF_FIX (once the cause above is gone). https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#auto-update-autostash-unrecoverable" ;;
   *)
@@ -251,6 +287,13 @@ if [ -f "$THROTTLE_FILE" ]; then
     exit 0
   fi
 fi
+
+# The caller's own session never counts as a lease holder (#3363). Resolve its
+# harness pid now, the same way bin/gstack-skill-start names the pid it leases:
+# once this hook exits, the background updater's $$ names a dead process and
+# an ancestry walk from it excludes nothing.
+. "$(cd "$(dirname "$0")" && pwd)/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
+CALLER_PID=$(gstack_harness_pid "$PPID")
 
 # ── Fork to background: zero latency on session start ──
 (
@@ -363,6 +406,16 @@ fi
   ) &
   HB_PID=$!
 
+  # ── Workflow leases (#3363): a live gstack session on this installation
+  # (bin/gstack-lease) means neither the fast-forward nor a pending setup
+  # retry runs under it, the rule bin/gstack-upgrade enforces as UPGRADE_BUSY.
+  # The throttle file is not written, so the next session start tries again.
+  if [ "${GSTACK_UPGRADE_FORCE:-}" != 1 ] && [ -x "$LEASE" ] \
+    && BUSY=$("$LEASE" live --root "$GSTACK_DIR" --exclude-ancestry-of "$CALLER_PID" 2>/dev/null); then
+    log_entry "SKIP leased $(printf '%s\n' "$BUSY" | awk 'NF { printf "%spid=%s/%s", n++ ? " " : "", $1, $2 }')"
+    exit 0
+  fi
+
   # ── Fetch, check the incoming release's Bun floor, then fast-forward (E1) ──
   OLD_HEAD=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)
   UPDATE_URL=$(git -C "$GSTACK_DIR" remote get-url origin 2>/dev/null || echo "")
@@ -375,15 +428,47 @@ fi
   # bin/gstack-ff-update carries them over the release instead.
   # Capture stderr: the log must carry WHY a pull failed, never just the code.
   PULL_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/gstack-session-pull-XXXXXX" 2>/dev/null || echo "")
-  GSTACK_HOME="$STATE_DIR" _receipted_git open session-update "${UPDATE_HOST:-unknown}" gstack-self-update-pull "auto_upgrade=true" \
-    bash -c 'git -C "$1" fetch -q 2>"${2:-/dev/null}"' _ "$GSTACK_DIR" "$PULL_ERR_FILE"
-  PULL_EXIT=$?
+  # The channel decides which ref is fetched and followed. stable is fetched
+  # by refspec: team installs are single-branch clones, whose plain fetch
+  # brings main only. Before the first release is cut origin has no stable,
+  # and the updater follows main instead of standing still.
+  CHANNEL=$(gstack_update_channel "$GSTACK_DIR" 2>/dev/null) || CHANNEL=main
+  PULL_EXIT=0
+  if [ "$CHANNEL" = stable ]; then
+    GSTACK_HOME="$STATE_DIR" _receipted_git open session-update "${UPDATE_HOST:-unknown}" gstack-self-update-pull "auto_upgrade=true" \
+      bash -c 'git -C "$1" fetch -q origin "$3" 2>"${2:-/dev/null}"' _ "$GSTACK_DIR" "$PULL_ERR_FILE" "$(gstack_update_channel_refspec stable)"
+    PULL_EXIT=$?
+    if [ "$PULL_EXIT" -ne 0 ] && gstack_update_channel_missing "$(cat "${PULL_ERR_FILE:-/dev/null}" 2>/dev/null)"; then
+      log_entry "CHANNEL_FALLBACK stable->main reason=no-stable-on-origin"
+      CHANNEL=main
+    fi
+  fi
+  if [ "$CHANNEL" = main ]; then
+    GSTACK_HOME="$STATE_DIR" _receipted_git open session-update "${UPDATE_HOST:-unknown}" gstack-self-update-pull "auto_upgrade=true" \
+      bash -c 'git -C "$1" fetch -q 2>"${2:-/dev/null}"' _ "$GSTACK_DIR" "$PULL_ERR_FILE"
+    PULL_EXIT=$?
+  fi
   # The fast-forward targets the exact revision whose requirement was read.
   # Setup runs `bun` from this PATH, so that is the binary checked; a
   # version it cannot read holds too (bun-version-unreadable, #3195).
   INCOMING="" HELD=""
   if [ "$PULL_EXIT" -eq 0 ]; then
-    INCOMING=$(git -C "$GSTACK_DIR" rev-parse --verify '@{upstream}^{commit}' 2>"${PULL_ERR_FILE:-/dev/null}") || PULL_EXIT=1
+    if [ "$CHANNEL" = stable ]; then
+      INCOMING=$(git -C "$GSTACK_DIR" rev-parse --verify 'refs/remotes/origin/stable^{commit}' 2>"${PULL_ERR_FILE:-/dev/null}") || PULL_EXIT=1
+      # An install ahead of the release (it followed main until now) waits
+      # for stable to pass it; the updater never moves a checkout backwards.
+      # A depth-1 clone cannot see that an older release is its ancestor, so
+      # when the histories look unrelated the VERSIONs decide: main stamps a
+      # higher version at every merge, and stable is always a main commit.
+      if [ "$PULL_EXIT" -eq 0 ] && [ "$INCOMING" != "$OLD_HEAD" ] && channel_behind_release "$INCOMING" "$OLD_HEAD"; then
+        log_entry "CHANNEL stable ahead_of_release head=$OLD_HEAD stable=$INCOMING"
+        INCOMING=$OLD_HEAD
+      elif [ "$PULL_EXIT" -eq 0 ]; then
+        log_entry "CHANNEL stable target=$INCOMING"
+      fi
+    else
+      INCOMING=$(git -C "$GSTACK_DIR" rev-parse --verify '@{upstream}^{commit}' 2>"${PULL_ERR_FILE:-/dev/null}") || PULL_EXIT=1
+    fi
   fi
   if [ "$PULL_EXIT" -eq 0 ] && [ "$INCOMING" != "$OLD_HEAD" ]; then
     HELD=$(gstack_bun_incoming_hold "$GSTACK_DIR" "$INCOMING" 2>/dev/null) || HELD=""
@@ -417,7 +502,7 @@ fi
           log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=${4##*/} kept_ref=$4 $5"
           rescue_note "$4" "${5#unmerged=}" ;;
         0:*) ;;
-        3:*) HELD=$FF_OUT PULL_EXIT=0 ;;
+        3:*|6:*) HELD=$FF_OUT PULL_EXIT=0 ;;
         75:*) log_entry "SKIP ff_busy $(ff_flatten "$FF_OUT" 200)"; rm -f "$PULL_ERR_FILE" 2>/dev/null; exit 0 ;;
         *) printf '%s\n' "${FF_OUT:-bin/gstack-ff-update exited $PULL_EXIT}" > "${PULL_ERR_FILE:-/dev/null}" ;;
       esac

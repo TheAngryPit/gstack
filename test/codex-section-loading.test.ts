@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, existsSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { readSkillStartup } from './helpers/skill-startup';
 import { SECTION, rewriteCarvedSectionRefs } from '../scripts/resolvers/sections';
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import { getHostConfig } from '../hosts';
@@ -37,7 +38,7 @@ test('ship skeleton is under the existing ceiling and all section references rea
 test('generated Codex setup and execution preserve native capabilities without Claude commands',()=>{
   const skills=join(output,'.agents','skills');
   expect(existsSync(join(skills,'gstack-claude'))).toBe(false);
-  const mcp=readFileSync(join(skills,'gstack-setup-gbrain','SKILL.md'),'utf8');
+  const mcp=readSkillStartup(join(skills,'gstack-setup-gbrain','SKILL.md'));
   expect(mcp).toContain('codex mcp add gbrain --env');
   expect(mcp).toContain('Native Codex decisions');
   expect(mcp).toContain('request_user_input');

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
+import { readSkillStartup } from './helpers/skill-startup';
 
 const ROOT = resolve(import.meta.dir, '..');
 const scratch = mkdtempSync(join(tmpdir(), 'gstack-codex-complete-output-'));
@@ -10,7 +11,8 @@ const rendered = join(scratch, 'render');
 const skills = join(rendered, '.agents', 'skills');
 
 function read(skill: string, section?: string): string {
-  return readFileSync(join(skills, `gstack-${skill}`, section ? `sections/${section}.md` : 'SKILL.md'), 'utf8');
+  const file = join(skills, `gstack-${skill}`, section ? `sections/${section}.md` : 'SKILL.md');
+  return section ? readFileSync(file, 'utf8') : readSkillStartup(file);
 }
 
 function readComplete(skill: string): string {
@@ -52,8 +54,8 @@ describe('complete native Codex output', () => {
     expect(officeHours).toContain('## Phase 4: Alternatives Generation');
     expect(officeHours).toContain('Produce 2-3 distinct implementation approaches.');
     expect(officeHours).toContain('Emit ONE AskUserQuestion that lists every alternative (A/B and optionally C) as numbered options');
-    expect(officeHours).toContain('**STOP.** Do NOT proceed to Phase 4.5 (Founder Signal Synthesis), Phase 5 (Design Doc), Phase 6 (Closing), or any design-doc generation until the user responds.');
-    expect(officeHours).toContain('A "clearly winning approach" is still an approach decision and still needs explicit user approval before it lands in the design doc.');
+    expect(officeHours).toContain('**STOP.** Do NOT proceed to Phase 4.25, 4.5, 5 or 6, or write any design doc, until the user responds.');
+    expect(officeHours).toContain('A "clearly winning approach" still needs explicit approval; writing the recommendation in prose and continuing is the failure this gate prevents.');
   });
 
   test('office hours retains both mode-specific cold reads and two design lenses', () => {
@@ -97,8 +99,8 @@ describe('complete native Codex output', () => {
     expect(output).toContain('prose does not change collaboration mode');
     expect(output).toContain('This skill produces design docs, not code.');
     expect(output).toContain('plain-text question');
-    expect(output).toContain('still needs explicit user approval before it lands in the design doc');
-    expect(output).toContain('Do NOT proceed to Phase 4.5');
+    expect(output).toContain('still needs explicit approval; writing the recommendation in prose and continuing is the failure this gate prevents.');
+    expect(output).toContain('Do NOT proceed to Phase 4.25, 4.5, 5 or 6');
     expect(output).toContain('DONE — design doc APPROVED');
     expect(read('plan-eng-review')).toContain('NO UNRESOLVED DECISIONS');
   });
@@ -124,7 +126,7 @@ describe('complete native Codex output', () => {
     const claude = (skill: string, section?: string): string => readFileSync(join(rendered, skill, section ? `sections/${section}.md` : 'SKILL.md'), 'utf8');
     expect(claude('office-hours')).toContain('Claude subagent');
     expect(claude('office-hours', 'design-and-handoff')).toContain('Use the Agent tool');
-    expect(claude('spec')).toContain('Claude Code agent');
+    expect(claude('spec', 'gate-and-file')).toContain('claude -p');
     expect(claude('ship', 'documentation')).toContain('subagent_type: "general-purpose"');
   });
 });

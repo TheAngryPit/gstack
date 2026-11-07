@@ -35,9 +35,9 @@ test('adversarial outside failures retain the required native pass without dupli
       const preflight = outsideVoicePreflight(ctx, { disabledBehavior: 'codex-only' });
       expect(preflight).toMatch(/(?:do not dispatch a duplicate|without duplicating it)/);
       expect(preflight).not.toMatch(/fall(?:ing)? back to (?:a|the) .*subagent/i);
-      expect(output).toContain('adversarial subagent (always runs)');
-      expectMentions(output, [['do not', 'dispatch', 'retain']], 'output');
-      expect(output.match(/Retain the required native pass without duplicating it; it cannot complete outside coverage\./g)).toHaveLength(2);
+      expect(output).toContain(skillName === 'ship' ? 'adversarial subagent (on `DISPATCH: adversarial-native`)' : 'adversarial subagent (always runs)');
+      expectMentions(output, [skillName === 'ship' ? ['native', 'follows', 'DISPATCH'] : ['do not', 'dispatch', 'retain']], 'output');
+      expect(output.match(skillName === 'ship' ? /A dispatched native pass runs once either way; outside output cannot complete it\./g : /Retain the required native pass without duplicating it; it cannot complete outside coverage\./g)).toHaveLength(2);
       expect(output).not.toContain("Use the caller's fallback");
       expectMentions(output, [['only', 'non-blocking', 'adversarial']], 'output');
       expect(output).toContain('GATE: MISSING COVERAGE');
@@ -145,6 +145,12 @@ test('plan-review and doc-review run headers admit only the CODEX_MODE values th
       const ctx: TemplateContext = { host: host.name, skillName, tmplPath: `${skillName}/SKILL.md.tmpl`, paths: HOST_PATHS[host.name] };
       const output = generateCodexPlanReview(ctx);
       const where = `${host.name} ${skillName}`;
+      if (host.name === 'codex') {
+        expect(output, where).toContain('native');
+        expect(output, where).not.toContain('codex exec');
+        expect(fenceModes(output), where).toEqual([]);
+        continue;
+      }
       expect(fenceModes(output), where).toEqual(['disabled', 'not_installed', 'ready', 'under_current_harness']);
       expect(headers(output), where).toEqual([`**If \`CODEX_MODE: ready\` — run ${outsideVoiceFor(ctx).label}:**`]);
       const run = output.slice(output.indexOf(headers(output)[0]), output.indexOf('**Native fallback'));
@@ -160,6 +166,12 @@ test('plan-review and doc-review run headers admit only the CODEX_MODE values th
     }
     const ctx: TemplateContext = { host: host.name, skillName: 'document-release', tmplPath: 'document-release/SKILL.md.tmpl', paths: HOST_PATHS[host.name] };
     const doc = generateCodexDocReview(ctx);
+    if (host.name === 'codex') {
+      expect(doc).toContain('native');
+      expect(doc).not.toContain('codex exec');
+      expect(headers(doc)).toEqual([]);
+      continue;
+    }
     const admitsUnverified = fenceModes(doc).includes('unverified');
     expect(admitsUnverified, host.name).toBe(outsideVoiceFor(ctx).id === 'codex');
     expect(headers(doc), host.name).toEqual([`**If \`CODEX_MODE: ready\`${admitsUnverified ? ' (or \`unverified\`)' : ''} — run ${outsideVoiceFor(ctx).label}:**`]);

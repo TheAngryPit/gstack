@@ -1,3 +1,4 @@
+import { upstreamCondition } from './helpers/fork-paid-workflow';
 /**
  * Sliced-lane wiring pins for the paid CI workflows — the successor to
  * evals-workflow-matrix.test.ts, which enforced completeness of a
@@ -302,7 +303,7 @@ describe('evals-periodic.yml host-run Codex slices', () => {
     expect(matrixStep.run).toContain('} >> "$GITHUB_OUTPUT"');
     expect(planner.outputs!.periodic_codex_slices).toBe('${{ steps.periodic-matrix.outputs.codex_slices }}');
     expect(codex.needs).toEqual(['build-image', 'plan-slices']);
-    expect(codex.if).toBe("${{ needs.plan-slices.outputs.periodic_lane == 'true' && needs.plan-slices.outputs.periodic_codex_slices != '[]' }}");
+    expect(upstreamCondition(codex.if)).toBe(upstreamCondition("${{ needs.plan-slices.outputs.periodic_lane == 'true' && needs.plan-slices.outputs.periodic_codex_slices != '[]' }}"));
     expect(codex.strategy!.matrix.slice).toBe('${{ fromJSON(needs.plan-slices.outputs.periodic_codex_slices) }}');
     expect(codex['timeout-minutes']).toBe('${{ fromJSON(needs.plan-slices.outputs.periodic_slice_timeouts)[matrix.slice] }}');
     expect(codex.steps[0]!.run).toBe('echo "GSTACK_SLICE_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"');
@@ -465,7 +466,7 @@ describe('panel verdict surfaces (eval reliability policy)', () => {
     expect(report.permissions).toEqual({ contents: 'read', issues: 'write', actions: 'read' });
     const gate = report.steps.find(step => step.id === 'pass-rates')!;
     expect(gate.run).toContain('bun run eval:pass-rates --gate --runs 10');
-    expect(gate.if).toBe('always()');
+    expect(upstreamCondition(gate.if)).toBe(upstreamCondition('always()'));
     for (const name of ['Write the census report', 'Upsert tracking issue on failure', 'Fail the workflow when reconciliation failed']) {
       expect(report.steps.find(step => step.name === name)!.if).toContain("steps.pass-rates.outputs.exit != '0'");
     }
@@ -476,7 +477,7 @@ describe('panel verdict surfaces (eval reliability policy)', () => {
     const redispatch = jobs.redispatch!;
     expect([redispatch.needs].flat()).toEqual(['report']);
     expect(redispatch.permissions).toEqual({ actions: 'write' });
-    expect(redispatch.if).toBe("${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.report.outputs.redispatch == 'true' }}");
+    expect(upstreamCondition(redispatch.if)).toBe(upstreamCondition("${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.report.outputs.redispatch == 'true' }}"));
     expect(redispatch.steps[0]!.run).toContain('-f redispatch_of="$GITHUB_RUN_ID"');
     // A census-only run re-dispatches with its own arms, never as a weekly run.
     expect(redispatch.steps[0]!.run).toContain('${CENSUS_ARMS:+-f census_arms="$CENSUS_ARMS"}');
@@ -508,7 +509,7 @@ describe('scheduled paid lanes: concurrency and branch dispatch scope', () => {
     const wf = parse(periodicYml);
     expect(wf.on.workflow_dispatch!.inputs!.include_gate_census).toMatchObject({ type: 'boolean', default: false });
     // The planner selects the census arms (scripts/census-arms.ts); no arm, no census job.
-    expect(wf.jobs['gate-census']!.if).toBe("${{ needs.plan-slices.outputs.gate_matrix != '[]' }}");
+    expect(upstreamCondition(wf.jobs['gate-census']!.if)).toBe(upstreamCondition("${{ needs.plan-slices.outputs.gate_matrix != '[]' }}"));
     const select = wf.jobs['plan-slices']!.steps.find(step => step.id === 'census')!;
     expect(select.env?.INCLUDE_GATE_CENSUS).toBe("${{ github.ref == 'refs/heads/main' || inputs.include_gate_census }}");
     expect(select.run).toBe('bun --no-install run scripts/census-arms.ts --select >> "$GITHUB_OUTPUT"');

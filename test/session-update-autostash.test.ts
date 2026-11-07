@@ -41,7 +41,7 @@ function makeFixture() {
     mode: 0o755,
   });
   fs.writeFileSync(path.join(seed, 'setup'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-  for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
+  for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-lease', 'bin/gstack-update-channel.sh', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
     const target = path.join(seed, relative);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(ROOT, relative), target);
@@ -413,7 +413,7 @@ describe.skipIf(process.platform === 'win32')('gstack-session-update: a conflict
     fs.writeFileSync(path.join(seed, 'bin', 'gstack-config'),
       '#!/usr/bin/env bash\nif [ "$1" = "get" ]; then case "$2" in auto_upgrade) echo true;; skill_prefix) echo false;; *) echo "";; esac; fi\nexit 0\n', { mode: 0o755 });
     fs.writeFileSync(path.join(seed, 'bin', 'gstack-patch-names'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-    for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
+    for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-lease', 'bin/gstack-update-channel.sh', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
       const target = path.join(seed, relative);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.copyFileSync(path.join(ROOT, relative), target);

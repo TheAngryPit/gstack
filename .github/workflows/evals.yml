@@ -71,7 +71,6 @@ env:
 jobs:
   # Build Docker image with pre-baked toolchain (cached — only rebuilds on Dockerfile/lockfile change)
   build-image:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (github.actor != 'dependabot[bot]' && needs.route.outputs.superseded != 'true')) }}
     # Dependabot-triggered pull_request runs get a read-only GITHUB_TOKEN, so
     # a lockfile bump = new hash = failed ghcr push = permanently red check
     # (EV6, fork port wave 2). Skip the build for dependabot; the evals job's
@@ -83,6 +82,7 @@ jobs:
     # route job, which refuses a screen of a fork or closed PR, and skips a
     # superseded screen, whose slices plan nothing.
     needs: [route]
+    if: ${{ github.repository == 'garrytan/gstack' && (github.actor != 'dependabot[bot]' && needs.route.outputs.superseded != 'true') }}
     runs-on: ubicloud-standard-8
     timeout-minutes: 15
     permissions:
@@ -166,8 +166,8 @@ jobs:
   # `bisect` once scripts/train-gate.ts has validated their inputs. A refused
   # dispatch fails here, before any paid work.
   route:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (github.actor != 'dependabot[bot]')) }}
     runs-on: ubuntu-24.04
+    if: ${{ github.repository == 'garrytan/gstack' && (github.actor != 'dependabot[bot]') }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -317,9 +317,9 @@ jobs:
   # the wait: the train gate and the dispatched screen carry the paid work,
   # and Free Tests stays the required free check.
   readiness:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && needs.route.outputs.mode != 'pr-summary')) }}
     runs-on: ubuntu-24.04
     needs: [route]
+    if: ${{ github.repository == 'garrytan/gstack' && (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && needs.route.outputs.mode != 'pr-summary') }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -353,9 +353,9 @@ jobs:
   # Replace it (never post a new one) with what happened to this head. Runs no
   # repository code.
   readiness-comment:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && needs.readiness.result == 'failure' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     runs-on: ubuntu-24.04
     needs: [readiness]
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.readiness.result == 'failure' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     timeout-minutes: 5
     permissions:
       pull-requests: write
@@ -389,12 +389,12 @@ jobs:
   # fails the run: any gh problem degrades to "no recovered receipts" and
   # plan-slices turns reuse off, so cases execute unreduced.
   recover-receipts:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && needs.route.result == 'success' && needs.route.outputs.superseded != 'true' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.route.outputs.mode == 'pr' && !contains(github.event.pull_request.labels.*.name, 'evals-fresh')) || (github.event_name == 'workflow_dispatch' && inputs.pr_receipts != '') || needs.route.outputs.mode == 'screen'))) }}
     runs-on: ubuntu-24.04
     needs: [readiness, route]
     # Runs after readiness settles, so a superseded run's cancellation has usually completed; a head whose Free Tests failed recovers nothing.
     # A dispatch naming pr_receipts reads that PR's receipts from its runs' artifacts (cache entries are ref-scoped).
     # A dispatched screen only looks for a gate verdict to reuse (R2a/R2); a PR push under a train policy (pr-summary) skips this job.
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && needs.route.result == 'success' && needs.route.outputs.superseded != 'true' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.route.outputs.mode == 'pr' && !contains(github.event.pull_request.labels.*.name, 'evals-fresh')) || (github.event_name == 'workflow_dispatch' && inputs.pr_receipts != '') || needs.route.outputs.mode == 'screen')) }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -494,9 +494,9 @@ jobs:
   # screening selection and its estimated cost, for free; the train's full
   # gate covers every merge. Without a train block it never runs.
   screen-summary:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (needs.route.outputs.mode == 'pr-summary' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     runs-on: ubuntu-24.04
     needs: [route]
+    if: ${{ github.repository == 'garrytan/gstack' && (needs.route.outputs.mode == 'pr-summary' && github.event.pull_request.head.repo.full_name == github.repository) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -538,11 +538,11 @@ jobs:
   # deterministically; fork work gets real coverage via a trusted base-repo
   # branch (see CLAUDE.md's garrytan-agents workflow).
   plan-slices:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && needs.route.result == 'success' && needs.route.outputs.superseded != 'true' && contains(fromJSON('["pr","screen","train","dispatch"]'), needs.route.outputs.mode) && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on: ubicloud-standard-8
     needs: [readiness, recover-receipts, route]
     # !cancelled(): plans even when readiness or recovery was skipped (dispatch, evals-fresh) or recovery failed (reuse is then off); a superseded run, or a head whose readiness failed (Free Tests red), plans nothing.
     # The route job must have named a planned mode: pr-summary (a PR push under a train policy) and bisect plan nothing here, and neither does a refused dispatch.
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && needs.route.result == 'success' && needs.route.outputs.superseded != 'true' && contains(fromJSON('["pr","screen","train","dispatch"]'), needs.route.outputs.mode) && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -662,7 +662,6 @@ jobs:
           retention-days: 30
 
   eval-slices:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && needs.build-image.result == 'success' && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true')) }}
     runs-on: ubicloud-standard-8
     needs: [build-image, plan-slices]
     env:
@@ -671,6 +670,7 @@ jobs:
     # (image already published), but a newer push's cancel-in-progress stops
     # it instead of letting a superseded run finish its paid slices first.
     # A confirmed verdict reuse (R2a/R2) runs no paid slice.
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.build-image.result == 'success' && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true') }}
     # The planner packs ~7 minutes of recorded work per slice (EVALS_JOBS=2 x
     # EVALS_CONCURRENCY=2 per runner, never the old 40-way per-row fan-out
     # that queued claude session STARTUP behind 39 siblings). Each slice's job
@@ -841,9 +841,9 @@ jobs:
   # flake record) or red. Train runs use the same path; bisects rerun inside
   # scripts/train-gate.ts.
   rerun-plan:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true')) }}
     runs-on: ubuntu-24.04
     needs: [plan-slices, eval-slices]
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true') }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -912,9 +912,9 @@ jobs:
           retention-days: 90
 
   eval-rerun:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && needs.build-image.result == 'success' && needs.rerun-plan.outputs.planned == 'true')) }}
     runs-on: ubicloud-standard-8
     needs: [build-image, rerun-plan]
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.build-image.result == 'success' && needs.rerun-plan.outputs.planned == 'true') }}
     env:
       EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-eval-rerun-${{ matrix.slice }}
     timeout-minutes: ${{ fromJSON(needs.rerun-plan.outputs.slice_timeouts)[matrix.slice] }}
@@ -1035,9 +1035,9 @@ jobs:
   # `gstack-ship-queue train bisect` reads, as <record_artifact>-bisect-<sha12>.
   # A bisect never reuses a result and never binds a verdict.
   train-bisect:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && needs.build-image.result == 'success' && needs.route.result == 'success' && needs.route.outputs.mode == 'bisect')) }}
     runs-on: ubicloud-standard-8
     needs: [build-image, route]
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.build-image.result == 'success' && needs.route.result == 'success' && needs.route.outputs.mode == 'bisect') }}
     env:
       EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-train-bisect-${{ matrix.slice }}
     timeout-minutes: ${{ fromJSON(needs.route.outputs.bisect_timeouts)[matrix.slice] }}
@@ -1182,7 +1182,6 @@ jobs:
           retention-days: 30
 
   slices-report:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && needs.plan-slices.result == 'success')) }}
     # GitHub-hosted, like recover-receipts: Ubicloud runners send actions/cache
     # to Ubicloud's own transparent cache, which a GitHub-hosted restore never
     # sees, so a store saved on Ubicloud was never restored (GSTA-48: every
@@ -1192,6 +1191,7 @@ jobs:
     # !cancelled(): the report must run (and FAIL) when an executor died — a
     # missing slice artifact reading as green is the class this lane kills —
     # but a run superseded by a newer push stops here.
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.plan-slices.result == 'success') }}
     timeout-minutes: 5
     # contents:read ONLY — this job executes the PR-authored reconcile
     # runner from the PR checkout, so it
@@ -1404,9 +1404,9 @@ jobs:
   # published only for a complete GREEN census. Its own job with checks:
   # write and no repository code (the same split as slices-comment).
   train-check:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && needs.plan-slices.outputs.mode == 'train' && needs.slices-report.result == 'success')) }}
     runs-on: ubuntu-24.04
     needs: [plan-slices, slices-report]
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.plan-slices.outputs.mode == 'train' && needs.slices-report.result == 'success') }}
     timeout-minutes: 5
     permissions:
       checks: write
@@ -1441,10 +1441,10 @@ jobs:
   # checkout, no bun install — only downloaded artifacts, jq, and gh. See the
   # trust-boundary note on slices-report.
   slices-comment:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (!cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || inputs.screen_pr != '') && needs.slices-report.result != 'skipped')) }}
     runs-on: ubicloud-standard-2
     needs: slices-report
     # A dispatched screen comments on its PR too (screen_pr was validated by the route job, or nothing ran).
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || inputs.screen_pr != '') && needs.slices-report.result != 'skipped') }}
     timeout-minutes: 5
     permissions:
       pull-requests: write

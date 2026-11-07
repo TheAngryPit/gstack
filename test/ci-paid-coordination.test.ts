@@ -1,3 +1,4 @@
+import { upstreamCondition } from './helpers/fork-paid-workflow';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -111,10 +112,10 @@ describe('paid CI coordination stays off the eval image', () => {
       expect(JSON.stringify(executor.container)).toContain('needs.build-image.outputs.image-tag');
       if (name === 'evals.yml') {
         // A confirmed verdict reuse (R2a/R2) is the one PR run that executes no slice.
-        expect(executor.if).toBe("${{ !cancelled() && needs.build-image.result == 'success' && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true' }}");
+        expect(upstreamCondition(executor.if)).toBe(upstreamCondition("${{ !cancelled() && needs.build-image.result == 'success' && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true' }}"));
       } else {
         // A census-only run (monthly cron or census_arms dispatch) executes no periodic slice.
-        expect(executor.if).toBe("${{ needs.plan-slices.outputs.periodic_lane == 'true' }}");
+        expect(upstreamCondition(executor.if)).toBe(upstreamCondition("${{ needs.plan-slices.outputs.periodic_lane == 'true' }}"));
       }
       expect(executor.steps.some(step => step.run === 'bun run build')).toBe(true);
       expect(executor.steps.some(step => step.uses === './.github/actions/restore-deps')).toBe(true);
@@ -125,9 +126,7 @@ describe('paid CI coordination stays off the eval image', () => {
       expect(report.container).toBeUndefined();
       expect(report.needs).toContain('plan-slices');
       expect(report.needs).toContain('eval-slices');
-      expect(report.if).toBe(name === 'evals.yml'
-        ? "${{ !cancelled() && needs.plan-slices.result == 'success' }}"
-        : "${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.plan-slices.result == 'success' }}");
+      expect(upstreamCondition(report.if)).toBe("!cancelled() && needs.plan-slices.result == 'success'");
       expect(JSON.stringify(report.steps)).not.toMatch(/restore-deps|bun install/);
       expect(report.steps.find(step => step.run?.includes('--report'))?.run).toContain('bun --no-install run');
       if (name === 'evals.yml') expect(report.permissions).toEqual({ contents: 'read' });
@@ -137,7 +136,7 @@ describe('paid CI coordination stays off the eval image', () => {
       const logs = jobs['eval-slices'].steps.find(step => step.with?.name === 'paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}');
       expect(logs?.uses).toStartWith('actions/upload-artifact@');
       // A failed trial no longer reds its runner; its log is still the evidence.
-      expect(logs?.if).toBe('always()');
+      expect(upstreamCondition(logs?.if)).toBe(upstreamCondition('always()'));
       expect(logs?.with?.['include-hidden-files']).toBe(true);
       expect(String(logs?.with?.path).trim().split('\n')).toEqual([
         '/home/runner/.cache/gstack-paid-shard-*.log',
@@ -150,7 +149,7 @@ describe('paid CI coordination stays off the eval image', () => {
       // evals.yml: eval-slices, the rule-16 eval-rerun and train-bisect (GSTA-49 T1b), each under its own EVALS_RUN_ID.
       expect(captures).toHaveLength(name === 'evals.yml' ? 3 : name === 'evals-periodic.yml' ? 3 : 2);
       for (const capture of captures) {
-        expect(capture.if).toBe('always()');
+        expect(upstreamCondition(capture.if)).toBe(upstreamCondition('always()'));
         expect(String(capture.with?.path).trim().split('\n').map(hostHome)).toEqual([
           '~/.gstack/projects/*/e2e-runs', '~/.gstack/projects/*/evals/qa-callers',
           '~/.gstack-dev/e2e-runs', '~/.gstack-dev/evals/qa-callers',
@@ -159,7 +158,7 @@ describe('paid CI coordination stays off the eval image', () => {
       const codexLogs = name === 'evals-periodic.yml'
         ? jobs['eval-codex-slices'].steps.find(step => step.with?.name === 'paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}') : undefined;
       if (codexLogs) {
-        expect(codexLogs.if).toBe('always()');
+        expect(upstreamCondition(codexLogs.if)).toBe(upstreamCondition('always()'));
         // The container sets TMPDIR under HOME, so shard logs land in the mounted HOME's cache.
         expect(String(codexLogs.with?.path).trim().split('\n').map(hostHome)).toEqual(['~/.cache/gstack-paid-shard-*.log']);
       }
@@ -182,7 +181,7 @@ describe('paid CI coordination stays off the eval image', () => {
     // a readiness failure (Free Tests red on this head) or a superseded head plans nothing; the trust clause still gates it.
     // GSTA-49 T1b: the route job must have succeeded and named a planned mode (pr, screen, train, dispatch); a superseded screen plans nothing.
     const route = "needs.route.result == 'success' && needs.route.outputs.superseded != 'true' && contains(fromJSON('[\"pr\",\"screen\",\"train\",\"dispatch\"]'), needs.route.outputs.mode)";
-    expect(jobs['plan-slices'].if).toBe(`\${{ !cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && ${route} && ${trust} }}`);
+    expect(upstreamCondition(jobs['plan-slices'].if)).toBe(upstreamCondition(`\${{ !cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && ${route} && ${trust} }}`));
     // The coordination jobs never run for Dependabot or for a fork PR either (recovery also serves an explicit pr_receipts dispatch).
     expect(jobs.readiness.if).toContain("github.actor != 'dependabot[bot]'");
     expect(jobs.readiness.if).toContain("github.event_name == 'pull_request'");

@@ -73,7 +73,7 @@ env:
 
 jobs:
   build-image:
-    if: ${{ github.repository == 'garrytan/gstack' }}
+    if: github.repository == 'garrytan/gstack'
     runs-on: ubicloud-standard-8
     timeout-minutes: 15
     permissions:
@@ -127,11 +127,11 @@ jobs:
             ${{ env.IMAGE }}:latest
 
   plan-slices:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && github.event.schedule != '30 7 * * *' && !inputs.schema_canary_only) }}
     runs-on: ubicloud-standard-8
     timeout-minutes: 10
     # The daily schedule and a canary-only dispatch run schema-canary alone;
     # every census job needs this one, so they all skip with it.
+    if: ${{ github.repository == 'garrytan/gstack' && (github.event.schedule != '30 7 * * *' && !inputs.schema_canary_only) }}
     permissions:
       contents: read
     outputs:
@@ -230,9 +230,9 @@ jobs:
   # weekly census also runs it. Read-only token; the key's spend is capped by
   # the case (one haiku session, about $0.02).
   schema-canary:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (github.event.schedule == '30 7 * * *' || inputs.schema_canary_only)) }}
     runs-on: ubicloud-standard-2
     needs: build-image
+    if: ${{ github.repository == 'garrytan/gstack' && (github.event.schedule == '30 7 * * *' || inputs.schema_canary_only) }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -272,9 +272,9 @@ jobs:
           retention-days: 90
 
   eval-slices:
-    if: ${{ github.repository == 'garrytan/gstack' && (needs.plan-slices.outputs.periodic_lane == 'true') }}
     runs-on: ubicloud-standard-8
     needs: [build-image, plan-slices]
+    if: ${{ github.repository == 'garrytan/gstack' && (needs.plan-slices.outputs.periodic_lane == 'true') }}
     env:
       EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-eval-slices-${{ matrix.slice }}
     # The planner packs ~7 minutes of recorded work per slice; each slice's job
@@ -425,9 +425,9 @@ jobs:
   # (scripts/lib/paid-plan.ts codexSlicesOf); slice artifacts use the same
   # names as eval-slices, so the report reconciles one manifest.
   eval-codex-slices:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (needs.plan-slices.outputs.periodic_lane == 'true' && needs.plan-slices.outputs.periodic_codex_slices != '[]')) }}
     runs-on: ubicloud-standard-8
     needs: [build-image, plan-slices]
+    if: ${{ github.repository == 'garrytan/gstack' && (needs.plan-slices.outputs.periodic_lane == 'true' && needs.plan-slices.outputs.periodic_codex_slices != '[]') }}
     env:
       EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-eval-slices-${{ matrix.slice }}
     timeout-minutes: ${{ fromJSON(needs.plan-slices.outputs.periodic_slice_timeouts)[matrix.slice] }}
@@ -551,7 +551,6 @@ jobs:
   # blind spots rot invisibly. Census health, not selector correctness —
   # selector logic has free synthetic-diff contract tests.
   gate-census:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && (needs.plan-slices.outputs.gate_matrix != '[]')) }}
     name: gate-census-${{ matrix.arm }} (${{ matrix.slice }})
     runs-on: ubicloud-standard-8
     needs: [build-image, plan-slices]
@@ -559,6 +558,7 @@ jobs:
     # validates the periodic lane only unless it sets include_gate_census or
     # census_arms; gate cases on a branch also go through an evals.yml
     # dispatch with evals_all. Main (schedule or dispatch) always runs it.
+    if: ${{ github.repository == 'garrytan/gstack' && (needs.plan-slices.outputs.gate_matrix != '[]') }}
     env:
       EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-gate-census-${{ matrix.arm }}-${{ matrix.slice }}
     # Per-slice job ceiling from the arm's packed plan (W2c/ENG-2), as for eval-slices.
@@ -671,12 +671,12 @@ jobs:
           retention-days: 90
 
   report:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && !cancelled() && needs.plan-slices.result == 'success') }}
     runs-on: ubicloud-standard-2
     needs: [plan-slices, eval-slices, eval-codex-slices, gate-census]
     # !cancelled(): the report must run (and FAIL) when an executor died — a
     # missing slice artifact reading as green is the class this lane kills —
     # but a cancelled run stops here.
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.plan-slices.result == 'success') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -991,9 +991,9 @@ jobs:
   # job keeps no actions:write; the new run's concurrency group differs, so it
   # never cancels this run.
   redispatch:
-    if: ${{ github.repository == 'garrytan/gstack' && (github.repository == 'garrytan/gstack' && !cancelled() && needs.report.outputs.redispatch == 'true') }}
     runs-on: ubicloud-standard-2
     needs: report
+    if: ${{ github.repository == 'garrytan/gstack' && (!cancelled() && needs.report.outputs.redispatch == 'true') }}
     timeout-minutes: 5
     permissions:
       actions: write

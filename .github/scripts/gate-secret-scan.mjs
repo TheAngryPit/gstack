@@ -1,6 +1,39 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 
+if (process.argv.includes("--per-file")) {
+  let diff = "";
+  process.stdin.setEncoding("utf8");
+  for await (const part of process.stdin) diff += part;
+  const sections = diff.split(/(?=^diff --git )/m);
+  const limit = 8 * 1024 * 1024;
+  let batch = "";
+  let bytes = 0;
+  let failed = false;
+  const scan = (input) => new Promise((resolve) => {
+    const scanner = spawn(process.execPath, [import.meta.filename], {
+      shell: false, windowsHide: true, stdio: ["pipe", "inherit", "inherit"],
+    });
+    scanner.stdin.on("error", (error) => { if (error.code !== "EPIPE") failed = true; });
+    scanner.once("error", () => { failed = true; resolve(); });
+    scanner.once("close", (code) => { if (code !== 0) failed = true; resolve(); });
+    scanner.stdin.end(input);
+  });
+  for (const section of sections) {
+    const size = Buffer.byteLength(section.split(/\r?\n/)
+      .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+      .map((line) => line.slice(1)).join("\n"));
+    if (batch && bytes + size > limit) {
+      await scan(batch);
+      batch = "";
+      bytes = 0;
+    }
+    batch += section;
+    bytes += size;
+  }
+  await scan(batch);
+  process.exitCode = failed ? 1 : 0;
+} else {
 const child = spawn("bun", [
   "bin/gstack-redact",
   "--repo-visibility", "public",
@@ -44,3 +77,5 @@ child.once("close", (code) => {
   console.log(`credential scan: ${high} high, ${medium} advisory`);
   process.exitCode = high > 0 || report.oversize || ![0, 2, 3].includes(code) ? 1 : 0;
 });
+
+}

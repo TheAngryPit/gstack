@@ -12,7 +12,7 @@ description: |
 
 ## Shared preamble (load first)
 
-This skill follows gstack shared preamble `2af24c2d75e4` (AskUserQuestion format, voice, writing, completeness and completion rules). If your Read of that file, headed by this id, is still in context, do not read it again; otherwise Read `sections/preamble.md` relative to the installed `gstack-ship` SKILL.md directory in full before the command below. A section or subsection here with a shared heading replaces the shared one.
+This skill follows gstack shared preamble `16f121fd085f` (AskUserQuestion format, voice, writing, completeness and completion rules). If your Read of that file, headed by this id, is still in context, do not read it again; otherwise Read `sections/preamble.md` relative to the installed `gstack-ship` SKILL.md directory in full before the command below. A section or subsection here with a shared heading replaces the shared one.
 
 ## Preamble (run first)
 
@@ -48,9 +48,9 @@ If `SKILL_PREFIX` is `true` use `/gstack-*` names; paths stay `$GSTACK_ROOT/[ski
 
 ## Question Tuning (skip entirely if `QUESTION_TUNING: false`)
 
-Before each decision brief (AskUserQuestion or Conductor/fallback prose), choose `question_id` from `$GSTACK_ROOT/scripts/question-registry.ts` or `{skill}-{slug}`, then run `$GSTACK_BIN/gstack-question-preference --check "<id>"`; for an unregistered id, write the question summary to `.gstack/tmp/qt.txt` (file-write tool) and append `--summary-file .gstack/tmp/qt.txt` (one-way keyword check); its `--signal-keys` prints an optional signal-key hint. `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
+Before presenting an optional preference question through a native AskUserQuestion schema where available or Conductor/fallback prose, choose `question_id` from `$GSTACK_ROOT/scripts/question-registry.ts` or `{skill}-{slug}`, then run `printf '%s' "<question summary>" | $GSTACK_BIN/gstack-question-preference --check "<id>" --summary-stdin`. `AUTO_DECIDE` means choose the recommended optional preference and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask. A preference never authorises access, publication, credentials, spend, destructive actions, or any new consequence. Native approvals and refusals stay authoritative; ask an actual permission question directly and pause at that gate.
 
-**Embed the question_id as a marker in every asked brief**, ad hoc IDs included, with one ID for check, marker and log. Include `<gstack-qid:{question_id}>` once in the question text itself, not only a command or log. On prose paths, use the explicit reply line. Without the marker the hook never auto-decides.
+Use the advertised native question schema for optional choices. If it is unavailable, ask plainly. Put a stable question_id in the supported identifier field when available and append `<gstack-qid:{question_id}>` to the prompt for compatibility; do not promise this marker is invisible or interpreted by a native hook. Label exactly one recommendation with the native schema's supported suffix. Ambiguous recommendations require asking.
 
 After an actual answer, log best-effort using the command below. Do not claim automatic hook capture or deterministic dedup unless it was verified on this exact native runtime; manual records are not proof of hook delivery.
 
