@@ -12,6 +12,7 @@ test('only downstream free validation workflows are active', () => {
     const source = readFileSync(resolve(active, file), 'utf8');
     const workflow = Bun.YAML.parse(source) as any;
     expect(workflow.on.schedule).toBeUndefined();
+    expect(workflow.on.push.branches).toEqual(['main']);
     expect(workflow.on.pull_request_target).toBeUndefined();
     expect(workflow.permissions).toEqual({ contents: 'read' });
     expect(source).not.toMatch(/secrets\.|ubicloud-standard|test-paid|eval:bg|docker\/(?:login|build-push)-action/);
