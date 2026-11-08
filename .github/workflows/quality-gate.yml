@@ -5,9 +5,6 @@
 #      bin/gstack-redact (HIGH fails the check; MEDIUM is an advisory count —
 #      there is no human in CI to confirm, so it never fails here).
 #   2. ShellCheck (errors only) on the setup/build shell boundary.
-# Dependency advisories are gated by dependency-review.yml (PRs that change
-# the lockfile) and the weekly osv-scanner.yml sweep, not here: an unrelated
-# PR must not turn red because an advisory was published that morning.
 #
 # Trigger is `pull_request`, NEVER `pull_request_target`: fork PRs must not
 # get secret-bearing contexts. Diff excludes cover the planted-bug fixtures

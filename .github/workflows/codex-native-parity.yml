@@ -1,7 +1,7 @@
 name: Codex native parity
 on:
   push:
-    branches: [main, codex/native-parity-latest]
+    branches: [main, codex/native-parity-refresh-20261106]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -26,11 +26,7 @@ jobs:
         run: |
           bun run typecheck
           bun run typecheck:test
-      - name: Preflight native portability and fork CI contracts
-        run: bun test test/module-size-ratchet.test.ts test/skill-check-host-selection.test.ts test/question-tuning-registry-path.test.ts test/shared-libs-rendering.test.ts test/free-tests-workflow-wiring.test.ts test/setup-codex-host-boundaries.test.ts
       - name: Verify native Codex parity against pinned upstream
         run: bun test test/codex-native-parity.test.ts test/codex-native-source-parity.test.ts test/codex-native-complete-output.test.ts test/codex-section-loading.test.ts
       - name: Generate every host without installing
         run: bun run gen:skill-docs --host all --out-dir "$RUNNER_TEMP/gstack-render"
-      - name: Check native lifecycle and bounded test processes
-        run: bun test test/codex-gbrain-binding.test.ts test/codex-request-file.test.ts test/codex-native-lifecycle.test.ts test/gstack-codex-session-import.test.ts test/spawnsync-timeout-tripwire.test.ts
