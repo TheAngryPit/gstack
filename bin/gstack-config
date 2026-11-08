@@ -28,6 +28,7 @@
 # reports which root received the value and which root still overrides it.
 # Docs: https://github.com/garrytan/gstack/blob/main/docs/state-root.md
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 [ -r "$(dirname "$0")/gstack-state-root.sh" ] && . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select
@@ -56,8 +57,11 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 # Docs: https://github.com/garrytan/gstack
 #
 # ─── Behavior ────────────────────────────────────────────────────────
-# proactive: true           # Auto-invoke skills when your request matches one.
-#                           # Set to false to only run skills you type explicitly.
+# proactive: core           # core = auto-invoke only /office-hours, /review, /qa and /ship
+#                           # when your request matches one; every other skill waits
+#                           # for you to type it. all = auto-invoke any matching skill.
+#                           # off = only run skills you type explicitly.
+#                           # (true and false still work: true means all, false means off.)
 #
 # routing_declined: false   # Set to true to skip the CLAUDE.md routing injection
 #                           # prompt. Set back to false to be asked again.
@@ -82,6 +86,9 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 # ─── Updates ─────────────────────────────────────────────────────────
 # auto_upgrade: false       # true = silently upgrade on session start
 # update_check: true        # false = suppress version check notifications
+# update_channel: auto      # auto   = stable when team_mode is true, else main
+#                           # stable = the weekly tagged release (refs/heads/stable)
+#                           # main   = every merge to main (docs/releases.md)
 #
 # ─── Skill naming ────────────────────────────────────────────────────
 # skill_prefix: false       # true = namespace skills as /gstack-qa, /gstack-ship
@@ -96,6 +103,13 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #           (for power users who know the terms)
 #                           # Unknown values default to "default" with a warning.
 #                           # See docs/designs/PLAN_TUNING_V1.md for rationale.
+# plan_mode_preamble: on    # on  = every skill carries the plan-mode preamble
+#                           # off = rendered skills omit the "Plan Mode Safe
+#                           #       Operations" and "Skill Invocation During
+#                           #       Plan Mode" sections (~1.8 KB each), for
+#                           #       users who never enter plan mode
+#                           # Applies on the next ./setup run. Unknown values
+#                           # default to "on" with a warning.
 #
 # ─── Artifacts sync (renamed from gbrain_sync_mode in v1.27.0.0) ─────
 # artifacts_sync_mode: off  # off | artifacts-only | full
@@ -183,13 +197,27 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 # Optional pins: model_frontier_claude, model_frontier_openai,
 # model_smart_claude and model_smart_openai. Leave pins absent for catalog defaults;
 # empty pins are invalid. gstack-models list prints copyable set/unset commands.
+# agent_model: the model for gstack agents (lanes, subagents, reviewers): host,
+# a family (opus, fable, sonnet, haiku, astra, sol, luna, terra) or <provider>/<model>.
+# Absent = host. A preference, not a policy: gstack-models resolve --role agent.
 # Invalid writes are rejected and preserve the stored value.
 # codex_effort:             # Codex reasoning effort for outside reviews and /codex:
 #                           #   minimal | low | medium | high | xhigh | max | ultra.
 #                           #   Absent = every gate keeps its effort. GSTACK_CODEX_EFFORT
 #                           #   overrides it per run, /codex --effort per request;
 #                           #   /spec keeps medium (120 s budget).
+# review_effort_tiers: on   # on | off. on: audits, trail reviewers and watchers
+#                           #   (nothing that can block a ship) run at light effort on
+#                           #   the same model; every reviewer keeps full.
 # Docs: docs/model-policy.md
+#
+# harness_start_hook:       # on | off. on: ./setup and gstack-harness add the
+#                           #   gstack-start plugin to OpenClaw and Hermes registrations
+#                           #   (a one-line note on every turn to run the start
+#                           #   command of a skill; edits openclaw.json or config.yaml via the
+#                           #   harness CLI). off: takes it out. Absent = each
+#                           #   registration keeps its saved choice (default off).
+#                           #   GSTACK_HARNESS_START_HOOK=1|0 overrides it. Docs: docs/hosts.md
 #
 # ─── Advanced ────────────────────────────────────────────────────────
 # codex_reviews: enabled    # Outside review (Codex or Claude Code by harness): sends
@@ -204,6 +232,17 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #   /codex and /claude-code still run when you ask by name.
 #                           #   An unreadable config counts as disabled.
 #                           #   Invalid values preserve the old value.
+# autoplan_shadow: off      # Shadow mode for the CEO-only decider (gstack-autoplan
+#                           #   driver runs): on gives every gate one hidden model
+#                           #   prediction, recorded before the owner answers, for
+#                           #   taste-replay R2. Sends the reviewed plan and the gate
+#                           #   to that model on your own API key, about $0.07 per
+#                           #   gate, counted against --spend-cap. Read at the first
+#                           #   next of each run only. GSTACK_AUTOPLAN_SHADOW=1|0
+#                           #   overrides.
+#                           #   Invalid values are rejected, the old value kept.
+# autoplan_shadow_model: claude-opus-5-5  # The model the shadow decider runs on.
+#                           #   Docs: docs/unattended.md#shadow-mode
 # browse_extension_id:      # Forks and self-built extensions: the 32-letter (a-p)
 #                           #   Chrome extension ID the browse sidebar terminal accepts.
 #                           #   Empty = the gstack extension. "" clears it.
@@ -259,6 +298,16 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #   so Greptile reviews in parallel (a public repo
 #                           #   asks once). false keeps the old order.
 #                           #   Invalid values are REJECTED (value kept).
+# pr_wait_gating_bots: greptile,macroscope  # review bots gstack-pr-wait
+#                           #   --until ready waits for (comma-separated; a
+#                           #   bot owns logins starting with its name and
+#                           #   checks mentioning it).
+# pr_wait_advisory_bots: coderabbit  # review bots gstack-pr-wait reports but
+#                           #   never waits for. /review and /ship triage the
+#                           #   comments of every bot in both lists (e.g.
+#                           #   coderabbit,copilot). Both lists: lowercase names,
+#                           #   letters, digits, . _ - only; none empties a list.
+#                           #   Invalid values are REJECTED (value kept).
 #
 # ─── Workspace-aware ship ────────────────────────────────────────────
 # workspace_root: $HOME/conductor/workspaces  # Where /ship looks for sibling
@@ -274,14 +323,19 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 # AND the env override is not set. Keep in sync with the CONFIG_HEADER comments.
 lookup_default() {
   case "$1" in
-    proactive) echo "true" ;;
+    proactive) echo "core" ;; # core | all | off (true = all, false = off); core suggests only /office-hours, /review, /qa, /ship
     routing_declined) echo "false" ;;
     telemetry) echo "off" ;;
     auto_upgrade) echo "false" ;;
     update_check) echo "true" ;;
+    update_channel) echo "auto" ;; # auto | stable | main — bin/gstack-update-channel.sh resolves auto (docs/releases.md)
     skill_prefix) echo "false" ;;
     explain_level) echo "default" ;;
+    plan_mode_preamble) echo "on" ;; # on | off — off drops the plan-mode preamble on the next ./setup (#3168)
+    claude_loadout) echo "full" ;; # a modules/loadouts.json name — written by ./setup --loadout (docs/loadouts.md)
     codex_reviews) echo "enabled" ;;
+    autoplan_shadow) echo "off" ;; # on | off — autoplan shadow mode, fixed at each run's first next (lib/autoplan-shadow.ts)
+    autoplan_shadow_model) echo "claude-opus-5-5" ;; # the shadow decider's model; needs a lib/pricing.ts row and its family's API key
     design_detector) echo "auto" ;; # auto | off — impeccable engine pre-pass in the design skills
     design_detector_install_prompted) echo "false" ;; # true once the user answered the one-time engine install offer with "never ask again"
     gstack_contributor) echo "false" ;;
@@ -293,6 +347,10 @@ lookup_default() {
     artifacts_sync_removals) echo "off" ;; # on | off — publish removals of synced files gone from disk
     plan_tune_hooks) echo "prompt" ;; # prompt | yes | no — controls ./setup plan-tune hook install
     timeline_stop_hook) echo "yes" ;; # yes | no — controls ./setup timeline Stop hook registration (#2677)
+    skill_routing) bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(dirname "$0")/gstack-skill-route" --default skill_routing ;; # on | off — the skill-routing UserPromptSubmit hook; default: SWITCH_DEFAULT in lib/skill-route.ts (docs/skill-routing-and-contracts.md)
+    skill_contracts) bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(dirname "$0")/gstack-skill-route" --default skill_contracts ;; # on | off — the skill-contract Stop hook; default: SWITCH_DEFAULT in lib/skill-route.ts (docs/skill-routing-and-contracts.md)
+    investigate_gate) bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(dirname "$0")/gstack-skill-route" --default investigate_gate ;; # on | off — the /investigate enforcement hooks; default: SWITCH_DEFAULT in lib/skill-route.ts (docs/skill-gates.md)
+    ceo_review_gate) bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(dirname "$0")/gstack-skill-route" --default ceo_review_gate ;; # on | off — the /plan-ceo-review enforcement hooks; default: SWITCH_DEFAULT in lib/skill-route.ts (docs/skill-gates.md)
 
     redact_repo_visibility) echo "" ;; # empty → fall through to gh/glab detection
     redact_prepush_hook) echo "false" ;;
@@ -338,8 +396,13 @@ lookup_default() {
     plan_review_tier) echo "frontier" ;; # frontier | smart | host — lib/model-policy.ts reads it strictly
     implementation_tier) echo "smart" ;; # frontier | smart
     model_frontier_claude|model_frontier_openai|model_smart_claude|model_smart_openai) echo "" ;; # empty = shipped catalog ID (gstack-models list)
+    agent_model) echo "" ;; # empty = host (agents keep their own model); gstack-models resolve --role agent
     codex_effort) echo "" ;; # empty = each gate's own effort; /codex --effort, then GSTACK_CODEX_EFFORT, win (gstack-codex-probe run-with-timeout --effort)
+    review_effort_tiers) echo "on" ;; # on | off — gstack-review-plan effort tiers (docs/model-policy.md#reasoning-effort)
+    harness_start_hook) echo "" ;; # on | off — empty = each harness registration keeps its saved choice (docs/hosts.md#start-hook)
     ship_greptile_early) echo "true" ;; # true | false — /ship's early Greptile PR
+    pr_wait_gating_bots) echo "greptile,macroscope" ;; # review bots gstack-pr-wait --until ready waits for
+    pr_wait_advisory_bots) echo "coderabbit" ;; # review bots gstack-pr-wait reports but never waits for
     # Unknown key: exit non-zero instead of printing "". The fallback pattern
     # the preambles use,
     #   VAR=$(gstack-config get <key> 2>/dev/null || echo "<default>")
@@ -736,6 +799,28 @@ $_gstack_legacy_root"
       echo "Warning: explain_level '$VALUE' not recognized. Valid values: default, terse. Using default." >&2
       VALUE="default"
     fi
+    if [ "$KEY" = "proactive" ]; then
+      # Case-insensitive, and the YAML yes/no family maps like gstack-skill-start
+      # reads a hand-edited value: an opt-out must never fail open to core.
+      VALUE=$(printf '%s' "$VALUE" | tr '[:upper:]' '[:lower:]')
+      case "$VALUE" in
+        yes|y|on|1) VALUE="all" ;;
+        no|n|none|0|disabled|never) VALUE="off" ;;
+        core|all|off|true|false) ;;
+        *)
+          echo "Warning: proactive '$VALUE' not recognized. Valid values: core, all, off (true = all, false = off). Using core." >&2
+          VALUE="core"
+          ;;
+      esac
+    fi
+    if [ "$KEY" = "claude_loadout" ] && ! printf '%s' "$VALUE" | grep -Eq '^[a-z0-9-]{1,40}$'; then
+      echo "Warning: claude_loadout must be a loadout name such as lite or full. Using full." >&2
+      VALUE="full"
+    fi
+    if [ "$KEY" = "plan_mode_preamble" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Warning: plan_mode_preamble '$VALUE' not recognized. Valid values: on, off. Using on." >&2
+      VALUE="on"
+    fi
     if [ "$KEY" = "artifacts_sync_mode" ] && [ "$VALUE" != "off" ] && [ "$VALUE" != "artifacts-only" ] && [ "$VALUE" != "full" ]; then
       echo "Warning: artifacts_sync_mode '$VALUE' not recognized. Valid values: off, artifacts-only, full. Using off." >&2
       VALUE="off"
@@ -780,11 +865,29 @@ $_gstack_legacy_root"
     fi
     # codex_effort feeds model_reasoning_effort on paid Codex calls: reject a
     # typo instead of coercing it (the probe refuses an invalid stored value too).
+    if [ "$KEY" = "review_effort_tiers" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Error: review_effort_tiers '$VALUE' not recognized. Valid values: on, off. Existing value left unchanged." >&2
+      exit 1
+    fi
+    if [ "$KEY" = "harness_start_hook" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Error: harness_start_hook '$VALUE' not recognized. Valid values: on, off. Existing value left unchanged. fix: gstack-config unset harness_start_hook keeps each registration's saved choice (docs/hosts.md#start-hook)" >&2
+      exit 1
+    fi
     if [ "$KEY" = "codex_effort" ]; then
       case "$VALUE" in
         minimal|low|medium|high|xhigh|max|ultra) ;;
         *) echo "Error: codex_effort '$VALUE' not recognized. Valid values: minimal, low, medium, high, xhigh, max, ultra. Existing value left unchanged. fix: gstack-config unset codex_effort restores each gate's own effort (https://github.com/garrytan/gstack/blob/main/docs/model-policy.md#reasoning-effort)" >&2
            exit 1 ;;
+      esac
+    fi
+    if [ "$KEY" = "agent_model" ]; then
+      VALUE="${VALUE#"${VALUE%%[![:space:]]*}"}"
+      VALUE="${VALUE%"${VALUE##*[![:space:]]}"}"
+      case "$(printf '%s' "$VALUE" | LC_ALL=C tr 'A-Z' 'a-z')" in
+        host|opus|fable|sonnet|haiku|astra|sol|luna|terra) ;;
+        *) printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[a-z][a-z0-9-]{0,31}/[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}$' || {
+             echo "Error: agent_model '$VALUE' not recognized. Use host, a family (opus, fable, sonnet, haiku, astra, sol, luna, terra) or <provider>/<model> such as anthropic/claude-opus-5-5. Existing value left unchanged. fix: gstack-config unset agent_model returns to host (https://github.com/garrytan/gstack/blob/main/docs/model-policy.md#your-model-preference)" >&2
+             exit 1; } ;;
       esac
     fi
     case "$KEY" in
@@ -826,11 +929,24 @@ $_gstack_legacy_root"
           echo "Error: ship_greptile_early '$VALUE' not recognized. Valid values: true, false. Existing value left unchanged." >&2
           exit 1
         fi ;;
+      pr_wait_gating_bots|pr_wait_advisory_bots)
+        # Comma-separated bot names gstack-pr-wait matches against logins and
+        # check names. Reject anything else so a stray token never widens or
+        # empties the gate by accident; the literal none is the empty list.
+        if ! printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[a-z0-9._-]+(,[a-z0-9._-]+)*$'; then
+          echo "Error: $KEY '$VALUE' is not a comma-separated list of bot names (lowercase letters, digits, . _ -; e.g. greptile,macroscope) or none. Existing value left unchanged." >&2
+          exit 1
+        fi ;;
       ship_rerun_backend|test_backend)
         if [ "$VALUE" != "local" ] && [ "$VALUE" != "ubicloud" ]; then
           echo "Error: $KEY '$VALUE' not recognized. Valid values: local, ubicloud. Existing value left unchanged." >&2
           exit 1
         fi ;;
+      update_channel)
+        case "$VALUE" in auto|stable|main) ;; *)
+          echo "Error: update_channel '$VALUE' not recognized. Valid values: auto, stable, main. Existing value left unchanged. (https://github.com/garrytan/gstack/blob/main/docs/releases.md#channels)" >&2
+          exit 1 ;;
+        esac ;;
     esac
     # design_detector_install_prompted records "never ask again" for the one-time
     # engine install offer. Rejecting a typo keeps the offer from silently coming
@@ -883,6 +999,12 @@ $_gstack_legacy_root"
     # never flip consent in either direction, so nothing is coerced or stored.
     if [ "$KEY" = "memorable_recall" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
       echo "Error: memorable_recall '$VALUE' not recognized. Valid values: on, off. Existing value left unchanged." >&2
+      exit 1
+    fi
+    # autoplan_shadow is a CONSENT key: `on` sends each gate's plan to a model
+    # API. Reject like memorable_recall -- a typo must never flip it.
+    if [ "$KEY" = "autoplan_shadow" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Error: autoplan_shadow '$VALUE' not recognized. Valid values: on, off. Existing value left unchanged." >&2
       exit 1
     fi
     # browse_extension_id (D1) decides which Chrome extension may reach the
@@ -987,6 +1109,11 @@ $_gstack_legacy_root"
           gstack_install_registry_rows | awk -F '\t' '$1 != "claude" { print "  apply to " $1 " (" $4 "): cd " $6 " && ./setup --host " $1 }' )
       fi
     fi
+    # Installed skills are rendered by ./setup, so the preamble choice lands
+    # on its next run (every registered host).
+    if [ "$KEY" = "plan_mode_preamble" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
+      printf 'gstack-config: plan_mode_preamble=%s applies on the next ./setup run. Apply now: cd %q && ./setup --refresh-registered\n' "$VALUE" "$(cd "$(dirname "$0")/.." && pwd)"
+    fi
     ;;
   unset)
     KEY="${2:?Usage: gstack-config unset <key>}"
@@ -1010,16 +1137,17 @@ $_gstack_legacy_root"
     echo ""
     echo "# ─── Active values (including defaults for unset keys) ───"
     report_root_disagreement
-    for KEY in proactive routing_declined telemetry auto_upgrade update_check \
-               skill_prefix explain_level \
-               codex_reviews gstack_contributor skip_eng_review workspace_root \
+    for KEY in proactive routing_declined telemetry auto_upgrade update_check update_channel \
+               skill_prefix explain_level plan_mode_preamble claude_loadout \
+               codex_reviews autoplan_shadow autoplan_shadow_model gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted artifacts_sync_removals plan_tune_hooks \
                timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
                browse_extension_id ship_measure_rule_trials ship_measure_behavior_panels \
                ship_measure_judge_outputs ship_measure_ask_per_trial_usd ship_measure_budget_usd \
                ship_measure_max_rounds ship_measure_sweep_cases ship_measure_sweep_budget_usd ship_rerun_backend test_backend \
                plan_review_tier implementation_tier model_frontier_claude model_frontier_openai \
-               model_smart_claude model_smart_openai codex_effort; do
+               model_smart_claude model_smart_openai codex_effort review_effort_tiers agent_model harness_start_hook \
+               skill_routing skill_contracts investigate_gate ceo_review_gate; do
       gstack_config_select "$KEY"
       VALUE="$_gstack_cfg_value"
       SOURCE="default"
@@ -1035,16 +1163,17 @@ $_gstack_legacy_root"
     ;;
   defaults)
     echo "# gstack-config defaults"
-    for KEY in proactive routing_declined telemetry auto_upgrade update_check \
-               skill_prefix explain_level \
-               codex_reviews gstack_contributor skip_eng_review workspace_root \
+    for KEY in proactive routing_declined telemetry auto_upgrade update_check update_channel \
+               skill_prefix explain_level plan_mode_preamble claude_loadout \
+               codex_reviews autoplan_shadow autoplan_shadow_model gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted artifacts_sync_removals plan_tune_hooks \
                timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
                browse_extension_id ship_measure_rule_trials ship_measure_behavior_panels \
                ship_measure_judge_outputs ship_measure_ask_per_trial_usd ship_measure_budget_usd \
                ship_measure_max_rounds ship_measure_sweep_cases ship_measure_sweep_budget_usd ship_rerun_backend test_backend \
                plan_review_tier implementation_tier model_frontier_claude model_frontier_openai \
-               model_smart_claude model_smart_openai codex_effort; do
+               model_smart_claude model_smart_openai codex_effort review_effort_tiers agent_model harness_start_hook \
+               skill_routing skill_contracts investigate_gate ceo_review_gate; do
       printf '  %-24s %s\n' "$KEY:" "$(lookup_default "$KEY")"
     done
     ;;
@@ -1070,6 +1199,9 @@ $_gstack_legacy_root"
     # generated SKILL.md files match your installation state.
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     . "$SCRIPT_DIR/gstack-render-claude.sh" 2>/dev/null || { echo "$0: $SCRIPT_DIR/gstack-render-claude.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
+    _PLAN_MODE_ARG=""
+    [ "$("$0" get plan_mode_preamble 2>/dev/null || true)" != off ] || _PLAN_MODE_ARG="--plan-mode=off"
+    gstack_claude_loadout_arg "$0"
     DETECT_BIN="$SCRIPT_DIR/gstack-gbrain-detect"
     DETECTION_FILE="$STATE_DIR/gbrain-detection.json"
     mkdir -p "$STATE_DIR"
@@ -1138,7 +1270,7 @@ $_gstack_legacy_root"
           gstack_claude_overlay "$INSTALL_DIR" "$0"
           RENDER_TMP="$RENDER_DIR.tmp.$$"
           rm -rf "$RENDER_TMP"
-          if ( cd "$INSTALL_DIR" && bun run gen:skill-docs:user --host claude --out-dir "$RENDER_TMP" --link-root "$RENDER_DIR" --model "$_GSTACK_OVERLAY" >/dev/null 2>&1 ); then
+          if ( cd "$INSTALL_DIR" && bun run gen:skill-docs:user --host claude --out-dir "$RENDER_TMP" --link-root "$RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} >/dev/null 2>&1 ); then
             gstack_render_lock "$RENDER_DIR"
             _swap_in_render "$RENDER_DIR" "$RENDER_TMP"
             gstack_render_unlock "$RENDER_DIR"
@@ -1164,7 +1296,7 @@ $_gstack_legacy_root"
         # brain blocks, so removing gbrain keeps the chosen overlay.
         INSTALL_DIR="$HOME/.claude/skills/gstack"
         RENDER_DIR="${GSTACK_USER_RENDER_DIR:-$STATE_DIR/render/claude}"
-        if { [ -d "$RENDER_DIR" ] || "$0" has claude_overlay_model; } \
+        if { [ -d "$RENDER_DIR" ] || "$0" has claude_overlay_model || [ -n "$_PLAN_MODE_ARG" ] || [ -n "$_LOADOUT_ARG" ]; } \
           && [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/VERSION" ] && [ -f "$INSTALL_DIR/package.json" ]; then
           if ! command -v bun >/dev/null 2>&1; then
             echo "Skip: bun not on PATH — the Claude render at $RENDER_DIR was not refreshed. Install bun, then re-run 'gstack-config gbrain-refresh'."

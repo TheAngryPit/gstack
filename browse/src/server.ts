@@ -14,6 +14,7 @@
  */
 
 import { BrowserManager, markDaemonProcess } from './browser-manager';
+import { runInRequestTab } from './session-tabs';
 import { handleReadCommand, hasOutArg } from './read-commands';
 import { handleWriteCommand } from './write-commands';
 import { handleMetaCommand } from './meta-commands';
@@ -49,7 +50,7 @@ import { isProcessAlive } from './error-handling';
 import { allowedExtensionOrigin } from './extension-id';
 import { sanitizeBody, stripLoneSurrogates } from './sanitize';
 import { startSocksBridge, testUpstream, type BridgeHandle } from './socks-bridge';
-import { parseProxyConfig, toUpstreamConfig, ProxyConfigError, serverProxyEnv } from './proxy-config';
+import { parseProxyConfig, toUpstreamConfig, ProxyConfigError, serverProxyEnv, directProxyLogLine } from './proxy-config';
 import { writeReceipt } from '../../lib/egress-receipt';
 import { redactProxyUrl } from './proxy-redact';
 import { type XvfbHandle } from './xvfb';
@@ -607,7 +608,7 @@ function generateHelpText(): string {
 }
 
 // ─── Buffer (from buffers.ts) ────────────────────────────────────
-import { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, type LogEntry, type NetworkEntry, type DialogEntry } from './buffers';
+import { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, formatDialogLogLine, formatNetworkLogLine, type LogEntry, type NetworkEntry, type DialogEntry } from './buffers';
 
 export { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, type LogEntry, type NetworkEntry, type DialogEntry };
 
@@ -663,10 +664,7 @@ async function flushBuffers() {
     const newNetworkCount = networkBuffer.totalAdded - lastNetworkFlushed;
     if (newNetworkCount > 0) {
       const entries = networkBuffer.last(Math.min(newNetworkCount, networkBuffer.length));
-      const lines = entries.map(e =>
-        `[${new Date(e.timestamp).toISOString()}] ${e.method} ${e.url} → ${e.status || 'pending'} (${e.duration || '?'}ms, ${e.size || '?'}B)`
-      ).join('\n') + '\n';
-      appendSecureFile(NETWORK_LOG_PATH, lines);
+      appendSecureFile(NETWORK_LOG_PATH, entries.map(formatNetworkLogLine).join('\n') + '\n');
       lastNetworkFlushed = networkBuffer.totalAdded;
     }
 
@@ -674,10 +672,7 @@ async function flushBuffers() {
     const newDialogCount = dialogBuffer.totalAdded - lastDialogFlushed;
     if (newDialogCount > 0) {
       const entries = dialogBuffer.last(Math.min(newDialogCount, dialogBuffer.length));
-      const lines = entries.map(e =>
-        `[${new Date(e.timestamp).toISOString()}] [${e.type}] "${e.message}" → ${e.action}${e.response ? ` "${e.response}"` : ''}`
-      ).join('\n') + '\n';
-      appendSecureFile(DIALOG_LOG_PATH, lines);
+      appendSecureFile(DIALOG_LOG_PATH, entries.map(formatDialogLogLine).join('\n') + '\n');
       lastDialogFlushed = dialogBuffer.totalAdded;
     }
   } catch (err: any) {
@@ -968,11 +963,11 @@ interface CommandResult {
  *   chainDepth: recursion guard — reject nested chains (depth > 0 means inside a chain)
  */
 async function handleCommandInternalImpl(
-  body: { command: string; args?: string[]; tabId?: number },
+  body: { command: string; args?: string[] },
   tokenInfo?: TokenInfo | null,
   opts?: { skipRateCheck?: boolean; skipActivity?: boolean; chainDepth?: number },
 ): Promise<CommandResult> {
-  const { args = [], tabId } = body;
+  const { args = [] } = body;
   const rawCommand = body.command;
 
   if (!rawCommand) {
@@ -1049,17 +1044,7 @@ async function handleCommandInternalImpl(
     if (!opts?.skipRateCheck && tokenInfo.token) recordCommand(tokenInfo.token);
   }
 
-  // Pin to a specific tab if requested (set by BROWSE_TAB env var, e.g. per-tab agent contexts).
-  // This prevents parallel agents from interfering with each other's tab context.
-  // Safe because Bun's event loop is single-threaded — no concurrent handleCommand.
-  let savedTabId: number | null = null;
-  if (tabId !== undefined && tabId !== null) {
-    savedTabId = browserManager.getActiveTabId();
-    // bringToFront: false — internal tab pinning must NOT steal window focus
-    try { browserManager.switchTab(tabId, { bringToFront: false }); } catch (err: any) {
-      console.warn('[browse] Failed to pin tab', tabId, ':', err.message);
-    }
-  }
+  // Pin to a specific tab: runInRequestTab (session-tabs.ts) already bound this request's tab (#1961).
 
   // ─── Tab ownership check (own-only tokens / pair-agent isolation) ──
   //
@@ -1070,7 +1055,7 @@ async function handleCommandInternalImpl(
   //
   // Skip for `newtab` — it creates a tab rather than accessing one.
   if (command !== 'newtab' && tokenInfo && tokenInfo.clientId !== 'root' && tokenInfo.tabPolicy === 'own-only') {
-    const targetTab = tabId ?? browserManager.getActiveTabId();
+    const targetTab = browserManager.getActiveTabId();
     if (!browserManager.checkTabAccess(targetTab, tokenInfo.clientId, { isWrite: isWriteInvocation(command, args), ownOnly: true })) {
       return {
         status: 403, json: true,
@@ -1268,7 +1253,7 @@ async function handleCommandInternalImpl(
       ts: new Date().toISOString(),
       cmd: command,
       aliasOf: isAliased ? rawCommand : undefined,
-      args: args.join(' '),
+      args,
       origin: browserManager.getCurrentUrl(),
       durationMs: successDuration,
       status: 'ok',
@@ -1277,21 +1262,8 @@ async function handleCommandInternalImpl(
     });
 
     browserManager.resetFailures();
-    // Restore original active tab if we pinned to a specific one
-    if (savedTabId !== null) {
-      try { browserManager.switchTab(savedTabId, { bringToFront: false }); } catch (restoreErr: any) {
-        console.warn('[browse] Failed to restore tab after command:', restoreErr.message);
-      }
-    }
     return { status: 200, result: tabWarning ? `${tabWarning}\n${result}` : result };
   } catch (err: any) {
-    // Restore original active tab even on error
-    if (savedTabId !== null) {
-      try { browserManager.switchTab(savedTabId, { bringToFront: false }); } catch (restoreErr: any) {
-        console.warn('[browse] Failed to restore tab after error:', restoreErr.message);
-      }
-    }
-
     // Activity: emit command_end (error) — skipped for chain subcommands
     const errorDuration = Date.now() - startTime;
     if (!opts?.skipActivity) {
@@ -1313,7 +1285,7 @@ async function handleCommandInternalImpl(
       ts: new Date().toISOString(),
       cmd: command,
       aliasOf: isAliased ? rawCommand : undefined,
-      args: args.join(' '),
+      args,
       origin: browserManager.getCurrentUrl(),
       durationMs: errorDuration,
       status: 'error',
@@ -1337,11 +1309,11 @@ async function handleCommandInternalImpl(
  * Do not bypass this by calling handleCommandInternalImpl directly.
  */
 async function handleCommandInternal(
-  body: { command: string; args?: string[]; tabId?: number },
+  body: { command: string; args?: string[]; tabId?: number; session?: string },
   tokenInfo?: TokenInfo | null,
   opts?: { skipRateCheck?: boolean; skipActivity?: boolean; chainDepth?: number },
 ): Promise<CommandResult> {
-  const cr = await handleCommandInternalImpl(body, tokenInfo, opts);
+  const cr = await runInRequestTab(browserManager, body, tokenInfo, () => handleCommandInternalImpl(body, tokenInfo, opts));
   return { ...cr, result: stripLoneSurrogates(cr.result) };
 }
 
@@ -1880,15 +1852,12 @@ export async function start() {
   safeUnlink(NETWORK_LOG_PATH);
   safeUnlink(DIALOG_LOG_PATH);
 
-  const port = await findPort();
-  LOCAL_LISTEN_PORT = port;
-
   // ─── Proxy config (D8 + codex F5) ──────────────────────────────
   // The CLI resolves the proxy (--proxy or env, #915). SOCKS5 with auth runs a
   // local 127.0.0.1 bridge to the authenticated upstream (Chromium can't do
   // SOCKS5 auth itself); HTTP/HTTPS or unauthenticated SOCKS5 pass through.
   let proxyBridge: BridgeHandle | null = null;
-  const { url: proxyUrl, source: proxySource, bypass: proxyBypass } = serverProxyEnv(process.env);
+  const { url: proxyUrl, source: proxySource, bypass: proxyBypass, direct: proxyDirect } = serverProxyEnv(process.env);
   if (proxyUrl) {
     let parsed;
     try {
@@ -1943,7 +1912,7 @@ export async function start() {
         proxyBridge.close().catch(() => { /* shutting down anyway */ });
       }
     });
-  }
+  } else console.log(directProxyLogLine(process.env));
 
   process.on('exit', () => { browserManager.closeOwnedDisplay(); });
 
@@ -1967,6 +1936,11 @@ export async function start() {
   }
 
   const startTime = Date.now();
+
+  // The port is probed free and then bound; pick it after the browser launch so the seconds Chromium takes to start are not
+  // a window in which another process can take it (Free Tests 41951644962: "Failed to start server. Is port 43780 in use?").
+  const port = await findPort();
+  LOCAL_LISTEN_PORT = port;
 
   // ─── Build the request handlers via buildFetchHandler factory ───
   // CLI path passes env-derived values; no beforeRoute hook. Phoenix uses
@@ -2019,7 +1993,7 @@ export async function start() {
     // D2 daemon-mismatch detection: CLI computes the same hash from its
     // resolved flags and refuses if it differs from this stored value.
     ...(process.env.BROWSE_CONFIG_HASH ? { configHash: process.env.BROWSE_CONFIG_HASH } : {}),
-    ...(proxyUrl ? { proxy: redactProxyUrl(proxyUrl), proxySource, proxyBypass } : {}), // #915 refusal detail
+    ...(proxyUrl ? { proxy: redactProxyUrl(proxyUrl), proxySource, proxyBypass } : proxyDirect ? { proxyDirect } : {}), // #915/#3440 refusal detail
     // Xvfb child PID + start-time + display so disconnect (or a future
     // daemon launch on this state file) can validate-then-cleanup orphans
     // without clobbering a recycled PID.

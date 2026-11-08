@@ -55,16 +55,9 @@ describe('agents-digest', () => {
 
   test('setup never copies the digest onto a user AGENTS.md (print-path only)', () => {
     const setup = fs.readFileSync(path.join(ROOT, 'setup'), 'utf-8');
-    // The explainer arms print the digest path, anchored to the script's own
-    // directory — a $(pwd)-relative path prints a nonexistent file whenever
-    // setup is invoked from anywhere but the repo root.
-    const explainer = setup.match(/^print_instruction_tier\(\) \{([\s\S]*?)^\}/m)?.[1];
-    expect(explainer).toBeDefined();
-    // Informational hosts resolve their own anchor before install preflight.
-    // Bind the printed path to that assignment, without fixing its local name.
-    const anchor = explainer!.match(/^\s*([A-Za-z_]\w*)="\$\(cd "\$\(dirname "\$0"\)" && pwd -P\)"$/m)?.[1];
-    expect(anchor).toBeDefined();
-    expect(explainer).toContain(`$${anchor}/${DIGEST_RELPATH}`);
+    // OpenClaw and Hermes register skills through gstack-harness now (GSTA-135),
+    // so no setup arm prints the digest; a $(pwd)-relative digest path would
+    // name a nonexistent file whenever setup runs from outside the repo root.
     expect(setup).not.toMatch(/\$\(pwd\)\/agents-digest/);
     // …and no line may write to an AGENTS.md destination. Covers direct
     // write verbs (cp/ln/mv/tee/install/rsync/dd/truncate), > and >>
@@ -99,19 +92,6 @@ describe('agents-digest', () => {
     ]) {
       expect(content).toContain(shared);
       expect(resolver).toContain(shared);
-    }
-  });
-
-  test('instruction-tier hosts declare the digest in host config — and the declaration tracks the real path', () => {
-    // This is what makes instructionTier.rulesFile load-bearing instead of
-    // config nobody reads: the declared string must equal the generator's
-    // DIGEST_RELPATH, and setup's explainer must print that same path. If
-    // the digest ever moves, all three surfaces fail together.
-    const setup = fs.readFileSync(path.join(ROOT, 'setup'), 'utf-8');
-    expect(setup).toContain(DIGEST_RELPATH);
-    for (const host of ['openclaw', 'hermes']) {
-      const src = fs.readFileSync(path.join(ROOT, 'hosts', `${host}.ts`), 'utf-8');
-      expect(src).toContain(`instructionTier: { rulesFile: '${DIGEST_RELPATH}' }`);
     }
   });
 });

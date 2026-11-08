@@ -27,6 +27,7 @@ export const WRITE_COMMANDS = new Set([
   'upload', 'dialog-accept', 'dialog-dismiss',
   'style', 'cleanup', 'prettyscreenshot',
   'download', 'scrape', 'archive',
+  'device', 'tap', 'swipe', 'pinch', 'touch',
 ]);
 
 export const META_COMMANDS = new Set([
@@ -130,11 +131,17 @@ export const COMMAND_DESCRIPTIONS: Record<string, { category: string; descriptio
   'viewport':{ category: 'Interaction', description: 'Set viewport size and optional deviceScaleFactor (1-3, for retina screenshots). --scale requires a context rebuild. `auto` (alias `reset`) unpins: headed follows the window again, headless returns to 1280x720.', usage: 'viewport [<WxH>|auto] [--scale <n>]' },
   'cookie':  { category: 'Interaction', description: 'Set cookie on current page domain', usage: 'cookie <name>=<value>' },
   'cookie-import': { category: 'Interaction', description: 'Import cookies from JSON file', usage: 'cookie-import <json>' },
-  'cookie-import-browser': { category: 'Interaction', description: 'Copy cookies from chrome, chromium, brave, edge, Windows-only opera, opera-gx, or macOS-only comet, arc, dia. Omitted browser retains legacy comet; select the intended browser explicitly. --domain requires a matching current page; no scope flag opens the picker. --profile is the source directory; ambiguous profiles require selection. --all explicitly selects every non-expired cookie and cannot accompany --domain or --clear-storage. Storage is preserved unless --clear-storage resets captured-origin localStorage (shared across context tabs) and target-tab sessionStorage. --verify-auth requires daemon GSTACK_COOKIE_AUTH_SELECTOR and GSTACK_COOKIE_AUTH_EXPECTED_IDENTITY before startup; missing config rejects before mutation. Verified means an exact visible identity match, not cookie counts or HTTP 200. Windows native extraction remains disabled pending qualification.', usage: 'cookie-import-browser [browser] [--domain d] [--profile p] [--all] [--clear-storage] [--verify-auth]' },
+  'cookie-import-browser': { category: 'Interaction', description: 'Copy cookies from chrome, chromium, brave, edge, Windows-only opera, opera-gx, or macOS-only comet or arc. Omitted browser retains legacy comet; select the intended browser explicitly. --domain requires a matching current page; no scope flag opens the picker. --profile is the source directory; ambiguous profiles require selection. --all explicitly selects every non-expired cookie and cannot accompany --domain or --clear-storage. Storage is preserved unless --clear-storage resets captured-origin localStorage (shared across context tabs) and target-tab sessionStorage. --verify-auth requires daemon GSTACK_COOKIE_AUTH_SELECTOR and GSTACK_COOKIE_AUTH_EXPECTED_IDENTITY before startup; missing config rejects before mutation. Verified means an exact visible identity match, not cookie counts or HTTP 200. Windows native extraction remains disabled pending qualification.', usage: 'cookie-import-browser [browser] [--domain d] [--profile p] [--all] [--clear-storage] [--verify-auth]' },
   'header':  { category: 'Interaction', description: 'Set custom request header (colon-separated, sensitive values auto-redacted)', usage: 'header <name>:<value>' },
   'useragent': { category: 'Interaction', description: 'Set user agent', usage: 'useragent <string>' },
   'dialog-accept': { category: 'Interaction', description: 'Auto-accept next alert/confirm/prompt. Optional text is sent as the prompt response', usage: 'dialog-accept [text]' },
   'dialog-dismiss': { category: 'Interaction', description: 'Auto-dismiss next dialog' },
+  // Phone emulation and touch (this tab only; gstack's own Chromium)
+  'device':  { category: 'Interaction', description: 'Emulate a phone on the current tab only: size, pixel ratio, touch support (pointer: coarse) and user agent from Playwright\'s devices table (names match case-insensitively). Other tabs stay desktop. No name prints the active profile or "none"; --list prints every name; off (or reset, auto) restores. viewport and responsive refuse while a device is active.', usage: 'device [<name> [--landscape] | off | --list]' },
+  'tap':     { category: 'Interaction', description: 'Touch and release at an element\'s center (scrolled into view) or at x y. Needs $B device first.', usage: 'tap <@ref|selector|x y> [--hold <ms>]' },
+  'swipe':   { category: 'Interaction', description: 'One-finger swipe from an element\'s center or x y; the finger moves in the given direction (default 300px over 300ms, 10 moves). Needs $B device first.', usage: 'swipe <@ref|selector|x y> <up|down|left|right> [--distance <px>] [--ms <n>]' },
+  'pinch':   { category: 'Interaction', description: 'Two-finger pinch around an element\'s center or x y: scale above 1 spreads the fingers (zoom in), below 1 brings them together. Needs $B device first.', usage: 'pinch <@ref|selector|x y> <scale>' },
+  'touch':   { category: 'Interaction', description: 'Hold, move and lift numbered fingers for multi-finger flows (hold a joystick with finger 0, tap fire with finger 1). Lifting one finger leaves the others down. No action lists held fingers; cancel releases all. Navigation and device off cancel held fingers. Needs $B device first.', usage: 'touch [down|move <finger 0-9> <x> <y> | up <finger> | cancel]' },
   // Data extraction
   'download': { category: 'Extraction', description: 'Download URL or media element to disk using browser cookies. Default path: <temp>/browse-download-<timestamp>.<ext>. --base64 returns a data:<mime>;base64,... string instead of writing, capped at 10MB. Use --navigate for URLs that trigger browser downloads (CDN redirects, Content-Disposition, anti-bot protected sites).', usage: 'download <url|@ref> [path] [--base64] [--navigate]' },
   'scrape':   { category: 'Extraction', description: 'Bulk download all media from page to --dir (default: <temp>/browse-scrape-<timestamp>). Writes files plus manifest.json with source URL, size, type, success/failure counts. --limit defaults to 50 and caps at 200.', usage: 'scrape <images|videos|media> [--selector sel] [--dir path] [--limit N]' },
@@ -231,7 +238,7 @@ export const NEW_IN_VERSION: Record<string, string> = {
  * Levenshtein distance (dynamic programming).
  * O(a.length * b.length) — fast for command name sizes (<20 chars).
  */
-function levenshtein(a: string, b: string): number {
+export function levenshtein(a: string, b: string): number {
   if (a === b) return 0;
   if (a.length === 0) return b.length;
   if (b.length === 0) return a.length;

@@ -5,7 +5,7 @@ import { CAPTURE_LONG_MS, CAPTURE_MS } from './helpers/eval-budgets';
 import { runSkillTest } from './helpers/session-runner';
 import { runId, describeIfSelected, testConcurrentIfSelected, createEvalCollector, recordE2E, finalizeEvalCollector, logCost } from './helpers/e2e-helpers';
 import { describeE2ETier } from './helpers/e2e-gate';
-import { docsDispatchIndex, parseDocsCompletion, vetDocsCompletion } from './helpers/docsync-contract';
+import { acceptedChangedPaths, docsAttemptContracts, docsDispatchIndices, vetDocsCompletion } from './helpers/docsync-contract';
 import { fixtureDocs, repoSnapshot, changedFiles, DOC_PATH, preserveDocsEvidence, sawSpawnedMarker, childReportedSpawnedMarker, type DocsScenario } from './helpers/docsync-fixture';
 import { observeDocsWrites, docsWriteFailures, docsShipPhase, docsToolFailures, docsCompletedRead, docsSessionOptions } from './helpers/docsync-observer';
 import type { SkillTestResult } from './helpers/session-runner';
@@ -51,13 +51,16 @@ async function runShipDocs(testName: string, scenario: DocsScenario) {
     if (!result) throw Error('missing native parent result');
     logCost(testName, result);
     const calls = result.toolCalls;
-    const dispatch = docsDispatchIndex(calls);
+    const dispatches = docsDispatchIndices(calls);
+    const dispatch = dispatches[0] ?? -1;
     const publishCall = calls.findIndex(call => call.tool === 'Bash' && String(call.input?.command).includes(`bun ${publish}`));
     let passed = false;
     try {
       expect(dispatch).toBeGreaterThanOrEqual(0);
-      expect(calls[dispatch].input.run_in_background).toBe(false);
-      if (publishCall >= 0) expect(dispatch).toBeLessThan(publishCall);
+      // The gate's attempt budget: an initial audit plus at most one re-audit, every child in the foreground.
+      expect(dispatches.length).toBeLessThanOrEqual(2);
+      for (const index of dispatches) expect(calls[index].input.run_in_background).toBe(false);
+      if (publishCall >= 0) expect(dispatches.at(-1)!).toBeLessThan(publishCall);
       expect(result.exitReason).toBe('success');
       expect(docsWriteFailures(observation!, scenario === 'current' || scenario === 'store' ? [] : [DOC_PATH], {
         result, fixture, scripts: [publish], readOnly: scenario === 'current' || scenario === 'store',
@@ -77,18 +80,23 @@ async function runShipDocs(testName: string, scenario: DocsScenario) {
         expect(changed).toEqual([]);
         expect(output).not.toMatch(/Documentation(?: is|:) current/i);
       } else {
-        const raw = JSON.parse(calls[dispatch].output.trimEnd().split('\n').at(-1)!);
-        const contract = parseDocsCompletion(calls[dispatch].output, raw.audit_id);
-        expect(JSON.stringify(calls[dispatch].input)).toContain(raw.audit_id);
-        expect(childReportedSpawnedMarker(result, calls[dispatch])).toBe(true);
+        // The parent accepts the last attempt; a rejected earlier attempt's edits stay in the tree (Blocked recovery preserves
+        // partial content), so the accepted contract owns the paths no earlier attempt reported plus any it claims itself.
+        const { accepted: contract, attempts: contracts } = docsAttemptContracts(dispatches.map(index => calls[index].output));
+        dispatches.forEach((index, position) => {
+          expect(JSON.stringify(calls[index].input)).toContain(contracts[position].audit_id);
+          expect(childReportedSpawnedMarker(result, calls[index])).toBe(true);
+        });
         expect(sawSpawnedMarker(result)).toBe(true);
         vetDocsCompletion(contract, {
           settled: result.exitReason === 'success', markerSeen: sawSpawnedMarker(result),
           headUnchanged: after.head === fixture.before.head, indexUnchanged: after.index === fixture.before.index,
           candidateUnchanged: changed.every(p => p === DOC_PATH), readOnly: false,
-          changedPaths: changed, allowedDocs: [DOC_PATH],
+          changedPaths: acceptedChangedPaths(changed, contracts), allowedDocs: [DOC_PATH],
         });
-        expect(contract.status).toBe(scenario === 'current' ? 'current' : 'updated');
+        expect(contract.status).not.toBe('blocked');
+        if (scenario === 'current') expect(contracts.map(attempt => attempt.status)).toEqual(contracts.map(() => 'current'));
+        else expect(contracts.some(attempt => attempt.status === 'updated' && attempt.files_updated.includes(DOC_PATH))).toBe(true);
         expect(contract.files_reviewed).toContain(DOC_PATH);
         expect(docsCompletedRead(result, path.join(fixture.repo, DOC_PATH), fixture, {
           source: Buffer.from(fixture.before.contents[DOC_PATH], 'base64').toString('utf8'),

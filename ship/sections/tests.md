@@ -6,17 +6,18 @@
 
 **Read the project's CLAUDE.md (and TESTING.md if present) FIRST.** If it documents a test command, the project already told you: no detection, no bootstrap. Skip the rest of bootstrap and use that command in Step 5.
 
-**Otherwise gather markers. Every marker below is EVIDENCE for the question you ask — never a command to run blind.** A marker tells you which ecosystem you're in and which command to OFFER. It does not tell you the command works. Do not execute a candidate test command to "check" it: a probe on a project that never had that runner fails loudly and teaches you nothing, and installing a second framework over a working one is worse.
+**Otherwise gather markers. Every marker below is EVIDENCE for the question you ask — never a command to run blind.** A marker names the ecosystem and the command to OFFER; it does not prove the command works. Never execute a candidate to "check" it: probing a runner the project never had fails loudly and teaches nothing.
 
 ```bash
 setopt +o nomatch 2>/dev/null || true  # zsh compat
-# Definitive ecosystem markers (presence = ecosystem, NOT a command to run)
+# Ecosystem markers
 [ -f manage.py ] && echo "RUNTIME:python FRAMEWORK:django MARKER:manage.py"
 { [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -f tox.ini ] || [ -f setup.cfg ] || [ -f requirements.txt ]; } && echo "RUNTIME:python"
 { [ -f Gemfile ] || [ -f Rakefile ] || [ -f .rspec ]; } && echo "RUNTIME:ruby"
 [ -f package.json ] && echo "RUNTIME:node"
 [ -f go.mod ] && echo "RUNTIME:go"
 [ -f Cargo.toml ] && echo "RUNTIME:rust"
+[ -f pubspec.yaml ] && echo "RUNTIME:dart"
 [ -f composer.json ] && echo "RUNTIME:php"
 [ -f mix.exs ] && echo "RUNTIME:elixir"
 [ -f pom.xml ] && echo "RUNTIME:jvm BUILD:maven"
@@ -24,14 +25,14 @@ setopt +o nomatch 2>/dev/null || true  # zsh compat
 # Detect sub-frameworks
 [ -f Gemfile ] && grep -q "rails" Gemfile 2>/dev/null && echo "FRAMEWORK:rails"
 [ -f package.json ] && grep -q '"next"' package.json 2>/dev/null && echo "FRAMEWORK:nextjs"
-# Existing test path — config files, declared scripts, AND test FILES.
-# A project with real tests and no config file is the common miss.
-ls jest.config.* vitest.config.* playwright.config.* .rspec pytest.ini tox.ini phpunit.xml* 2>/dev/null
+grep -qsE '^ +sdk: *.?flutter' pubspec.yaml && echo "FRAMEWORK:flutter"
+# Test evidence: config files, declared scripts, AND test FILES (tested projects often lack a config)
+ls jest.config.* vitest.config.* playwright.config.* .rspec pytest.ini tox.ini phpunit.xml* dart_test.yaml 2>/dev/null
 [ -f package.json ] && grep -q '"test"[[:space:]]*:' package.json && echo "SCRIPT:package.json test"
 [ -f Makefile ] && grep -qE '^(test|check):' Makefile && echo "TARGET:make test"
 [ -f pyproject.toml ] && grep -q "pytest" pyproject.toml && echo "CONFIG:pyproject pytest"
-git ls-files | grep -cE '(^|/)(tests?|spec|__tests__)/|(^|/)tests?\.py$|(^|/)test_[^/]+\.py$|_test\.(go|py|rb|ts|js|exs)$|\.(test|spec)\.[jt]sx?$|_spec\.rb$|Test\.(java|kt)$' | sed 's/^/TESTFILES:/'
-# Rust keeps unit tests inside src/, so file names alone miss them
+git ls-files | grep -cE '(^|/)(tests?|spec|__tests__)/|(^|/)tests?\.py$|(^|/)test_[^/]+\.py$|_test\.(go|py|rb|ts|js|exs|dart)$|\.(test|spec)\.[jt]sx?$|_spec\.rb$|Test\.(java|kt)$' | sed 's/^/TESTFILES:/'
+# Rust unit tests live in src/; file names alone miss them
 [ -f Cargo.toml ] && git grep -lF '#[test]' -- 'src' >/dev/null 2>&1 && echo "TESTS:rust in-source"
 # Check opt-out marker
 [ -f .gstack/no-test-bootstrap ] && echo "BOOTSTRAP_DECLINED"
@@ -45,6 +46,7 @@ Map the markers to the command you will OFFER — never to one you run on a gues
 | `pytest.ini` / `tox.ini` / pytest in `pyproject.toml` / `test_*.py` | Python | `pytest` |
 | `go.mod` (+ any `*_test.go`) | Go | `go test ./...` |
 | `Cargo.toml` | Rust | `cargo test` |
+| `pubspec.yaml` | Dart / Flutter | `flutter test` (FRAMEWORK:flutter) or `dart test`; `fvm` prefix if `.fvmrc` |
 | `pom.xml` | JVM (Maven) | `mvn test` |
 | `build.gradle` / `build.gradle.kts` | JVM (Gradle) | `./gradlew test` |
 | `Gemfile` / `Rakefile` / `.rspec` | Ruby | `bundle exec rspec`, `bin/rails test`, or `rake test` |
@@ -53,11 +55,11 @@ Map the markers to the command you will OFFER — never to one you run on a gues
 | `package.json` with a `test` script | Node | that script, run with the package manager the lockfile names |
 | `Makefile` with a `test:` target | any | `make test` |
 
-**If ANY existing-test evidence appears** (a config file, a declared test script or make target, a nonzero `TESTFILES:` count, or `TESTS:rust in-source`): the project has tests. **Do NOT bootstrap.** Print "Existing tests detected: {the evidence}." Then get the command the same way Step 5 does — CLAUDE.md/TESTING.md if documented, otherwise AskUserQuestion offering the candidates from the table above plus "Other", and persist the answer to CLAUDE.md's `## Testing` section so it is never asked again. When the ecosystem ships a runner (Django, Go, Rust, Elixir, Maven/Gradle), that runner is the candidate — never install a second framework beside a working one.
+**If ANY existing-test evidence appears** (a config file, a declared test script or make target, a nonzero `TESTFILES:` count, or `TESTS:rust in-source`): the project has tests. **Do NOT bootstrap.** Print "Existing tests detected: {the evidence}." Then get the command the same way Step 5 does — CLAUDE.md/TESTING.md if documented, otherwise AskUserQuestion offering the candidates from the table above plus "Other", and persist the answer to CLAUDE.md's `## Testing` section so it is never asked again. When the ecosystem ships a runner (Django, Go, Rust, Dart, Elixir, Maven/Gradle), that runner is the candidate — never install a second framework beside a working one.
 Read 2-3 existing test files to learn conventions (naming, imports, assertion style, setup patterns).
 Store conventions as prose context for use in Step 7. **Skip the rest of bootstrap.**
 
-Absent config files and absent `tests/` directories are NOT evidence of "no tests": Django keeps tests in `<app>/tests.py`, Go in `*_test.go` beside the source, Rust in `#[test]` blocks inside `src/`. A green `python manage.py test` with no `pytest.ini` is a tested project, not a bootstrap candidate.
+Absent config files and absent `tests/` directories are NOT evidence of "no tests": Django keeps tests in `<app>/tests.py`, Go in `*_test.go` beside the source, Rust in `#[test]` blocks inside `src/`.
 
 **If BOOTSTRAP_DECLINED** appears:
 - Step 5's explicit Add tests choice overrides that marker for this invocation only: continue to runtime detection and B2–B3, including framework approval.
@@ -103,6 +105,7 @@ If Aside is not installed or not running (`command -v aside` prints nothing, or 
 | Go | stdlib testing + testify | stdlib only |
 | JVM (Maven/Gradle) | JUnit 5 + AssertJ | JUnit 5 only |
 | Rust | cargo test (built-in) + mockall | — |
+| Dart | test / flutter_test + mocktail | mockito |
 | PHP | phpunit + mockery | pest |
 | Elixir | ExUnit (built-in) + ex_machina | — |
 
@@ -207,19 +210,34 @@ Only commit if there are changes. Stage the bootstrap's own files by name (confi
 
 ## Step 5: Run tests (on merged code)
 
-**Pre-gate first** — free, before any lane, eval or remote gate:
-
-```bash
-~/.claude/skills/gstack/bin/gstack-pregate --allow-repo-commands
-```
-
-Stage 1 (regen, secrets, strays, literals) is the two-minute preflight; stage 2
-runs the selected lanes under pipefail. `fail` or `incomplete` blocks: fix,
-rerun. `requires-remote` (other platforms; the remote gate under 8 cores) needs
+**Run it:** `~/.claude/skills/gstack/bin/gstack-ship-preflight --tests-only --base <base> --lane <label>=<command>...`
+(or the Step 1 call with lanes). It runs the free pre-gate first, before any lane, eval or
+remote gate (`gstack-pregate --allow-repo-commands`: stage 1 regen, secrets, strays, literals;
+stage 2 the selected lanes under pipefail), then the lanes inside the evidence ledger, and prints `PREGATE:`, `LANES:` and
+one `LANE: <label> <state> exit= tests_ran= log=` line each.
+`fail` or `incomplete` blocks: fix, rerun. **No-stop** (docs/review-policy.md#no-stop): a pregate flake rerun (one per branch), a
+timeout-only fix and three other routine stops go through `gstack-no-stop record` (`--help`); `recorded` goes on,
+`refused` stops. `requires-remote` (other platforms; the remote gate under 8 cores) needs
 `gstack-pregate clear` or, under a user cap, `--remote --spend-cap <usd>`. Rerun
-after the final stamp; Step 18 refuses a stale one.
+after the final stamp (`gstack-ship-release finish` does); Step 18 refuses a stale one.
 
-Use the project's test commands discovered in Step 4 or documented in CLAUDE.md/AGENTS.md. Run every applicable suite; do not assume Rails or Vitest. The commands below are examples only for repositories that actually provide them. Use the same lane labels and exact commands again in Step 16.
+Use the project's test commands discovered in Step 4 or documented in CLAUDE.md/AGENTS.md. Run every applicable suite; do not assume Rails or Vitest. Pass each as `--lane <label>=<command>`; use the same lane labels and exact commands again in Step 16.
+
+<a id="ci-carry"></a>
+**CI is the one full test run.** When `origin/<base>`'s `.gstack/pregate.json` maps a lane's exact
+command in `ship_lanes_from` (gstack maps `bun run test`), that lane is carried from a verified CI run
+at this exact, clean tree instead of running here: `LANE: <label> carried run=<id>/<attempt> tests_ran=<n>`.
+Before the first push that lane runs only targeted tests and the repro (the full suite too when the diff touches
+merge-check code: `lib/ship-*`, `lib/pregate/*`, the ship and pregate bins,
+`scripts/lib/shard-engine.ts`). Push early so CI runs beside the review: commit, `gstack-ship-release push
+--branch <branch> --early` (sealed, secrets and guards first; no consent: Step 6.5 asks only for Greptile), open a draft PR
+(`gstack-post pr-create --base <base> --draft --title-file <f> --body-file <f>`), then `gstack-ci-carry wait` in
+the background; once it prints `CI_WAIT: green`, rerun `--tests-only` and the mapped lane is carried. A red
+run is a failed lane: triage it below. Batch review fixes into one commit and one push. `CI_CARRY: none
+label=<l> (<reason>)` names why a mapped lane ran here. Any other lane that already passed at this
+tree, command and runtime is reused (`reused=<time>`). In Step 16, `finish` defers a mapped
+lane it cannot carry (`EVIDENCE: DEFERRED`); after Step 17's push, `gstack-ship-release accept --base <base>
+--lane …` carries it from the green run at the final head and reruns the pregate there.
 
 **If no applicable test suite exists:** Name the untested scope. AskUserQuestion:
 A) Add tests (recommended), B) Ship with this named testing
@@ -234,26 +252,14 @@ C stops this attempt.
 `db:test:prepare` internally, which loads the schema into the correct lane database.
 Running bare test migrations without INSTANCE hits an orphan DB and corrupts structure.sql.
 
-Run independent test suites in parallel, each wrapped in the evidence ledger. The
-wrapper is transparent (streams output live, exit code passes through) and
-records `{command, exit, working-tree fingerprint, log path}` to
-`$GSTACK_STATE_ROOT/projects/<slug>/<branch>-evidence.jsonl` — Step 16 cites this
-record instead of re-running when the content hasn't changed:
-
-```bash
-set -o pipefail; pids=()
-~/.claude/skills/gstack/bin/gstack-evidence run --label tests -- 'bin/test-lane 2>&1' & pids+=($!)
-~/.claude/skills/gstack/bin/gstack-evidence run --label vitest -- 'npm run test 2>&1' & pids+=($!)
-fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done; echo "lanes failed=$fail"
-```
-
-After all suites complete, check the `gstack-evidence: recorded label=... exit=...
-log=...` summary lines — each carries the lane's exit code and a per-run log
-file (no shared /tmp collisions between concurrent ships). Read the log files
-for failure detail.
+Each lane runs as `gstack-evidence run --label <label> -- '<command>'`: transparent (exit code passes
+through) and recorded as `{command, exit, working-tree fingerprint, log path}` in
+`$GSTACK_STATE_ROOT/projects/<slug>/<branch>-evidence.jsonl`, which Step 16 cites instead of
+re-running when the content hasn't changed. Each lane has its own log (no shared /tmp
+collisions between concurrent ships); read it for failure detail.
 
 **A lane passes on its runner summary line, not on exit 0 alone.** Read each
-lane's `tests_ran` from its receipt (or from the runner's own summary in the log)
+lane's `tests_ran` from its `LANE:` line (or from the runner's own summary in the log)
 and keep the three states apart; never merge them:
 
 1. `tests_ran: N` (N > 0) with exit 0 — the lane passed; record N for the PR body.
@@ -316,7 +322,7 @@ Ask with AskUserQuestion in the AskUserQuestion Format. List each failure the sa
 ### Step T4: Execute the chosen action
 
 **If "Investigate and fix now":**
-- Switch to /investigate mindset: root cause first, then minimal fix.
+- One read-only root-cause pass, then `/investigate` if unclear.
 - Fix the pre-existing failure.
 - Commit the fix separately from the branch's changes: `git commit -m "fix: pre-existing test failure in <test-file>"`
 - Continue with the workflow.
@@ -380,7 +386,33 @@ esac && rm -f "$TITLE_FILE" "$BODY_FILE"
 - Continue with the workflow.
 - Note in output: "Pre-existing test failure skipped: <test-name>"
 
-**After triage:** If any in-branch failures remain unfixed, **STOP**. Do not proceed. If all failures were pre-existing and handled (fixed, TODOed, assigned, or skipped), continue to Step 6.
+**Red base (before T3).** When T1 calls every failure likely pre-existing,
+prove it before asking: write `.gstack/tmp/base-red.json` with your file-write tool
+(`{"lane":"<label>","total":<failures the lane reported>,"failures":[{"id":"<test
+name>","file":"<test file>","signature":"<first error line>"}]}`), then run
+
+```bash
+~/.claude/skills/gstack/bin/gstack-base-red classify --failures .gstack/tmp/base-red.json --base <base> --pause
+```
+
+It reads `base_red` from the base branch's ship policy and reruns those files at
+the base head and at HEAD in scratch worktrees. Exit 0 with `BASE_RED_VERDICT:
+base-red` and `PAUSE: <file>`: skip T3, record the pause file and its cases in
+the invocation record, and continue to Step 6; Step 16 treats exactly these cases
+as this run's waived failures (any other failure is new), and the receipt write
+adds `--base-red <pause file>`, so Step 22 ends `SHIP_PAUSED` with
+`status=incomplete` instead of READY. Exit 1 (`IN_BRANCH:` lines,
+`BASE_RED_UNCONFIGURED`, `BASE_RED_UNNAMED`, `BASE_RED_REPRO_ERROR`): continue T3
+as written.
+
+**Resume a red-base pause.** A parent waits with `gstack-base-red wait --pause
+<file>` (a background operation; `BASE_GREEN:` once a new base head passes the
+cases), then runs `/ship --resume <record>`: if HEAD is still the paused head,
+rerun this Step 5 on HEAD merged with the new base in a scratch worktree (never a
+pushed base merge); all green rewrites the receipt without `--base-red` and runs
+Step 22. Any failure is triaged here as new; a moved HEAD starts /ship fresh.
+
+**After triage:** If any in-branch failures remain unfixed, **STOP**. Do not proceed. If all failures were pre-existing and handled (fixed, TODOed, assigned, skipped, or base-red and paused), continue to Step 6.
 
 **If all pass:** Report each lane's pass count (or `count unavailable`) in one line and continue to Step 6.
 

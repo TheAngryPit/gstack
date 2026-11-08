@@ -1,4 +1,5 @@
 import { describe, test, expect, afterEach } from "bun:test";
+import { spawn } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import { join } from "path";
@@ -76,6 +77,52 @@ describe("detectAutopilot", () => {
     const r = detectAutopilot(process.env, { lockPaths: [lock], processRunning: () => true });
     expect(r.active).toBe(true);
     expect(r.signal).toBe("process:gbrain autopilot");
+  });
+
+  // #3360: the probe stays machine-wide; the refusal names whose autopilot it is.
+  test("a matched autopilot process is named by pid and command, with how to proceed", () => {
+    const r = detectAutopilot(process.env, {
+      lockPaths: [],
+      processRunning: () => [{ pid: 4242, command: "gbrain autopilot --repo /src/other-brain" }],
+    });
+    expect(r.active).toBe(true);
+    expect(r.signal).toBe(
+      "process:gbrain autopilot pid 4242 `gbrain autopilot --repo /src/other-brain`; this check counts any process on this machine " +
+        "whose command line contains \"gbrain autopilot\", even an autopilot serving another brain or repo. Stop that autopilot " +
+        "(or its service, if `gbrain autopilot --install` set one up), or end the process that only mentions it",
+    );
+  });
+
+  test("every matched autopilot process is listed", () => {
+    const r = detectAutopilot(process.env, {
+      lockPaths: [],
+      processRunning: () => [
+        { pid: 4242, command: "gbrain autopilot --repo /a" },
+        { pid: 4343, command: "gbrain autopilot --repo /b" },
+      ],
+    });
+    expect(r.signal).toContain("pid 4242 `gbrain autopilot --repo /a`, pid 4343 `gbrain autopilot --repo /b`;");
+  });
+
+  test("no matched process is inactive", () => {
+    const r = detectAutopilot(process.env, { lockPaths: [], processRunning: () => [] });
+    expect(r).toEqual({ active: false, signal: null });
+  });
+
+  test.skipIf(process.platform === "win32")("the real probe names a live process anywhere on the machine, credentials masked", async () => {
+    const url = ["postgres://u", "hunter2@h/db"].join(":");
+    const child = spawn(process.execPath, ["-e", "console.log('ready'); setTimeout(() => {}, 30000)", `gbrain autopilot --repo /tmp/gstack-3360 --db ${url}`], { stdio: ["ignore", "pipe", "ignore"] });
+    try {
+      await new Promise(resolve => child.stdout!.once("data", resolve));
+      const r = detectAutopilot(process.env, { lockPaths: [] });
+      expect(r.active).toBe(true);
+      expect(r.signal).toContain(`pid ${child.pid} \``);
+      expect(r.signal).toContain("gbrain autopilot --repo /tmp/gstack-3360 --db postgres://***@h/db");
+      expect(r.signal).not.toContain("hunter2");
+      expect(r.signal).toContain("Stop that autopilot");
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 
   test("a lock with no parseable pid stays conservative (active, no pid in signal)", () => {

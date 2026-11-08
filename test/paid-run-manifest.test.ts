@@ -532,9 +532,15 @@ describe('trial planner (behavior and quarantined panels)', () => {
     const manifest = budgetPlan('gate', { 'review-sql-injection': 'behavior' });
     const lines = formatCapacityPreflight(manifest, 16).join('\n');
     expect(lines).toContain(`${manifest.sliceCount} slice(s)`);
-    expect(lines).toContain('3 trial shard(s)');
+    // Every planned trial shard belongs to a 3-trial panel: the overridden review case plus every registered gate behavior case.
+    const trials = manifest.entries.filter(e => e.status === 'planned' && e.trial);
+    const panels = new Set(trials.map(e => e.file.replace(/~t\d+$/, '')));
+    expect(trials.length).toBe(3 * panels.size);
+    expect([...panels]).toContain('test/skill-e2e-review.test.ts#review-sql-injection');
+    expect(lines).toContain(`${trials.length} trial shard(s) in ${panels.size} panel(s)`);
     expect(lines).toContain(`wave(s) at max-parallel 16: ${Math.ceil(manifest.sliceCount / 16)}`);
-    expect(lines).toMatch(/longest indivisible trial ~\d+\.\dm \(test\/skill-e2e-review\.test\.ts#review-sql-injection~t\d\)/);
+    const longest = [...trials].sort((a, b) => (b.estimatedMs ?? 0) - (a.estimatedMs ?? 0))[0]!;
+    expect(lines).toMatch(new RegExp(`longest indivisible trial ~\\d+\\.\\dm \\(${longest.file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`));
   });
 
   test('durations: trials record their longest wall under the case key and seed their own estimate', () => {

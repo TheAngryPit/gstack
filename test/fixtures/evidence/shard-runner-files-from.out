@@ -1,0 +1,124 @@
+ubi-runner: creating eu-central-h1/ubirun-<vm> (standard-16)
+ubi-runner: ready: ubirun-<vm> (<vm-ip>)
+ubi-runner: synced /workspace/gstack -> ubirun-<vm>:work/gstack
+[... VM setup output omitted ...]
+[test:free] files-from /home/ubi/.pregate-files.txt: 275 files, sha256=b67ffd2b99202720a4bd8c9829f8ea1a7007e4b1ad43f0be9da0202c26eb6d36
+[test:free] 7 file(s) have no recorded duration and are packed at the 99th-percentile estimate: test/codex-host.test.ts, test/land-and-deploy-version-check.test.ts, test/paid-rerun.test.ts, test/ship-queue-train-logic.test.ts, test/ship-queue-train.test.ts, +2 more. Refresh scripts/free-test-durations.json with `bun run test:ubicloud --record-durations`.
+[test:free] WARNING: 7 free test files have no recorded duration (limit 5); they are packed at the 99th-percentile estimate, so shard balance degrades until the seed is refreshed: test/codex-host.test.ts, test/land-and-deploy-version-check.test.ts, test/paid-rerun.test.ts, test/ship-queue-train-logic.test.ts, test/ship-queue-train.test.ts, test/train-backstop.test.ts, test/train-gate.test.ts. Fix: run `bun run test:ubicloud --record-durations` and commit scripts/free-test-durations.json. See docs/TESTING_INTERNALS.md#free-suite-duration-seed.
+[test:free] full suite: 275 files across 16 shard processes (duration-packed)
+[test:free]   shard 1: 1 files, predicted ~83s
+[test:free]   shard 2: 17 files, predicted ~74s
+[test:free]   shard 3: 18 files, predicted ~74s
+[test:free]   shard 4: 18 files, predicted ~74s
+[test:free]   shard 5: 18 files, predicted ~74s
+[test:free]   shard 6: 18 files, predicted ~74s
+[test:free]   shard 7: 18 files, predicted ~74s
+[test:free]   shard 8: 18 files, predicted ~74s
+[test:free]   shard 9: 18 files, predicted ~74s
+[test:free]   shard 10: 18 files, predicted ~74s
+[test:free]   shard 11: 18 files, predicted ~74s
+[test:free]   shard 12: 17 files, predicted ~74s
+[test:free]   shard 13: 19 files, predicted ~74s
+[test:free]   shard 14: 19 files, predicted ~74s
+[test:free]   shard 15: 20 files, predicted ~74s
+[test:free]   shard 16: 20 files, predicted ~74s
+[test:free] shard 1/16 (1 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-828Z-10301-1.log
+[test:free] shard 2/16 (17 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-833Z-10301-2.log
+[test:free] shard 3/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-834Z-10301-3.log
+[test:free] shard 4/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-835Z-10301-4.log
+[test:free] shard 5/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-836Z-10301-5.log
+[test:free] shard 6/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-836Z-10301-6.log
+[test:free] shard 7/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-837Z-10301-7.log
+[test:free] shard 8/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-838Z-10301-8.log
+[test:free] shard 9/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-838Z-10301-9.log
+[test:free] shard 10/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-839Z-10301-10.log
+[test:free] shard 11/16 (18 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-840Z-10301-11.log
+[test:free] shard 12/16 (17 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-841Z-10301-12.log
+[test:free] shard 13/16 (19 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-843Z-10301-13.log
+[test:free] shard 14/16 (19 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-845Z-10301-14.log
+[test:free] shard 15/16 (20 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-847Z-10301-15.log
+[test:free] shard 16/16 (20 files)
+[test:free] full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-855Z-10301-16.log
+(pass) CSO evidence contracts > a crashed initializer claim and partial slot are recovered exactly [1.84ms]
+Ran 1 tests across 1 files. [1ms]
+Ran 3 tests across 1 files. [5ms]
+Ran 1 tests across 1 files. [1ms]
+Ran 1 test across 1 file. [30.00ms]
+Ran 1 test across 1 file. [39.00ms]
+Ran 5 tests across 1 files. [1ms]
+Ran 5 tests across 1 files. [1ms]
+Ran 1 tests across 1 files. [1ms]
+(pass) test-free-shards: output contract (log capture, quiet console, failure epilogue) > crash markers surface in the epilogue as crashed+retried workers [8.49ms]
+Ran 303 tests across 18 files. [29.25s]
+[test:free] shard 7/16: 18 files, 29s, pass
+[test:free] PASS — 303 tests, 18 files, 29s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-837Z-10301-7.log
+Ran 412 tests across 18 files. [29.99s]
+[test:free] shard 3/16: 18 files, 30s, pass
+[test:free] PASS — 412 tests, 18 files, 30s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-834Z-10301-3.log
+[train-gate] case-b: runner crashed
+Ran 961 tests across 18 files. [30.49s]
+[test:free] shard 10/16: 18 files, 31s, pass
+[test:free] PASS — 961 tests, 18 files, 31s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-839Z-10301-10.log
+Ran 581 tests across 18 files. [33.60s]
+[test:free] shard 9/16: 18 files, 34s, pass
+[test:free] PASS — 581 tests, 18 files, 34s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-838Z-10301-9.log
+Ran 596 tests across 18 files. [33.79s]
+[test:free] shard 5/16: 18 files, 34s, pass
+[test:free] PASS — 596 tests, 18 files, 34s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-836Z-10301-5.log
+Ran 635 tests across 18 files. [34.56s]
+[test:free] shard 4/16: 18 files, 35s, pass
+[test:free] PASS — 635 tests, 18 files, 35s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-835Z-10301-4.log
+Ran 1163 tests across 17 files. [62.15s]
+[test:free] shard 12/16: 17 files, 62s, pass
+[test:free] PASS — 1163 tests, 17 files, 62s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-841Z-10301-12.log
+Ran 529 tests across 18 files. [64.01s]
+[test:free] shard 11/16: 18 files, 64s, pass
+[test:free] PASS — 529 tests, 18 files, 64s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-840Z-10301-11.log
+Ran 697 tests across 20 files. [68.93s]
+[test:free] shard 15/16: 20 files, 69s, pass
+[test:free] PASS — 697 tests, 20 files, 69s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-847Z-10301-15.log
+Ran 877 tests across 18 files. [71.16s]
+[test:free] shard 8/16: 18 files, 71s, pass
+[test:free] PASS — 877 tests, 18 files, 71s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-838Z-10301-8.log
+Ran 1120 tests across 18 files. [71.47s]
+[test:free] shard 6/16: 18 files, 72s, pass
+[test:free] PASS — 1120 tests, 18 files, 72s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-836Z-10301-6.log
+Ran 539 tests across 17 files. [71.72s]
+[test:free] shard 2/16: 17 files, 72s, pass
+[test:free] PASS — 539 tests, 17 files, 72s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-833Z-10301-2.log
+Ran 725 tests across 20 files. [74.45s]
+[test:free] shard 16/16: 20 files, 74s, pass
+[test:free] PASS — 725 tests, 20 files, 74s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-855Z-10301-16.log
+Ran 778 tests across 19 files. [76.55s]
+[test:free] shard 14/16: 19 files, 77s, pass
+[test:free] PASS — 778 tests, 19 files, 77s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-845Z-10301-14.log
+(pass) investigate-owned-ending-error: an earlier acknowledgment cannot cover a misleading final response [72.61ms]
+(pass) investigate-owned-ending-error: the actual final response can span multiple native fragments [84.53ms]
+(pass) captured owner questions from run 39195396438 > investigate-owned-ending-error: the captured question is answered once and the re-ask is refused [37.84ms]
+Ran 199 tests across 19 files. [88.57s]
+[test:free] shard 13/16: 19 files, 89s, pass
+[test:free] PASS — 199 tests, 19 files, 89s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-843Z-10301-13.log
+Ran 23 tests across 1 file. [114.92s]
+[test:free] shard 1/16: 1 files, 115s, pass
+[test:free] PASS — 23 tests, 1 files, 115s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-49-46-828Z-10301-1.log
+[test:free] FILES-FROM RESULT: files=275 tests=10138 failed=0 exit=0
+PREGATE_VM_TREE_AFTER 3f4bbed38e3bcfd7c422bea43e637dc180a30ba1
+ubi-runner: command exited 0 after 115s
+ubi-runner: pull: nothing matches /tmp/gstack-free-test-*
+ubi-runner: destroy requested: eu-central-h1/ubirun-<vm>
+ubi-runner: destroyed eu-central-h1/ubirun-<vm>

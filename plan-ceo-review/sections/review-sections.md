@@ -388,7 +388,7 @@ Missing reviewer coverage is non-blocking; approvals and artifact rules still ap
 |---|---|
 | Disabled | Record disabled coverage below, then continue to planning decisions. No prompt, outside process or native replacement. |
 | Ready | Construct the prompt and run the foreground outside invocation. |
-| Other preflight mode, including harness mismatch | Report the probe's diagnosis, construct the same prompt and use Native fallback. |
+| Any other mode (`not_installed`, `under_current_harness`) | Report the probe's diagnosis, construct the same prompt and use Native fallback. |
 | Outside execution or output validation fails | Retain its output and diagnosis, finish termination, then use Native fallback. Auth: name the login repair; timeout: report the five-minute limit; empty response: say no response. |
 | Reviewer completes | Present its full output and go to Integrate reviewer findings. |
 | Native fallback unavailable or fails | Record unavailable coverage and continue to planning decisions. No clean-review credit. |
@@ -449,9 +449,9 @@ End with Recommendation: <action> because <specific reason>. If there are no fin
 THE PLAN:
 <plan content>"
 
-**If `CODEX_MODE: ready` (or `unverified`) — run Codex:**
+**If `CODEX_MODE: ready` — run Codex:**
 
-Run this block for `ready` or `unverified`, in the one foreground Bash call described below.
+Run this block for `ready`, in the one foreground Bash call described below.
 Its opening harness guard rechecks the fresh shell: exit 78 uses the same Native
 fallback below, never a replacement provider. Finish termination before fallback and consume only
 completed output. Use private temporary paths, with no background jobs.
@@ -487,7 +487,7 @@ cat "$_OUTSIDE_TMP/text" 2>/dev/null || tail -n 20 "$_OUTSIDE_TMP/events"
 
 cat "$_OUTSIDE_TMP/stderr" >&2 || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }
 _OUTSIDE_RC=0
-bun "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
+bun --no-env-file --config=/dev/null "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
 case "$_OUTSIDE_RC" in
   0|3) ;;
   4) echo 'OUTSIDE_STATUS: unverified provider=codex host=claude'; exit 4 ;;
@@ -752,6 +752,10 @@ List known files only. For unknown files, write "to be determined" and use an
 empty JSONL files array. Each task needs a concrete verification step.
 Always emit the markdown section. Write its JSONL artifact for `/autoplan` only when the Step 0 storage policy permits it; otherwise label the complete task output not persisted and do not claim an aggregation artifact exists.
 
+### Earlier lists on this branch
+
+Before listing tasks, run `~/.claude/skills/gstack/bin/gstack-tasks prior --phase ceo-review` and reconcile what it prints, so a rerun never leaves two lists.
+
 ### Markdown section (always emit)
 
 ```markdown
@@ -774,49 +778,11 @@ Rules:
 
 ### JSONL artifact (write when permitted, including zero tasks)
 
-`/autoplan` reads this file to aggregate across phases. Build each line with
-`jq -nc` so titles and source findings containing quotes, newlines, or
-backslashes serialize cleanly — never use hand-rolled `echo` / `printf`.
+`/autoplan` aggregates this list. With your file-write tool, write one JSON object per line to `.gstack/tmp/tasks-ceo-review-rows.jsonl` at the repo root (no free text in a command; no rows, no file): a task is `{"id":"T1","priority":"P1","component":"","title":"","source_finding":"","effort_human":"~2h","effort_cc":"~15min","files":[]}`, plus `"carried_from":"<run_id>/<id>"` when carried; a closed earlier task is `{"prior":"<run_id>/<id>","disposition":"done|dropped","reason":""}`. Then write the list (empty means "ran, no findings", distinct from "didn't run"):
 
 ```bash
-GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
-SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
-TASKS_DIR="$GSTACK_STATE_ROOT/projects/${SLUG:-unknown}"
-mkdir -p "$TASKS_DIR"
-TASKS_FILE="$TASKS_DIR/tasks-ceo-review-$(date +%Y%m%d-%H%M%S).jsonl"
-COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)
-# The task record keeps the raw git branch; artifact filenames keep gstack-slug's sanitized BRANCH.
-GIT_BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-
-# Repeat ONE jq invocation per task identified during this review.
-# Substitute the placeholders inline with shell variables you set per task:
-#   TASK_ID (T1, T2, ...), PRIORITY (P1/P2/P3), COMPONENT, TITLE,
-#   SOURCE_FINDING, EFFORT_HUMAN, EFFORT_CC, FILES_JSON (a JSON array literal
-#   like '["browse/src/sanitize.ts","browse/src/server.ts"]').
-jq -nc \
-  --arg phase 'ceo-review' \
-  --arg run_id "$RUN_ID" \
-  --arg branch "$GIT_BRANCH" \
-  --arg commit "$COMMIT" \
-  --arg id "$TASK_ID" \
-  --arg priority "$PRIORITY" \
-  --arg component "$COMPONENT" \
-  --arg effort_human "$EFFORT_HUMAN" \
-  --arg effort_cc "$EFFORT_CC" \
-  --arg title "$TITLE" \
-  --arg source_finding "$SOURCE_FINDING" \
-  --argjson files "$FILES_JSON" \
-  '{phase:$phase, run_id:$run_id, branch:$branch, commit:$commit, id:$id, priority:$priority, component:$component, files:$files, effort_human:$effort_human, effort_cc:$effort_cc, title:$title, source_finding:$source_finding}' \
-  >> "$TASKS_FILE"
+~/.claude/skills/gstack/bin/gstack-tasks add --phase ceo-review
 ```
-
-If `jq` is not installed, fall back to skipping the JSONL write and warn
-the user to install jq for autoplan aggregation. Never hand-roll JSONL.
-
-When writes are permitted and zero tasks were identified, touch the JSONL file
-(`: > "$TASKS_FILE"`) so the aggregator sees that the phase produced output
-this run (an empty file means "ran, no findings" — distinct from "didn't run").
 
 
 ### Completion Summary

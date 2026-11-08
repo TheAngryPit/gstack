@@ -11,14 +11,16 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
-import { changedLiterals, constantsIn } from '../lib/pregate/checks/literals';
-import { parseSummary } from '../lib/pregate/checks/lanes';
-import { validateConfig } from '../lib/pregate/config';
+import { changedLiterals, constantsIn, consumersOf, type LiteralWaiver } from '../lib/pregate/checks/literals';
+import { parseSummary, planRuns } from '../lib/pregate/checks/lanes';
+import { DEFAULT_CONFIG, validateConfig } from '../lib/pregate/config';
 import { isDocsEmptyLane } from '../lib/pregate/docs-lane';
 import { buildGraph, testsFor } from '../lib/pregate/import-graph';
 import { CHECK_IDS } from '../lib/pregate/index';
+import type { PregateContext } from '../lib/pregate/types';
 import { parseWorkflow } from '../lib/pregate/workflows';
 import { BASE_PREGATE, cleanup, commit, makeFixtureRepo, runBin, write, type FixtureRepo } from './helpers/pregate-fixture';
 
@@ -80,6 +82,55 @@ describe('import graph (static imports ∪ repo-path literals ∪ bin convention
     expect(testsFor(g, 'test/fixtures/sample.md').tests).toEqual(['test/fixture-doc.test.js']);
     expect(testsFor(g, 'test/fixtures/sample.md').provenance[0]).toContain('(literal)');
     expect(testsFor(g, 'notes/scratch.md')).toMatchObject({ tests: [], declaredNone: false });
+  });
+
+  test('#3340: an extensionless import of a .jsx, .mts or .cts file maps to that file', () => {
+    const repo = fixture();
+    commit(repo, {
+      'src/components/Foo.jsx': 'export default function Foo() { return null; }\n',
+      'src/lib/m.mts': 'export const m = 1;\n',
+      'src/lib/c.cts': 'export const c = 1;\n',
+      'test/foo.test.jsx': "import Foo from '../src/components/Foo';\nimport { m } from '../src/lib/m';\nimport { c } from '../src/lib/c';\n",
+    });
+    const g = buildGraph(repo.work);
+    for (const f of ['src/components/Foo.jsx', 'src/lib/m.mts', 'src/lib/c.cts']) {
+      expect(testsFor(g, f).tests).toEqual(['test/foo.test.jsx']);
+      expect(testsFor(g, f).provenance[0]).toContain('(import)');
+    }
+  });
+
+  test('#3340: a directory import resolves to its index.jsx, index.tsx or index.mjs, not only the dir/** fallback', () => {
+    const repo = fixture();
+    commit(repo, {
+      'src/Bar/index.jsx': 'export default 1;\n',
+      'src/Bar/other.js': 'export default 2;\n',
+      'src/Baz/index.tsx': 'export default 1;\n',
+      'src/Baz/other.js': 'export default 2;\n',
+      'src/Qux/index.mjs': 'export default 1;\n',
+      'src/Qux/other.js': 'export default 2;\n',
+      'test/dirs.test.js': "import Bar from '../src/Bar';\nimport Baz from '../src/Baz';\nimport Qux from '../src/Qux';\n",
+    });
+    const g = buildGraph(repo.work);
+    for (const f of ['src/Bar/index.jsx', 'src/Baz/index.tsx', 'src/Qux/index.mjs']) {
+      expect(testsFor(g, f).tests).toEqual(['test/dirs.test.js']);
+      expect(testsFor(g, f).provenance[0]).not.toContain('/**');
+    }
+    for (const f of ['src/Bar/other.js', 'src/Baz/other.js', 'src/Qux/other.js']) expect(testsFor(g, f).tests).toEqual([]);
+  });
+
+  test('#3340: an import through a jsconfig paths alias reaches a .jsx file; an existing .js sibling still wins', () => {
+    const repo = fixture();
+    commit(repo, {
+      'jsconfig.json': '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }\n',
+      'src/ui/Button.jsx': 'export default function Button() { return null; }\n',
+      'src/ui/Card.js': 'export default 1;\n',
+      'src/ui/Card.jsx': 'export default 2;\n',
+      'test/ui.test.jsx': "import Button from '@/ui/Button';\nimport Card from '@/ui/Card';\n",
+    });
+    const g = buildGraph(repo.work);
+    expect(testsFor(g, 'src/ui/Button.jsx').tests).toEqual(['test/ui.test.jsx']);
+    expect(testsFor(g, 'src/ui/Card.js').tests).toEqual(['test/ui.test.jsx']);
+    expect(testsFor(g, 'src/ui/Card.jsx').tests).toEqual([]);
   });
 
   test('python: absolute, from-import submodule, relative and parenthesised imports and mock.patch targets map; stdlib, comments and docstrings do not', () => {
@@ -150,6 +201,195 @@ describe('literals (pure)', () => {
       { name: 'MAX', old: '3', new: '4', file: 'f.ts' }, { name: 'timeout', old: '5000', new: '9000', file: 'f.ts' },
     ]);
   });
+
+  test('GST-1211: a key inside a newly added object literal is not a changed literal; an edited call-site value and an exported constant still are', () => {
+    const before = 'export const MAX = 3;\nconst page = { limit: 10 };\n';
+    expect(changedLiterals('f.ts', before, `${before}const query = { selection: { order: 'asc', limit: 300 } };\n`)).toEqual([]);
+    expect(changedLiterals('f.ts', before, 'export const MAX = 3;\nconst page = { limit: 20 };\n')).toEqual([{ name: 'limit', old: '10', new: '20', file: 'f.ts' }]);
+    expect(changedLiterals('f.ts', before, 'export const MAX = 4;\nconst page = { limit: 10 };\nconst query = { limit: 300 };\n')).toEqual([{ name: 'MAX', old: '3', new: '4', file: 'f.ts' }]);
+    expect(changedLiterals('f.ts', 'const retired = { limit: 10 };\nconst page = { limit: 20 };\n', 'const page = { limit: 30 };\n')).toEqual([
+      { name: 'limit', old: '10', new: '30', file: 'f.ts' }, { name: 'limit', old: '20', new: '30', file: 'f.ts' },
+    ]);
+  });
+  // Value: protects=a sibling file that shares the module's stem (`postgres-unit-arms.txt` beside `postgres-unit-arms.ts`) is not the
+  //   module, so a test that only names it is not a consumer, while an extensionless import, a JS/TS import extension, the module's own
+  //   file name and a path ending at the stem (then a quote, space, bracket, sentence end or `.d.ts`) still are, and neither `<file>.snap` nor a JS twin of a
+  //   shell module is; fails_when=`/<stem>` again accepts any following `.<word>`, the file name accepts a further extension,
+  //   a non-JS module takes JS/TS extensions, or stops accepting a following space, bracket or sentence end
+  //   (GST-820: 17 false files in gbrain #8372 on ARM_SHARDS 12 -> 18); why_new=no test had a same-stem sibling; seam=none;
+  //   no_claim=name-gated hits (a file naming ARM_SHARDS still counts any 12)
+  test('consumersOf: a sibling file sharing the module stem is not the module; real imports of it still are (GST-820)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-stem-'));
+    const nl = String.fromCharCode(10);
+    const files: Record<string, string> = {
+      'test/a.test.ts': ['// listed in test/postgres-unit-arms.txt', 'expect(n).toBe(12);', ''].join(nl),
+      'test/json.test.ts': ["const arms = read('fixtures/postgres-unit-arms.json');", 'expect(arms.length).toBe(12);', ''].join(nl),
+      'test/longer.test.ts': ["run('scripts/postgres-unit-arms-v2.ts');", 'expect(n).toBe(12);', ''].join(nl),
+      'test/import.test.ts': ["import { shards } from '../scripts/postgres-unit-arms';", 'expect(shards()).toBe(12);', ''].join(nl),
+      'test/import-js.test.ts': ["import { shards } from '../scripts/postgres-unit-arms.js';", 'expect(shards()).toBe(12);', ''].join(nl),
+      'test/own.test.ts': ["const out = run('scripts/postgres-unit-arms.ts');", 'expect(out).toBe(12);', ''].join(nl),
+      'test/line-end.test.ts': ['// covers scripts/postgres-unit-arms', 'expect(n).toBe(12);', ''].join(nl),
+      'test/prose.test.ts': ['// covers scripts/postgres-unit-arms and more', 'expect(n).toBe(12);', ''].join(nl),
+      'test/paren.test.ts': ['// (scripts/postgres-unit-arms)', 'expect(n).toBe(12);', ''].join(nl),
+      'test/sentence.test.ts': ['// see scripts/postgres-unit-arms.', 'expect(n).toBe(12);', ''].join(nl),
+      'test/dts.test.ts': ["import type { Arms } from '../scripts/postgres-unit-arms.d.ts';", 'expect(n).toBe(12);', ''].join(nl),
+      'test/sibling-test.test.ts': ["run('scripts/postgres-unit-arms.test.ts');", 'expect(n).toBe(12);', ''].join(nl),
+      'test/snap.test.ts': ["read('scripts/__snapshots__/postgres-unit-arms.ts.snap');", 'expect(n).toBe(12);', ''].join(nl),
+      'test/sh-twin.test.ts': ["import { arms } from '../lib/arms-tool.ts';", 'expect(n).toBe(12);', ''].join(nl),
+      'test/sh-own.test.ts': ["run('scripts/arms-tool.sh');", 'expect(n).toBe(12);', ''].join(nl),
+    };
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
+    expect(consumersOf(root, Object.keys(files), { name: 'ARM_SHARDS', old: '12', new: '18', file: 'scripts/postgres-unit-arms.ts' })).toEqual([
+      'test/import.test.ts:2', 'test/import-js.test.ts:2', 'test/own.test.ts:2', 'test/line-end.test.ts:2',
+      'test/prose.test.ts:2', 'test/paren.test.ts:2', 'test/sentence.test.ts:2', 'test/dts.test.ts:2',
+    ]);
+    expect(consumersOf(root, ['test/sh-twin.test.ts', 'test/sh-own.test.ts'], { name: 'ARMS', old: '12', new: '18', file: 'scripts/arms-tool.sh' })).toEqual(['test/sh-own.test.ts:2']);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  test('consumersOf: a module stem is a path fragment, never a bare word, and a one-character old value needs the constant name (GSTA-114 flood: install.sh 2 -> 3 flagged 575 consumers)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-'));
+    const nl = String.fromCharCode(10);
+    const files: Record<string, string> = {
+      'test/wrapper.test.ts': ["import { x } from '../capy/skill/gstack/scripts/install.sh';", 'expect(GSTACK_CAPY_WRAPPER).toBe(2);', ''].join(nl),
+      'test/by-path.test.ts': ["const out = run('scripts/install.sh');", 'expect(out.wrapper).toBe(2);', ''].join(nl),
+      'test/prose.test.ts': ['// run install first, then check 2 things', 'expect(count).toBe(2);', ''].join(nl),
+      'test/other.test.ts': ['expect(install.steps.length).toBe(2);', ''].join(nl),
+      'test/retry.test.ts': ["expect(require('../lib/retry.js').TIMEOUT_MS).toBe(5000);", ''].join(nl),
+      'test/retry-path.test.ts': ["const mod = require('../lib/retry.js');", 'expect(mod.wait()).toBe(5000);', ''].join(nl),
+      'test/retry-bare.test.ts': ["const mod = load('retry.js');", 'expect(mod.wait()).toBe(5000);', ''].join(nl),
+      'test/reretry.test.ts': ["const mod = load('preretry.js');", 'expect(mod.wait()).toBe(5000);', ''].join(nl),
+      'test/retry-words.test.ts': ['// the retry budget was 5000 once', 'expect(elapsed).toBeLessThan(5000);', ''].join(nl),
+    };
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
+    const all = Object.keys(files);
+    // A one-character value: only the file that names the constant counts; the path fragment alone is not enough for "2".
+    // pregate-literal: GSTACK_CAPY_WRAPPER=3 a fixture's own 2 -> 3 bump, not the shipped wrapper revision
+    expect(consumersOf(root, all, { name: 'GSTACK_CAPY_WRAPPER', old: '2', new: '3', file: 'capy/skill/gstack/scripts/install.sh' })).toEqual(['test/wrapper.test.ts:2']);
+    // A longer value: the constant's name, the module's full file name, or its stem as a path fragment; the bare word "retry" in prose and "preretry.js" do not count.
+    expect(consumersOf(root, all, { name: 'TIMEOUT_MS', old: '5000', new: '9000', file: 'lib/retry.js' })).toEqual(['test/retry.test.ts:1', 'test/retry-path.test.ts:2', 'test/retry-bare.test.ts:2']);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  // Value: protects=a one-character old value counts only in a statement that names the constant (its line, or lines that continue it),
+  //   so comments, shell positionals and fixture bodies elsewhere in a file that names it are not consumers, while a formatter-split
+  //   assertion still is; fails_when=any lone digit in such a file is reported again
+  //   (#3492: five false hits on a wrapper 2 -> 3 bump, the same five on 3 -> 4 at v1.91.376.0); why_new=only file-level gating was
+  //   tested; seam=none; no_claim=longer values (module-gated as before)
+  test('consumersOf: a one-character old value counts only in a statement that names the constant (#3492)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-bound-'));
+    const nl = String.fromCharCode(10);
+    const files: Record<string, string> = {
+      'scripts/install.sh': ['#!/usr/bin/env bash', '#   handing the held lock over (GSTACK_DEMO_LOCK_HELD=1) and,', "#   from revision 2, origin's VERSION read in this run", 'GSTACK_DEMO_WRAPPER=3', ''].join(nl),
+      'test/prose.test.ts': ["const rev = read(BOOT).match(/^GSTACK_DEMO_WRAPPER=(\\d+)$/m);", '', '// Field list 2 item 13: lanes relay only the trailer', ''].join(nl),
+      'test/stub.test.ts': ["const env = { GSTACK_DEMO_WRAPPER: '9' };", 'const script = [', "  'bash \"$1\" touch --root \"$2\" --pid $$ || exit 9',", '];', ''].join(nl),
+      'test/fixture.test.ts': ['// covers the GSTACK_DEMO_WRAPPER readers', "write('src/a.js', 'export default 1;');", "write('src/b.js', 'export default 2;');", ''].join(nl),
+      'test/same-line.test.ts': ['expect(GSTACK_DEMO_WRAPPER).toBe(2);', ''].join(nl),
+      'test/later.test.ts': ['// readers of the wrapper revision', "it('x', () => { const n = 2; });", 'expect(env.GSTACK_DEMO_WRAPPER).toBe(2);', ''].join(nl),
+      'test/split.test.ts': ['expect(read().GSTACK_DEMO_WRAPPER)', '  .toBe(2);', ''].join(nl),
+      'test/split-args.test.ts': ['assert.strictEqual(', '  mod.GSTACK_DEMO_WRAPPER,', '  2,', ');', ''].join(nl),
+      'test/adjacent.test.ts': ['const rev = mod.GSTACK_DEMO_WRAPPER;', 'const two = 2;', ''].join(nl),
+    };
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
+    expect(consumersOf(root, Object.keys(files), { name: 'GSTACK_DEMO_WRAPPER', old: '2', new: '3', file: 'scripts/install.sh' })).toEqual(['test/same-line.test.ts:1', 'test/later.test.ts:3', 'test/split.test.ts:2', 'test/split-args.test.ts:3']);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  // Value: protects=a one-character call-site literal (`attempts: 1`) counts only in a file that also names the changed module, on a line
+  //   naming the call-site name, because `attempts`, `limit` and `cap` are ordinary words across a test tree; fails_when=any file with
+  //   the word and a lone `1` is reported again (gstack-evals#97: `retry: { attempts: 1 }` -> `JUDGE_RETRY` raised 11 false hits,
+  //   GSTA-2); why_new=call-site names had only the constant-name gate; seam=none; no_claim=constant names (previous test)
+  test('consumersOf: a one-character call-site literal needs the changed module in the file and the name on its line (gstack-evals#97)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-call-'));
+    const nl = String.fromCharCode(10);
+    const files: Record<string, string> = {
+      'tests/grid.test.ts': ['const grid = { tasks: ["a"], attempts: 1, n_concurrent: 4 };', ''].join(nl),
+      'tests/replay.test.ts': ['// attempts are counted per finding', 'expect(r.findings.length).toBe(1);', ''].join(nl),
+      'tests/proxy.test.ts': ["import { retryBudget } from '../lanes/proxy';", 'const cell = { trial: 1, attempt: 1 };', 'expect(retryBudget().attempts).toBeGreaterThan(0);', ''].join(nl),
+      'tests/judge-run.test.ts': ["import { run } from '../lanes/review-noloss/judge-run';", 'const n = 1;', 'expect(run({ retry: { attempts: 1 } }).sent).toBe(n);', ''].join(nl),
+    };
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
+    expect(consumersOf(root, Object.keys(files), { name: 'attempts', old: '1', new: '3', file: 'lanes/review-noloss/judge-run.ts' })).toEqual(['tests/judge-run.test.ts:3']);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  // Value: protects=a test that keeps an old value on purpose (the refused input after a minimum-version bump) can waive that one line
+  //   with a `pregate-literal: NAME=value reason` comment, while every other old-value line, a marker for another constant or value,
+  //   a marker with no reason (a bare `*/`, `**/` or `* */` closer is not a reason) and marker text inside a string still count, and a line marked
+  //   for one constant can still be waived for another by the comment line above; fails_when=the waiver widens past its line or a stray
+  //   marker clears a real consumer (#3490, gbrain#7690); why_new=the only escape was warn: ["literals"] for every constant;
+  //   seam=none; no_claim=the policy file (no key exists; see the config test)
+  test('consumersOf: a pregate-literal marker waives only its own line, for its own constant and old value, with a reason (#3490)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-waiver-'));
+    const nl = String.fromCharCode(10);
+    const files: Record<string, string> = {
+      'test/runtime.test.ts': [
+        "import { MIN_RUNTIME, checkRuntime } from '../src/runtime';",
+        "expect(checkRuntime('1.4.0')).toBe('refused'); // pregate-literal: MIN_RUNTIME='1.4.0' refused input below the minimum",
+        "// pregate-literal: MIN_RUNTIME=1.4.0 the oldest runtime we still name in the error",
+        "expect(message('1.4.0')).toContain('upgrade');",
+        "expect(MIN_RUNTIME).toBe('1.4.0');",
+        ''].join(nl),
+      'test/other-name.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); // pregate-literal: MAX_RUNTIME='1.4.0' wrong constant", ''].join(nl),
+      'test/other-value.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); // pregate-literal: MIN_RUNTIME='1.3.9' wrong value", ''].join(nl),
+      'test/no-reason.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); // pregate-literal: MIN_RUNTIME='1.4.0'", ''].join(nl),
+      'test/in-string.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "const src = \"expect(v('1.4.0')); // pregate-literal: MIN_RUNTIME='1.4.0' looks waived\"; check('1.4.0');", ''].join(nl),
+      'test/two-above.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "// pregate-literal: MIN_RUNTIME='1.4.0' too far above", '', "expect(checkRuntime('1.4.0')).toBe('refused');", ''].join(nl),
+      'test/all-waived.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); # pregate-literal: MIN_RUNTIME='1.4.0' refused input", ''].join(nl),
+      'test/block-no-reason.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); /* pregate-literal: MIN_RUNTIME='1.4.0' */", ''].join(nl),
+      'test/block-stars.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); /* pregate-literal: MIN_RUNTIME='1.4.0' **/", ''].join(nl),
+      'test/block-star-space.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); /* pregate-literal: MIN_RUNTIME='1.4.0' * */", ''].join(nl),
+      'test/block-stars-reason.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "expect(checkRuntime('1.4.0')).toBe('refused'); /* pregate-literal: MIN_RUNTIME='1.4.0' refused input **/", ''].join(nl),
+      'test/two-constants.test.ts': ["import { MIN_RUNTIME } from '../src/runtime';", "// pregate-literal: MIN_RUNTIME='1.4.0' lower bound of the refused range", "expect(inRange('1.4.0', '2.0.0')).toBe(false); /* pregate-literal: MAX_RUNTIME='2.0.0' upper bound */", ''].join(nl),
+    };
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
+    const change = { name: 'MIN_RUNTIME', old: "'1.4.0'", new: "'1.4.4'", file: 'src/runtime.ts' };
+    const waived: LiteralWaiver[] = [];
+    const base = (rel: string) => rel === 'test/runtime.test.ts' ? files[rel]!.split(nl).slice(0, 2).join(nl) : null;
+    expect(consumersOf(root, Object.keys(files), change, base, waived)).toEqual([
+      'test/runtime.test.ts:5', 'test/other-name.test.ts:2', 'test/other-value.test.ts:2', 'test/no-reason.test.ts:2', 'test/in-string.test.ts:2', 'test/two-above.test.ts:4', 'test/block-no-reason.test.ts:2', 'test/block-stars.test.ts:2', 'test/block-star-space.test.ts:2',
+    ]);
+    expect(waived).toEqual([
+      { at: 'test/runtime.test.ts:2', reason: 'refused input below the minimum', added: false },
+      { at: 'test/runtime.test.ts:4', reason: 'the oldest runtime we still name in the error', added: true },
+      { at: 'test/all-waived.test.ts:2', reason: 'refused input', added: true },
+      { at: 'test/block-stars-reason.test.ts:2', reason: 'refused input', added: true },
+      { at: 'test/two-constants.test.ts:3', reason: 'lower bound of the refused range', added: true },
+    ]);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  test('consumersOf: a history row is skipped only when this branch added the new-value row to the same table; other old-value lines still count (GST-344)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-history-'));
+    const nl = String.fromCharCode(10);
+    const head = "import { PROOF_CHECKS } from '../src/proof-checks.ts';";
+    const rows = (...ns: number[]) => ns.map(n => `  [${n}, "digest-${n}"],`);
+    const files: Record<string, [string[], string[] | null]> = {
+      'test/history.test.ts': [[head, 'const versions = [', ...rows(44, 45, 46), '];', 'expect(PROOF_CHECKS).toBe(46);'], [head, 'const versions = [', ...rows(44, 45), '];', 'expect(PROOF_CHECKS).toBe(45);']],
+      'test/newest-first.test.ts': [[head, 'const versions = [', ...rows(46, 45, 44), '];'], [head, 'const versions = [', ...rows(45, 44), '];']],
+      'test/unextended.test.ts': [[head, 'const versions = [', ...rows(44, 45), '];'], [head, 'const versions = [', ...rows(44, 45), '];']],
+      'test/stale-later.test.ts': [[head, 'const versions = [', ...rows(44, 45, 46), '];', 'expect(PROOF_CHECKS).toBe(45);'], [head, 'const versions = [', ...rows(44, 45), '];', 'expect(PROOF_CHECKS).toBe(45);']],
+      'test/two-tables.test.ts': [[head, 'const a = [', ...rows(44, 45), '];', 'const b = [', ...rows(45, 46), '];'], [head, 'const a = [', ...rows(44, 45), '];', 'const b = [', ...rows(45), '];']],
+      'test/boundary.test.ts': [[head, 'test.each([', ...rows(45, 46), '])("%d", () => {});'], [head, 'test.each([', ...rows(45, 46), '])("%d", () => {});']],
+      'test/new-file.test.ts': [[head, 'const versions = [', ...rows(45, 46), '];'], null],
+      'test/same-line.test.ts': [[head, 'const versions = [', '  [45, "digest-45"], expect(PROOF_CHECKS).toBe(45),', '  [46, "digest-46"],', '];'], [head, 'const versions = [', '  [45, "digest-45"], expect(PROOF_CHECKS).toBe(45),', '];']],
+    };
+    for (const [rel, [now]] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), now.join(nl) + nl); }
+    const baseText = (rel: string) => files[rel]?.[1]?.join(nl) ?? null;
+    const lineOf = (rel: string, text: string) => `${rel}:${files[rel]![0].indexOf(text) + 1}`;
+    expect(consumersOf(root, Object.keys(files), { name: 'PROOF_CHECKS', old: '45', new: '46', file: 'src/proof-checks.ts' }, baseText).sort()).toEqual([
+      lineOf('test/boundary.test.ts', '  [45, "digest-45"],'),
+      lineOf('test/same-line.test.ts', '  [45, "digest-45"], expect(PROOF_CHECKS).toBe(45),'),
+      lineOf('test/stale-later.test.ts', 'expect(PROOF_CHECKS).toBe(45);'),
+      lineOf('test/two-tables.test.ts', '  [45, "digest-45"],'),
+      lineOf('test/unextended.test.ts', '  [45, "digest-45"],'),
+    ].sort());
+    fs.writeFileSync(path.join(root, 'test/versions.test.ts'), ["import { SCHEMA } from '../src/schema.ts';", 'const history = [', "  ['v3', 'a'],", '  ["v4", \'b\'],', '];', ''].join(nl));
+    const strings = (rel: string) => rel === 'test/versions.test.ts' ? ["import { SCHEMA } from '../src/schema.ts';", 'const history = [', "  ['v3', 'a'],", '];'].join(nl) : null;
+    expect(consumersOf(root, ['test/versions.test.ts'], { name: 'SCHEMA', old: "'v3'", new: "'v4'", file: 'src/schema.ts' }, strings)).toEqual([]);
+    expect(consumersOf(root, ['test/versions.test.ts'], { name: 'SCHEMA', old: "'v3'", new: "'v4'", file: 'src/schema.ts' }, () => undefined)).toEqual(['test/versions.test.ts:3']);
+    fs.writeFileSync(path.join(root, 'test/semver.test.ts'), ["import { RELEASE } from '../src/release.ts';", 'const history = [', "  ['1.2.3', 'a'],", "  ['1.2.4', 'b'],", '];', ''].join(nl));
+    expect(consumersOf(root, ['test/semver.test.ts'], { name: 'RELEASE', old: "'1.2.3'", new: "'1.2.4'", file: 'src/release.ts' }, () => null)).toEqual([]);
+    expect(consumersOf(root, ['test/semver.test.ts'], { name: 'RELEASE', old: "'1.2.3'", new: "'1.2.4'", file: 'src/release.ts' }, () => "  ['1.2.4', 'b'],")).toEqual(['test/semver.test.ts:3']);
+    fs.writeFileSync(path.join(root, 'test/big.test.ts'), [head, 'const versions = [', ...Array.from({ length: 20_000 }, () => '  [45, "x"],'), '  [46, "y"],', '];', ...Array.from({ length: 20_000 }, () => ''), ''].join(nl));
+    expect(consumersOf(root, ['test/big.test.ts'], { name: 'PROOF_CHECKS', old: '45', new: '46', file: 'src/proof-checks.ts' }, () => ['', ...Array.from({ length: 20_000 }, () => '')].join(nl))).toEqual([]);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   test('runner summaries: bun, node --test, vitest, jest, pytest, zero-run', () => {
     expect(parseSummary(' 12 pass\n 1 fail\nRan 13 tests across 2 files.')).toEqual({ ran: 13, failed: 1 });
     expect(parseSummary('# tests 4\n# pass 4\n# fail 0')).toEqual({ ran: 4, failed: 0 });
@@ -157,6 +397,13 @@ describe('literals (pure)', () => {
     expect(parseSummary('Tests:       1 failed, 7 passed, 8 total')).toEqual({ ran: 8, failed: 1 });
     expect(parseSummary('===== 3 passed in 0.1s =====')).toEqual({ ran: 3, failed: 0 });
     expect(parseSummary('No tests found')).toEqual({ ran: 0, failed: 0 });
+    // Playwright lists the failed tests between its counts, so each count line is read on its own.
+    expect(parseSummary('  2 failed\n    [e2e] › a.spec.ts:9:1 › one\n    [e2e] › b.spec.ts:4:1 › two\n  1 flaky\n    [e2e] › c.spec.ts:2:1 › three\n  3 skipped\n  135 passed (3.0m)', 'npx playwright test {files}')).toEqual({ ran: 138, failed: 2 });
+    expect(parseSummary('  137 passed (1.1m)', 'npx playwright test {files}')).toEqual({ ran: 137, failed: 0 });
+    expect(parseSummary('  3 failed\n    [e2e] › a.spec.ts:9:1 › one\n  1 interrupted\n  2 did not run', 'npx playwright test {files}')).toEqual({ ran: 4, failed: 4 });
+    expect(parseSummary('  5 skipped', 'npx playwright test {files}')).toEqual({ ran: 0, failed: 0 });
+    // A test's own output that looks like a count is not the summary: the last count lines are.
+    expect(parseSummary('  0 passed\n  1 failed\n    [e2e] › a.spec.ts:9:1 › one\n  4 passed (2.0s)', 'npx playwright test {files}')).toEqual({ ran: 5, failed: 1 });
     expect(parseSummary('ok')).toEqual({ ran: null, failed: null });
   });
   test('config: unknown keys, secrets in warn, a runner without {files} and an uncontained glob are PREGATE_CONFIG_INVALID', () => {
@@ -205,7 +452,7 @@ describe('gstack-pregate (bin)', () => {
     const repo = fixture();
     const help = runBin(repo, 'gstack-pregate', ['--help']);
     expect(help.out).toContain('Exit codes: 0 ok · 1 fail · 2 usage · 3 refused or needs a flag');
-    expect(help.out).toContain('stage 1 mechanical preflight (regen, secrets, strays, literals, timing, guards)');
+    expect(help.out).toContain('stage 1 mechanical preflight (regen, secrets, strays, literals, policy-floor, timing, guards)');
     expect(help.out).toContain('stage 2 test execution (lanes)');
     expect(runBin(repo, 'gstack-pregate', ['bogus']).status).toBe(EXIT.usage);
     expect(pregate(repo, ['--only', 'hermetic']).status).toBe(EXIT.usage);
@@ -229,7 +476,7 @@ describe('gstack-pregate (bin)', () => {
     const out = readOut(repo);
     expect(out.schema_version).toBe(1);
     expect(out.tree).toMatch(/^[0-9a-f]{40}$/);
-    expect(out.checks.map((c: any) => [c.id, c.status, c.stage])).toEqual([['regen', 'pass', 'preflight'], ['secrets', 'pass', 'preflight'], ['strays', 'pass', 'preflight'], ['literals', 'pass', 'preflight'], ['timing', 'pass', 'preflight'], ['guards', 'pass', 'preflight'], ['lanes', 'pass', 'tests']]);
+    expect(out.checks.map((c: any) => [c.id, c.status, c.stage])).toEqual([['regen', 'pass', 'preflight'], ['secrets', 'pass', 'preflight'], ['strays', 'pass', 'preflight'], ['literals', 'pass', 'preflight'], ['policy-floor', 'pass', 'preflight'], ['timing', 'pass', 'preflight'], ['guards', 'pass', 'preflight'], ['lanes', 'pass', 'tests']]);
     for (const c of out.checks) { expect(c.inputs.tree).toBe(out.tree); expect(typeof c.ms).toBe('number'); }
     expect(check(repo, 'lanes').inputs.command).toMatch(/^[0-9a-f]{64}$/);
     expect(out.verdict).toBe('pass');
@@ -283,6 +530,21 @@ describe('gstack-pregate (bin)', () => {
     expect(w.out).toMatch(/^preflight {2}strays {4}warn .*downgraded to warn by origin\/main@/m);
   });
 
+  test('GST-1211: probe.py and temporal-*.test.ts are not scratch names; zz-*, tmp*, scratch* and editor leftovers still are', () => {
+    const repo = fixture({ pregate: { ...BASE_PREGATE, warn: [] } });
+    commit(repo, { 'docs/comparison-systems/ext-temporal-graph/shipped-0.31/probe.py': 'print(1)\n', 'test/eval/temporal-graph-shipped.test.ts': 'export {};\n' });
+    const ok = pregate(repo, ['--stage', 'preflight', '--only', 'strays']);
+    expect(ok.status).toBe(EXIT.ok);
+    expect(ok.out).toMatch(/^preflight {2}strays {4}pass /m);
+    commit(repo, { 'docs/zz-notes.md': '# n\n', 'lib/tmp-x.ts': 'export {};\n', 'test/scratch.py': 'pass\n', 'lib/util.js.orig': 'x\n' });
+    const r = pregate(repo, ['--stage', 'preflight', '--only', 'strays']);
+    expect(r.status).toBe(EXIT.fail);
+    expect(r.out).toMatch(/^preflight {2}strays {4}fail .*4 stray file\(s\)/m);
+    for (const f of ['docs/zz-notes.md', 'lib/tmp-x.ts', 'test/scratch.py', 'lib/util.js.orig']) expect(r.out).toContain(`strays: ${f}: scratch name (${f.split('/').pop()})`);
+    expect(r.out).not.toContain('probe.py: scratch name');
+    expect(r.out).not.toContain('temporal-graph-shipped.test.ts: scratch name');
+  });
+
   test('p0-4-heavy-old-constant: a nightly-only test still asserting the old literal fails literals with file:line', () => {
     const repo = fixture();
     commit(repo, { 'lib/retry.js': "exports.MAX_RETRIES = 3;\nexports.TIMEOUT_MS = 9000;\nexports.retry = (fn) => fn();\n" });
@@ -294,6 +556,63 @@ describe('gstack-pregate (bin)', () => {
     // Updating the consumer clears it.
     commit(repo, { 'test/nightly/retry-heavy.test.js': "const test = require('node:test');\nconst assert = require('node:assert');\ntest('heavy', () => assert.strictEqual(require('../../lib/retry.js').TIMEOUT_MS, 9000));\n" });
     expect(pregate(repo, ['--stage', 'preflight', '--only', 'literals']).status).toBe(EXIT.ok);
+  });
+
+  test('GST-1211: a new object literal beside an existing `limit: 10` passes literals; editing that existing value still fails', () => {
+    const repo = fixture({ baseFiles: { 'lib/query.js': 'exports.page = () => ({ limit: 10 });\n', 'test/query.test.js': "const test = require('node:test');\nconst assert = require('node:assert');\nconst { page } = require('../lib/query.js');\ntest('pages by ten', () => assert.strictEqual(page().limit, 10));\n" } });
+    commit(repo, { 'lib/query.js': "exports.page = () => ({ limit: 10 });\nexports.selection = { order: 'asc', limit: 300 };\n" });
+    const ok = pregate(repo, ['--stage', 'preflight', '--only', 'literals']);
+    expect(ok.status).toBe(EXIT.ok);
+    expect(ok.out).not.toContain('test/query.test.js');
+    commit(repo, { 'lib/query.js': "exports.page = () => ({ limit: 20 });\nexports.selection = { order: 'asc', limit: 300 };\n" });
+    const r = pregate(repo, ['--stage', 'preflight', '--only', 'literals']);
+    expect(r.status).toBe(EXIT.fail);
+    expect(r.out).toContain('literals: test/query.test.js:4: limit still 10 (now 20 in lib/query.js)');
+  });
+
+  // Value: protects=a real stale one-character constant still fails literals end to end after the #3492 narrowing, and an incidental
+  //   digit in the same file is not what it reports; fails_when=the statement binding drops a named assertion; why_new=only
+  //   multi-character values had a bin-level control; seam=none; no_claim=two-character values
+  test('#3492 control: a one-character constant change still fails literals on the test that asserts the old value by name', () => {
+    const repo = fixture();
+    commit(repo, { 'test/nightly/retries.test.js': "const test = require('node:test');\nconst assert = require('node:assert');\n// covers 3 retry shapes\nconst { MAX_RETRIES } = require('../../lib/retry.js');\ntest('retries', () => assert.strictEqual(\n  MAX_RETRIES,\n  3,\n));\n" });
+    commit(repo, { 'lib/retry.js': "exports.MAX_RETRIES = 4;\nexports.TIMEOUT_MS = 5000;\nexports.retry = (fn) => fn();\n" });
+    const r = pregate(repo, ['--stage', 'preflight', '--only', 'literals']);
+    expect(r.status).toBe(EXIT.fail);
+    expect(r.out).toContain('literals: test/nightly/retries.test.js:7: MAX_RETRIES still 3 (now 4 in lib/retry.js)');
+    expect(r.err).toContain('(PREGATE_LITERALS)');
+  });
+
+  // Value: protects=end to end, a marked refused-input line passes literals and the run names the waiver, flagging one this branch
+  //   added; a branch policy cannot add a literals waiver; fails_when=the check ignores markers, hides a waiver, or the policy grows a
+  //   literals key (#3490); why_new=no waiver existed; seam=none; no_claim=gstack-gate-diff tagging
+  test('#3490: a pregate-literal marker passes literals for its line and the run lists the waiver as added on this branch', () => {
+    const repo = fixture();
+    commit(repo, { 'test/nightly/retries.test.js': "const test = require('node:test');\nconst assert = require('node:assert');\nconst { MAX_RETRIES, retry } = require('../../lib/retry.js');\n// pregate-literal: MAX_RETRIES=3 the old cap is the input the guard must refuse\ntest('refuses 3', () => assert.throws(() => retry(() => 0, { MAX_RETRIES: 3 })));\n" });
+    commit(repo, { 'lib/retry.js': "exports.MAX_RETRIES = 4;\nexports.TIMEOUT_MS = 5000;\nexports.retry = (fn) => fn();\n", 'test/retry.test.js': "const test = require('node:test');\nconst assert = require('node:assert');\nconst { MAX_RETRIES } = require('../lib/retry.js');\ntest('retries four times', () => assert.strictEqual(MAX_RETRIES, 4));\n" });
+    const r = pregate(repo, ['--stage', 'preflight', '--only', 'literals']);
+    expect(r.status).toBe(EXIT.ok);
+    expect(r.out).toContain('literals: waived: test/nightly/retries.test.js:5: MAX_RETRIES 3 (the old cap is the input the guard must refuse; marker added on this branch)');
+    expect(validateConfig({ ...BASE_PREGATE, literals: { allow: [{ name: 'MAX_RETRIES', value: '3' }] } }).map(e => e.path)).toEqual(['literals']);
+  });
+
+  test('GST-344: a history table the branch extends passes literals through the merge-base read; one it does not extend fails', () => {
+    const history = (...ns: number[]) => ["const { MAX_RETRIES } = require('../lib/retry.js');", 'const versions = [', ...ns.map(n => `  [${n}, 'digest-${n}'],`), '];', ''].join('\n');
+    const repo = fixture({ baseFiles: { 'test/history.test.js': history(2, 3) } });
+    const bump = { 'lib/retry.js': "exports.MAX_RETRIES = 4;\nexports.TIMEOUT_MS = 5000;\nexports.retry = (fn) => fn();\n", 'test/retry.test.js': "const test = require('node:test');\nconst assert = require('node:assert');\nconst { MAX_RETRIES } = require('../lib/retry.js');\ntest('retries four times', () => assert.strictEqual(MAX_RETRIES, 4));\n" };
+    commit(repo, bump);
+    const stale = pregate(repo, ['--stage', 'preflight', '--only', 'literals']);
+    expect(stale.status).toBe(EXIT.fail);
+    expect(stale.out).toContain('literals: test/history.test.js:4: MAX_RETRIES still 3 (now 4 in lib/retry.js)');
+    commit(repo, { 'test/history.test.js': history(2, 3, 4) });
+    const r = pregate(repo, ['--stage', 'preflight', '--only', 'literals']);
+    expect(r.out).toMatch(/^preflight {2}literals {2}pass /m);
+    expect(r.status).toBe(EXIT.ok);
+    const renamed = fixture({ baseFiles: { 'test/history.test.js': history(2, 3, 4) } });
+    commit(renamed, { ...bump, 'test/history.test.js': null, 'test/versions.test.js': history(2, 3, 4) });
+    const held = pregate(renamed, ['--stage', 'preflight', '--only', 'literals']);
+    expect(held.status).toBe(EXIT.fail);
+    expect(held.out).toContain('literals: test/versions.test.js:4: MAX_RETRIES still 3 (now 4 in lib/retry.js)');
   });
 
   test('secrets: a credential in an added line fails and cannot be downgraded; a committed-then-removed line is clean', () => {
@@ -322,6 +641,7 @@ describe('gstack-pregate (bin)', () => {
     const ok = pregate(docs, ['--only', 'lanes', '--explain']);
     expect(ok.status).toBe(EXIT.ok);
     expect(ok.err).not.toContain('PREGATE_NO_LANE');
+    expect(ok.out).not.toContain('PREGATE_NO_POLICY');
     expect(ok.out).toMatch(/docs\/no-tests: 3 documentation file\(s\)/);
     expect(ok.out).toContain('.work/round-3-plan.md: docs/no-tests (empty lane)');
     expect(ok.out).toContain('notes/redproof.md: docs/no-tests (empty lane)');
@@ -333,10 +653,12 @@ describe('gstack-pregate (bin)', () => {
       '.work/round-3-plan.md': '# plan\n',
       'lib/orphan.js': 'exports.lonely = () => 2;\n',
     });
+    // With no policy anywhere the unmapped source file is the PREGATE_NO_POLICY warning with a starter (Lane D), still never a pass, and the Markdown stays docs.
     const bad = pregate(mixed, ['--only', 'lanes']);
-    expect(bad.status).toBe(EXIT.fail);
-    expect(bad.err).toContain('(PREGATE_NO_LANE)');
-    expect(bad.out).toContain('lanes: FAIL lanes — lib/orphan.js has no test lane');
+    expect(bad.status).toBe(EXIT.ok);
+    expect(bad.err).not.toContain('PREGATE_NO_LANE');
+    expect(bad.out).toContain('(PREGATE_NO_POLICY)');
+    expect(bad.out).toContain('lanes: no policy: lib/orphan.js have no test lane');
     expect(bad.out).toContain('docs/no-tests (empty lane): .work/round-3-plan.md');
     expect(bad.out).not.toContain('.work/round-3-plan.md has no test lane');
 
@@ -417,6 +739,45 @@ describe('gstack-pregate (bin)', () => {
     expect(head.status).toBe(EXIT.ok);
     expect(head.out).toContain('policy head (unreviewed) .gstack/pregate.json');
     expect(head.out).toMatch(/^tests {6}lanes {5}pass /m);
+  });
+
+  // Value: protects=a branch that adds its own lane in .gstack/pregate.json and fails PREGATE_NO_LANE under the base policy is told why (the base
+  // copy is the policy) and given both routes, while the base policy still decides; fails_when=the fix line repeats "declare its lane" with no
+  // mention of the base policy, or the run silently reads the head policy and passes; why_new=the circular fix line from gstack-evals #6/#15;
+  // seam=fixture repo; no_claim=ship-queue's handling of a head-policy record
+  test('lanes: a branch whose own pregate.json adds the lane still fails under the base policy, and the fix names the base copy and --policy-from head', () => {
+    const repo = fixture();
+    commit(repo, { 'lib/orphan.js': "exports.lonely = () => 2;\n" });
+    const plain = pregate(repo, ['--stage', 'tests']);
+    expect(plain.status).toBe(EXIT.fail);
+    expect(check(repo, 'lanes').fix).not.toContain('--policy-from head');
+    commit(repo, { '.gstack/pregate.json': JSON.stringify({ ...BASE_PREGATE, dependencies: { ...BASE_PREGATE.dependencies, 'lib/orphan.js': ['test/util.test.js'] } }) + '\n' });
+    const r = pregate(repo, ['--stage', 'tests']);
+    expect(r.status).toBe(EXIT.fail);
+    expect(r.err).toContain('(PREGATE_NO_LANE)');
+    const fix: string = check(repo, 'lanes').fix;
+    expect(fix).toMatch(/^this branch edits \.gstack\/pregate\.json, but the policy comes from origin\/main@[0-9a-f]{12}:\.gstack\/pregate\.json so a branch cannot loosen its own gate/);
+    expect(fix).toContain('land the policy change in its own PR first, or rerun with --policy-from head --allow-repo-commands');
+    expect(fix).toContain('otherwise add a test that names the file');
+  });
+
+  // Value: protects=the own-policy fix line appears only when the base or user copy decides and the branch still carries its own
+  // pregate.json: a --policy-from head run and a branch that deletes the file get the plain fix; fails_when=the configKind 'head' guard or
+  // the status 'D' filter in noLaneFix is dropped; why_new=the head run above passes and never reaches noLaneFix, and no test deletes the
+  // pin file on a NO_LANE run; seam=fixture repo; no_claim=the wording of the plain fix
+  test('lanes: a head-policy run and a branch that deletes pregate.json get the plain no-lane fix', () => {
+    const repo = fixture();
+    commit(repo, { 'lib/orphan.js': "exports.lonely = () => 2;\n", '.gstack/pregate.json': JSON.stringify({ ...BASE_PREGATE, dependencies: { ...BASE_PREGATE.dependencies, 'lib/orphan.js': ['test/util.test.js'] } }) + '\n' });
+    commit(repo, { 'lib/orphan2.js': "exports.alone = () => 3;\n" });
+    const head = pregate(repo, ['--stage', 'tests', '--policy-from', 'head']);
+    expect(head.status).toBe(EXIT.fail);
+    expect(head.err).toContain('(PREGATE_NO_LANE)');
+    expect(check(repo, 'lanes').fix).toMatch(/^add a test that names the file/);
+    commit(repo, { '.gstack/pregate.json': null });
+    const deleted = pregate(repo, ['--stage', 'tests']);
+    expect(deleted.status).toBe(EXIT.fail);
+    expect(deleted.err).toContain('(PREGATE_NO_LANE)');
+    expect(check(repo, 'lanes').fix).toMatch(/^add a test that names the file/);
   });
 
   test('lanes: deleted and renamed files select the tests that named them; subprocess targets and computed reads map through declarations and joined literals', () => {
@@ -514,4 +875,212 @@ describe('gstack-pregate (bin)', () => {
     expect(runBin(repo, 'gstack-pregate', ['init']).out).toContain('PREGATE_CONFIG_WRITTEN');
     expect(runBin(repo, 'gstack-pregate', ['validate']).status).toBe(EXIT.ok);
   });
+});
+
+describe('nested JS packages run their own runner from their own directory', () => {
+  const APP = {
+    'app/package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest run' }, devDependencies: { vitest: '^3.2.0' } }) + '\n',
+    'app/pnpm-lock.yaml': "lockfileVersion: '9.0'\n",
+    'app/src/sum.ts': 'export const sum = (a: number, b: number) => a + b;\n',
+    'app/src/sum.test.ts': "import { expect, test } from 'vitest';\nimport { sum } from './sum';\ntest('sum', () => expect(sum(1, 2)).toBe(3));\n",
+  };
+  /**
+   * A `pnpm` (and `yarn`) on PATH that reports its cwd and argv and prints a vitest summary for the files it is given.
+   * The lane puts its Bun's directory first on PATH, and that directory can hold a real pnpm (/usr/local/bin), which
+   * would install from the network; the lane's bash puts the shim first again through BASH_ENV.
+   */
+  const pmShim = (repo: FixtureRepo): { PATH: string; BASH_ENV: string } => {
+    const dir = path.join(repo.root, 'shim');
+    fs.mkdirSync(dir, { recursive: true });
+    for (const tool of ['pnpm', 'yarn']) fs.writeFileSync(path.join(dir, tool), '#!/usr/bin/env bash\necho "ran in $(basename "$PWD"): $*"\necho " Test Files  1 passed (1)"\necho "      Tests  3 passed (3)"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, 'path.sh'), `PATH='${dir}':"$PATH"\n`);
+    return { PATH: `${dir}:${process.env.PATH ?? ''}`, BASH_ENV: path.join(dir, 'path.sh') };
+  };
+  const ctxFor = (repo: FixtureRepo, env: Record<string, string>) => ({ repoRoot: repo.work, config: DEFAULT_CONFIG, env }) as unknown as PregateContext;
+
+  // Value: protects=a test owned by a nested package that declares vitest runs from that package with its lockfile's package manager
+  //   and package-relative paths, while root-owned tests keep the root runner; fails_when=the root package.json alone decides again
+  //   (the reported `bun test` from the repo root: vi.stubGlobal missing); why_new=only root package.json detection was tested;
+  //   seam=none; no_claim=the runners themselves (plan only)
+  test('a nested vitest package plans its own group with the lockfile\'s package manager; root tests keep the root runner', () => {
+    const repo = fixture({ pregate: null, baseFiles: APP });
+    const ctx = ctxFor(repo, pmShim(repo));
+    expect(planRuns(ctx, ['app/src/sum.test.ts', 'test/util.test.js'])).toEqual({ groups: [
+      { runner: 'node --test {files}', cwd: '', files: ['test/util.test.js'] },
+      { runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] },
+    ], unclaimed: [], missing: [], noPubspec: [] });
+    // The lockfile is found walking up, and a packageManager field outranks it.
+    fs.rmSync(path.join(repo.work, 'app/pnpm-lock.yaml'));
+    write(repo.work, 'yarn.lock', '# yarn lockfile v1\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'yarn vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] }]);
+    write(repo.work, 'app/package.json', JSON.stringify({ name: 'app', packageManager: 'pnpm@9.15.0', devDependencies: { jest: '^29.0.0' } }) + '\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'pnpm exec jest {files}', cwd: 'app', files: ['src/sum.test.ts'] }]);
+    // Value: protects=a package manager missing from PATH is incomplete naming it, never exit 127 judged as a test failure;
+    //   fails_when=the PATH check is dropped; why_new=new detection path; seam=none; no_claim=a real pnpm install
+    expect(planRuns(ctxFor(repo, { PATH: path.join(repo.root, 'empty-path') }), ['app/src/sum.test.ts'])).toEqual({ groups: [], unclaimed: ['app/src/sum.test.ts'], missing: ['pnpm'], noPubspec: [] });
+    fs.rmSync(path.join(repo.work, 'yarn.lock'));
+    write(repo.work, 'app/package.json', JSON.stringify({ name: 'app', devDependencies: { vitest: '^3.2.0' } }) + '\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'npx vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] }]);
+  });
+
+  /** `env` with a `python3` first on PATH whose `-c` probe exits `probeExit` (0: pytest importable, 3: not). */
+  const withPython = (repo: FixtureRepo, env: { PATH: string; BASH_ENV: string }, probeExit: number) => {
+    const dir = path.join(repo.root, `py-${probeExit}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'python3'), `#!/bin/sh\n[ "$1" = "-c" ] && exit ${probeExit}\nexit 3\n`, { mode: 0o755 });
+    return { ...env, PATH: `${dir}:${env.PATH}` };
+  };
+
+  // Value: protects=root-owned tests in two languages each get their language's runner instead of the whole lane going incomplete, and a
+  //   language whose runner this machine lacks is named while the other still runs; fails_when=detection again needs one language
+  //   across every root file (#3600: `.mjs` + `.py` was PREGATE_INCOMPLETE asking for one `runner` for both); why_new=only
+  //   single-language root selections were tested; seam=none; no_claim=the runners themselves (plan only)
+  test('root tests in two languages plan one group per language; a file no runner claims stays unclaimed', () => {
+    const repo = fixture({ pregate: null, baseFiles: APP });
+    const ctx = ctxFor(repo, withPython(repo, pmShim(repo), 0));
+    const mixed = ['scripts/doku-gate.test.mjs', 'scripts/test_assets.py', 'scripts/version-gate.test.mjs'];
+    expect(planRuns(ctx, mixed)).toEqual({ groups: [
+      { runner: 'node --test {files}', cwd: '', files: ['scripts/doku-gate.test.mjs', 'scripts/version-gate.test.mjs'] },
+      { runner: 'python3 -m pytest {files}', cwd: '', files: ['scripts/test_assets.py'] },
+    ], unclaimed: [], missing: [], noPubspec: [] });
+    expect(planRuns(ctx, ['scripts/doku-gate.test.mjs', 'test/run.bats'])).toEqual({ groups: [
+      { runner: 'node --test {files}', cwd: '', files: ['scripts/doku-gate.test.mjs'] },
+    ], unclaimed: ['test/run.bats'], missing: [], noPubspec: [] });
+    expect(planRuns(ctxFor(repo, withPython(repo, pmShim(repo), 3)), mixed)).toEqual({ groups: [
+      { runner: 'node --test {files}', cwd: '', files: ['scripts/doku-gate.test.mjs', 'scripts/version-gate.test.mjs'] },
+    ], unclaimed: ['scripts/test_assets.py'], missing: ['pytest'], noPubspec: [] });
+  });
+
+  // Value: protects=a repo-wide bun or vitest claims only JS/TS files, so a root `.py` test beside them gets pytest instead of being handed to
+  //   the JS runner; fails_when=bun.lock or a vitest dependency again takes every extension; why_new=the split was only tested with no
+  //   repo runner; seam=none; no_claim=the runners themselves (plan only)
+  test('a repo-wide bun or vitest runner claims JS/TS only; a root .py test beside it gets pytest; parts with one runner run together', () => {
+    const repo = fixture({ pregate: null, baseFiles: APP });
+    const ctx = ctxFor(repo, withPython(repo, pmShim(repo), 0));
+    write(repo.work, 'package.json', JSON.stringify({ name: 'fixture', devDependencies: { vitest: '^3.2.0' } }) + '\n');
+    expect(planRuns(ctx, ['test/a.test.ts', 'scripts/b.test.mjs', 'scripts/test_c.py', 'test/run.bats'])).toEqual({ groups: [
+      { runner: 'npx vitest run {files}', cwd: '', files: ['test/a.test.ts', 'scripts/b.test.mjs'] },
+      { runner: 'python3 -m pytest {files}', cwd: '', files: ['scripts/test_c.py'] },
+    ], unclaimed: ['test/run.bats'], missing: [], noPubspec: [] });
+    expect(planRuns(ctx, ['test/a.test.ts', 'scripts/b.test.mjs']).groups).toEqual([{ runner: 'npx vitest run {files}', cwd: '', files: ['test/a.test.ts', 'scripts/b.test.mjs'] }]);
+    write(repo.work, 'bun.lock', '');
+    expect(planRuns(ctx, ['test/a.test.ts', 'scripts/test_c.py']).groups).toEqual([
+      { runner: 'bun test {files}', cwd: '', files: ['test/a.test.ts'] },
+      { runner: 'python3 -m pytest {files}', cwd: '', files: ['scripts/test_c.py'] },
+    ]);
+  });
+
+  // Value: protects=a Playwright spec in a repo whose unit runner is vitest runs through `playwright test`, never vitest (which finds
+  //   no test files and exits 1 on a diff that touches only specs); fails_when=the repo-wide runner takes every JS/TS test again (#3629);
+  //   why_new=no detection knew Playwright; seam=none; no_claim=a real Playwright run (plan only)
+  test('a spec importing @playwright/test runs through playwright test from its package; the other tests keep their runner', () => {
+    const repo = fixture({ pregate: null, baseFiles: APP });
+    const ctx = ctxFor(repo, pmShim(repo));
+    write(repo.work, 'package.json', JSON.stringify({ name: 'fixture', devDependencies: { vitest: '^3.2.0', '@playwright/test': '^1.48.0' } }) + '\n');
+    write(repo.work, 'tests/e2e/home.spec.ts', "import { expect, test } from '@playwright/test';\ntest('home', async ({ page }) => expect(page).toBeTruthy());\n");
+    write(repo.work, 'app/e2e/app.spec.ts', "import {\n  test, // the runner's fixture\n  /* it's */ expect,\n} from \"@playwright/test\";\ntest('app', () => {});\n");
+    write(repo.work, 'tests/e2e/tight.spec.ts', "import{test}from'@playwright/test';\ntest('tight', () => {});\n");
+    write(repo.work, 'test/pad.test.js', 'import' + ' '.repeat(5_000) + '\n');
+    write(repo.work, 'test/util.test.js', "import { test } from 'vitest';\nimport type { Page } from '@playwright/test';\nimport type {\n  Locator,\n} from '@playwright/test';\nimport { type BrowserContext } from '@playwright/test';\nconst spec = \"import { test } from '@playwright/test';\";\ntest('fixture text and type imports only', () => {});\n");
+    expect(planRuns(ctx, ['tests/e2e/home.spec.ts', 'tests/e2e/tight.spec.ts', 'test/util.test.js', 'test/pad.test.js', 'app/src/sum.test.ts', 'app/e2e/app.spec.ts'])).toEqual({ groups: [
+      { runner: 'npx vitest run {files}', cwd: '', files: ['test/util.test.js', 'test/pad.test.js'] },
+      { runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] },
+      { runner: 'npx playwright test --reporter=list {files}', cwd: '', files: ['tests/e2e/home.spec.ts', 'tests/e2e/tight.spec.ts'] },
+      { runner: 'pnpm exec playwright test --reporter=list {files}', cwd: 'app', files: ['e2e/app.spec.ts'] },
+    ], unclaimed: [], missing: [], noPubspec: [] });
+    // A declared runner still takes every file, Playwright specs included.
+    const declared = { ...ctx, config: { ...DEFAULT_CONFIG, runner: 'bun test {files}' } } as PregateContext;
+    expect(planRuns(declared, ['tests/e2e/home.spec.ts']).groups).toEqual([{ runner: 'bun test {files}', cwd: '', files: ['tests/e2e/home.spec.ts'] }]);
+    // A package manager missing from PATH leaves the spec unclaimed naming it.
+    expect(planRuns(ctxFor(repo, { PATH: path.join(repo.root, 'empty-path') }), ['app/e2e/app.spec.ts'])).toEqual({ groups: [], unclaimed: ['app/e2e/app.spec.ts'], missing: ['pnpm'], noPubspec: [] });
+  });
+
+  // Value: protects=repos where root detection works today are unchanged: a nested package that declares no test runner stays with the
+  //   root runner from the root, a root vitest stays `npx vitest run` from the root, and a declared runner takes every file;
+  //   fails_when=every nested package.json splits a group or the root command changes; why_new=negative controls for the new
+  //   nested detection; seam=none; no_claim=the runners themselves (plan only)
+  test('negative controls: a nested package without a test runner, a root vitest repo and a declared runner keep today\'s plan', () => {
+    const repo = fixture({ pregate: null, baseFiles: { ...APP, 'app/package.json': JSON.stringify({ name: 'app', scripts: { build: 'tsc' } }) + '\n' } });
+    const ctx = ctxFor(repo, pmShim(repo));
+    write(repo.work, 'bun.lock', '{}\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts', 'test/util.test.js']).groups).toEqual([{ runner: 'bun test {files}', cwd: '', files: ['app/src/sum.test.ts', 'test/util.test.js'] }]);
+    fs.rmSync(path.join(repo.work, 'bun.lock'));
+    write(repo.work, 'package.json', JSON.stringify({ name: 'fixture', devDependencies: { vitest: '^3.2.0' } }) + '\n');
+    write(repo.work, 'pnpm-lock.yaml', "lockfileVersion: '9.0'\n");
+    expect(planRuns(ctx, ['app/src/sum.test.ts', 'test/util.test.js']).groups).toEqual([{ runner: 'npx vitest run {files}', cwd: '', files: ['app/src/sum.test.ts', 'test/util.test.js'] }]);
+    const declared = { ...ctx, config: { ...DEFAULT_CONFIG, runner: 'bun test {files}' } } as PregateContext;
+    write(repo.work, 'app/package.json', APP['app/package.json']);
+    expect(planRuns(declared, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'bun test {files}', cwd: '', files: ['app/src/sum.test.ts'] }]);
+  });
+
+  // Value: protects=the reported case end to end: a touched source file in a nested pnpm+vitest package runs `pnpm exec vitest run`
+  //   in that package with the package-relative path and passes on vitest's summary; fails_when=the lane runs from the repo root or
+  //   with the root runner; why_new=no nested package run existed; seam=none; no_claim=a real pnpm or vitest (PATH shim)
+  test('a touched file in a nested pnpm+vitest package runs vitest there', () => {
+    const repo = fixture({ pregate: null, baseFiles: APP });
+    // No workflows, so the Windows lane's unknown matrix cannot turn the selection into a requires-remote obligation.
+    commit(repo, { '.github/workflows/free-tests.yml': null, '.github/workflows/windows.yml': null }, 'no workflows');
+    repo.git('push', '-q', 'origin', 'HEAD:main');
+    repo.git('fetch', '-q', 'origin');
+    commit(repo, { 'app/src/sum.ts': 'export const sum = (a: number, b: number) => b + a;\n' });
+    const r = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--only', 'lanes'], pmShim(repo));
+    expect(r.out).toMatch(/^tests {6}lanes {5}pass .*3 tests ran in 1 file\(s\), exit 0/m);
+    expect(r.out).toContain("ran: (cd 'app' && pnpm exec vitest run 'src/sum.test.ts')");
+    expect(fs.readFileSync(/log: (\S+)/.exec(r.out)![1]!, 'utf8')).toContain('ran in app: exec vitest run src/sum.test.ts');
+    expect(r.status).toBe(EXIT.ok);
+  }, 60_000);
+});
+
+describe('a declared runner gets only the files its tool runs', () => {
+  const BUN_APP = {
+    'lib/sum.ts': 'export const sum = (a: number, b: number) => a + b;\n',
+    'test/sum.test.ts': "import { expect, test } from 'bun:test';\nimport { sum } from '../lib/sum';\ntest('sum', () => expect(sum(1, 2)).toBe(3));\n",
+    'tests/real-outcome/agent_test.py': "import subprocess\n\ndef test_agent():\n    assert 'lib/sum.ts'\n",
+  };
+  const ctxWith = (repo: FixtureRepo, runner: string) => ({ repoRoot: repo.work, config: { ...DEFAULT_CONFIG, runner }, env: process.env }) as unknown as PregateContext;
+
+  // Value: protects=a declared JS runner never receives a Python test (bun exits 1 on "filters did not match any test files", so the
+  //   lane went PREGATE_LANE_FAILED on gstack-evals #196 and #200), and the files it cannot run are named, not counted as covered;
+  //   fails_when=a declared runner takes every selected file again; why_new=only detected runners split by language; seam=none;
+  //   no_claim=a Python lane (pytest never runs under a declared JS runner)
+  test('a declared bun runner plans JS/TS only and names the dropped .py files; pytest takes .py only; an unknown tool takes every file', () => {
+    const repo = fixture({ baseFiles: BUN_APP });
+    const files = ['test/sum.test.ts', 'test/resize_test.py', 'tests/real-outcome/agent_test.py'];
+    expect(planRuns(ctxWith(repo, 'bun test --timeout=30000 {files}'), files)).toEqual({ groups: [{ runner: 'bun test --timeout=30000 {files}', cwd: '', files: ['test/sum.test.ts'] }], unclaimed: [], missing: [], noPubspec: [], dropped: ['test/resize_test.py', 'tests/real-outcome/agent_test.py'] });
+    expect(planRuns(ctxWith(repo, 'python3 -m pytest {files}'), files).groups).toEqual([{ runner: 'python3 -m pytest {files}', cwd: '', files: ['test/resize_test.py', 'tests/real-outcome/agent_test.py'] }]);
+    expect(planRuns(ctxWith(repo, 'bash scripts/run-tests.sh {files}'), files)).toEqual({ groups: [{ runner: 'bash scripts/run-tests.sh {files}', cwd: '', files }], unclaimed: [], missing: [], noPubspec: [] });
+    expect(planRuns(ctxWith(repo, 'tests/node/run.sh {files}'), files).groups[0]!.files).toEqual(files);
+    expect(planRuns(ctxWith(repo, 'node scripts/run-tests.js {files}'), files).groups[0]!.files).toEqual(files);
+    expect(planRuns(ctxWith(repo, 'python3 scripts/run-tests.py {files}'), files).groups[0]!.files).toEqual(files);
+    expect(planRuns(ctxWith(repo, 'node --test {files}'), files).dropped).toEqual(['test/resize_test.py', 'tests/real-outcome/agent_test.py']);
+    expect(planRuns(ctxWith(repo, 'bun test {files} && python3 -m pytest {files}'), files).dropped).toBeUndefined();
+    expect(planRuns(ctxWith(repo, './node_modules/.bin/jest {files}'), files).dropped).toEqual(['test/resize_test.py', 'tests/real-outcome/agent_test.py']);
+    expect(planRuns(ctxWith(repo, 'bun test {files}'), ['test/resize_test.py'])).toEqual({ groups: [], unclaimed: [], missing: [], noPubspec: [], dropped: ['test/resize_test.py'] });
+  });
+
+  // Value: protects=the reported runs end to end under a set `bun test {files}` runner: beside a TS test, a changed *_test.py and a .py
+  //   test selected by a literal match are no longer handed to bun (which skips them silently, so the lane counted 3 files for 1 run),
+  //   and a .py-only selection no longer runs bun at all (bun exits 1 when no file is a bun test: PREGATE_LANE_FAILED, gstack-evals
+  //   #196 and #200); both name the .py files; fails_when=bun is handed a .py file again; why_new=no fixture declared a JS runner beside
+  //   Python tests; seam=none; no_claim=TS tests that spawn python3 count as coverage of the .py files (they do not)
+  test('a set bun runner with a changed *_test.py and a literal-match .py runs bun without any .py file', () => {
+    const repoWith = (files: Record<string, string>) => {
+      const repo = fixture({ pregate: { ...BASE_PREGATE, runner: 'bun test {files}' }, baseFiles: BUN_APP });
+      commit(repo, { '.github/workflows/free-tests.yml': null, '.github/workflows/windows.yml': null }, 'no workflows');
+      repo.git('push', '-q', 'origin', 'HEAD:main');
+      repo.git('fetch', '-q', 'origin');
+      commit(repo, files);
+      return pregate(repo, ['--stage', 'tests', '--only', 'lanes']);
+    };
+    const mixed = repoWith({ 'lib/sum.ts': 'export const sum = (a: number, b: number) => b + a;\n', 'test/resize_test.py': 'def test_resize():\n    assert True\n' });
+    const ran = /^\s*lanes: ran: .*$/m.exec(mixed.out)?.[0] ?? '';
+    expect(ran).toContain('test/sum.test.ts');
+    expect(ran).not.toContain('.py');
+    expect(mixed.out).toMatch(/^tests {6}lanes {5}pass .*1 tests ran in 1 file\(s\), exit 0; 2 selected file\(s\) the declared runner cannot run \(not run, not counted as covered\): test\/resize_test\.py tests\/real-outcome\/agent_test\.py/m);
+    expect(mixed.status).toBe(EXIT.ok);
+    const pyOnly = repoWith({ 'test/resize_test.py': 'def test_resize():\n    assert True\n' });
+    expect(pyOnly.out).not.toMatch(/lanes: ran: /);
+    expect(pyOnly.out).toMatch(/^tests {6}lanes {5}pass .*no selected file is one the declared runner can run; 1 selected file\(s\) the declared runner cannot run \(not run, not counted as covered\): test\/resize_test\.py/m);
+    expect(pyOnly.status).toBe(EXIT.ok);
+  }, 60_000);
 });

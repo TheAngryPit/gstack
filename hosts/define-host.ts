@@ -157,6 +157,7 @@ export function defineHost<const N extends string>(overrides: HostOverrides<N>):
     coAuthorTrailer,
     learningsMode = 'basic',
     boundaryInstruction,
+    transcripts,
   } = overrides;
 
   if (pathRewrites && extraPathRewrites) {
@@ -199,5 +200,6 @@ export function defineHost<const N extends string>(overrides: HostOverrides<N>):
     ...(coAuthorTrailer !== undefined ? { coAuthorTrailer } : {}),
     learningsMode,
     ...(boundaryInstruction !== undefined ? { boundaryInstruction } : {}),
+    ...(transcripts !== undefined ? { transcripts } : {}),
   };
 }

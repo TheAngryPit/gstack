@@ -78,7 +78,7 @@ if [ "$_OUTSIDE_EXIT" -eq 124 ]; then
 fi
 cat "$_OUTSIDE_TMP/stderr" >&2 || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }
 _OUTSIDE_RC=0
-bun "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
+bun --no-env-file --config=/dev/null "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
 case "$_OUTSIDE_RC" in
   0|3) ;;
   4) echo 'OUTSIDE_STATUS: unverified provider=codex host=claude'; exit 4 ;;
@@ -93,12 +93,12 @@ Failed/incomplete outside review → unavailable; disabled → skip outside. Bot
 
 Retain the historical review-log skill ID; add `"host":"claude","outside_provider":"codex","outside_status":"completed|unavailable|disabled|skipped","phase":"eng"`. Record differing attempt outcomes separately. `source:"codex"` requires completed CLI output; native uses `source:"in-host"` (historical `source:"claude"`: native Claude). Availability/native fallback is not outside completion. Preserve all reported modelUsage; unknown model identity stays unknown. Under `GSTACK_CODEX_NO_SANDBOX=1` add `"codex_sandbox":"danger-full-access"`.
 
-  Error handling: Phase 1 failure/degradation policy applies.
+  Errors: Phase 1 failure/degradation policy applies.
 
 - Architecture choices: explicit over clever (P5). If Codex disagrees with valid reason → TASTE DECISION. Scope changes both models agree on → USER CHALLENGE.
 - Evals: always include all relevant suites (P1)
 - Test plan: generate artifact at `$GSTACK_STATE_ROOT/projects/$SLUG/{user}-{branch}-eng-review-test-plan-{datetime}.md` (the loaded eng skill's name and root)
-- TODOS.md: collect all deferred scope expansions from every prior phase (Eng runs last), auto-write
+- TODOS.md: collect every prior phase's deferred scope expansions (Eng runs last), auto-write
 
 **Required execution checklist (Eng):**
 
@@ -110,14 +110,14 @@ Retain the historical review-log skill ID; add `"host":"claude","outside_provide
 
 2. Step 0.5 (Dual Voices): Present the completed calls above under Codex SAYS
    (eng — architecture challenge) and Claude SUBAGENT (eng — independent review).
-   Produce eng consensus table:
+   Eng consensus table:
 
 ```
 ENG DUAL VOICES — CONSENSUS TABLE:
   Dimension                           Claude  Codex  Consensus
   1. Architecture sound?               —       —      —
   2. Test coverage sufficient?         —       —      —
-  3. Performance risks addressed?      —       —      —
+  3. Perf risks + budget/bench named?  —       —      —
   4. Security threats covered?         —       —      —
   5. Error paths handled?              —       —      —
   6. Deployment risk manageable?       —       —      —
@@ -142,7 +142,7 @@ Missing/disabled voice = N/A, never CONFIRMED. Flag any single-voice critical fi
      skipping the analysis.
    - Write the test plan artifact to disk
 
-6. Section 4 (Performance): Evaluate N+1 queries, memory, caching, slow paths.
+6. Section 4 (Performance): Evaluate N+1 queries, memory, caching, slow paths; a hot path with no budget nor bench step is a finding.
 
 **Mandatory outputs from Phase 3:**
 - "NOT in scope" section
@@ -151,8 +151,8 @@ Missing/disabled voice = N/A, never CONFIRMED. Flag any single-voice critical fi
 - Test diagram mapping codepaths to coverage (Section 3)
 - Test plan artifact written to disk (Section 3)
 - Failure modes registry with critical gap flags
-- Completion Summary (the full summary from the Eng skill)
-- TODOS.md updates (collected from all phases)
+- Completion Summary (from the Eng skill)
+- TODOS.md updates (all phases)
 
 **Close this phase:**
 

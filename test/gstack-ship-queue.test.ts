@@ -20,6 +20,7 @@ import { applyStampPatch } from '../lib/ship-queue-gate';
 import type { TreeReceipt } from '../lib/tree-receipt';
 import { BASE_POLICY, BIN, cleanup, makeFixtureRepo, makePr, mergeMain, mergeToMain, restamp, runBin, type FixtureRepo } from './helpers/restamp-fixture';
 import { coordinatorClone, ghQueueShim } from './helpers/ship-queue-fixture';
+import { shippedBody } from './helpers/ship-queue-train-fixture';
 
 const repos: FixtureRepo[] = [];
 const fixture = (policy?: Record<string, unknown>, prefix?: string) => { const r = makeFixtureRepo({ ...(policy ? { policy } : {}), ...(prefix ? { prefix } : {}) }); repos.push(r); return r; };
@@ -192,12 +193,13 @@ describe('gate-ahead, then stamp and verify from a separate clone', () => {
   }, 240_000);
 });
 
-function runAsync(repo: FixtureRepo, args: string[]): Promise<{ status: number | null; out: string }> {
+function runAsync(repo: FixtureRepo, args: string[]): Promise<{ status: number | null; out: string; err: string }> {
   return new Promise(resolve => {
     const child = spawn(BIN('gstack-ship-queue'), [...args, '--base', 'main'], { cwd: repo.work, env: { ...process.env, ...repo.env }, timeout: 120_000 });
-    let out = '';
+    let out = '', err = '';
     child.stdout.on('data', d => { out += d; });
-    child.on('close', status => resolve({ status, out }));
+    child.stderr.on('data', d => { err += d; });
+    child.on('close', status => resolve({ status, out, err }));
   });
 }
 
@@ -206,7 +208,7 @@ describe('gate-ahead attempts', () => {
     const { repo } = twoLanes();
     const args = ['gate-ahead', '--after', '1', '--pr', '2', '--predecessor-ref', 'pr-a', '--allow-repo-commands'];
     const [a, b] = await Promise.all([runAsync(repo, args), runAsync(repo, args)]);
-    expect([a.status, b.status]).toEqual([EXIT.ok, EXIT.ok]);
+    expect([a.status, b.status], `${a.err}\n${b.err}`).toEqual([EXIT.ok, EXIT.ok]);
     const ids = [a, b].map(r => field(line(r.out, 'GATE_AHEAD:'), 'attempt'));
     expect(new Set(ids).size).toBe(2);
     const trees = [a, b].map(r => line(r.out, 'worktree: ').slice(10));
@@ -258,7 +260,7 @@ describe('ready', () => {
     const repo = fixture();
     const head = makePr(repo, 'pr-a');
     const pregate = pregateFor(repo, head);
-    const shim = (prHead: string, checks: unknown) => ghQueueShim(repo, { prs: { '1': { headRefOid: prHead, url: 'https://github.com/o/r/pull/1', body: 'no receipt' } }, checks: { [head]: checks } });
+    const shim = (prHead: string, checks: unknown, body = shippedBody('1', head)) => ghQueueShim(repo, { prs: { '1': { headRefOid: prHead, url: 'https://github.com/o/r/pull/1', body } }, checks: { [head]: checks } });
     const ok = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim(head, green));
     expect(ok.status).toBe(EXIT.ok);
     const lines = ok.out.split('\n');
@@ -266,8 +268,20 @@ describe('ready', () => {
     expect(lines.slice(1, 9)).toEqual([
       'pr: https://github.com/o/r/pull/1', `head: ${head}`, 'version: unstamped', `base: origin/main@${repo.git('rev-parse', 'origin/main')}`,
       `ci: green at ${head.slice(0, 12)} (passed=1 failed=0 pending=0 skipped=1)`, expect.stringMatching(/^PREGATE: pass tree=[0-9a-f]{12} head=[0-9a-f]{12} checks=1$/),
-      'gate: command=none full_e2e=no gate-ahead=none', 'SHIP_RECEIPT: none in the PR body',
+      'gate: command=none full_e2e=no gate-ahead=none', `SHIP_RECEIPT: pr=1 head=${head.slice(0, 12)} version=- base=main`,
     ]);
+    const unshipped = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim(head, green, 'no receipt'));
+    expect(unshipped.status).toBe(EXIT.refused);
+    expect(unshipped.out).toContain('SHIP_RECEIPT: none in the PR body');
+    expect(unshipped.err).toMatch(/PR #1's body carries no ship receipt; fix: run \/ship on the branch .*\(QUEUE_RECEIPT_MISSING\)/);
+    const broken = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim(head, green, '```gstack-ship-receipt\n{"schema_version":1}\n```\n'));
+    expect(broken.status).toBe(EXIT.refused);
+    expect(broken.out).toContain('SHIP_RECEIPT: invalid in the PR body');
+    expect(broken.err).toMatch(/ship receipt is invalid \(.*head.*\).*\(QUEUE_RECEIPT_MISSING\)/);
+    const stale = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim(head, green, shippedBody('1', 'e'.repeat(40))));
+    expect(stale.status).toBe(EXIT.refused);
+    expect(stale.out).toContain(`SHIP_RECEIPT: pr=1 head=eeeeeeeeeeee version=- base=main`);
+    expect(stale.err).toMatch(new RegExp(`PR #1's ship receipt is for eeeeeeeeeeee, not the head ${head.slice(0, 12)} being merged.*\\(QUEUE_RECEIPT_STALE\\)`));
     const unpushed = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim('f'.repeat(40), green));
     expect(unpushed.status).toBe(EXIT.refused);
     expect(unpushed.err).toMatch(/is not PR #1's pushed head ffffffffffff.*\(QUEUE_NOT_READY\)/);
@@ -276,11 +290,181 @@ describe('ready', () => {
     fs.appendFileSync(path.join(repo.work, 'pr-a.txt'), 'more\n');
     repo.git('commit', '-qam', 'more');
     const moved = repo.git('rev-parse', 'HEAD');
-    const stale = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], ghQueueShim(repo, { prs: { '1': { headRefOid: moved, body: '' } }, checks: { [moved]: green } }));
-    expect(stale.status).toBe(EXIT.refused);
-    expect(stale.out).toMatch(/^PREGATE: pass .* \(PREGATE_STALE\)$/m);
+    const stalePregate = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], ghQueueShim(repo, { prs: { '1': { headRefOid: moved, body: shippedBody('1', moved) } }, checks: { [moved]: green } }));
+    expect(stalePregate.status).toBe(EXIT.refused);
+    expect(stalePregate.out).toMatch(/^PREGATE: pass .* \(PREGATE_STALE\)$/m);
+    // A lane that cleared its pregate from a separate clone (gstack-pregate --remote cannot run in a worktree) holds the verdict under
+    // <state root>/pregate/by-tree/<tree>.json; ready reads that mirror for the current tree when its own record is stale or missing, and only a run
+    // that holds the tests stage (what `--stage tests --remote` writes: checks=[lanes]) against origin/main under a reviewed policy stands in: a
+    // --only timing run, another base or a head policy is named on the PREGATE line instead.
+    const stateRoot = path.join(repo.root, 'state-root');
+    const complete = { base: `origin/main@${repo.git('rev-parse', 'origin/main').slice(0, 12)}`, policy: 'origin/main@abc (no .gstack/pregate.json)', checks: [{ id: 'lanes', status: 'pass' }] };
+    const fromSuffix = `(from the state root's pregate/by-tree/${'TREE'}.json, recorded by another checkout)`;
+    const movedShim = ghQueueShim(repo, { prs: { '1': { headRefOid: moved, body: shippedBody('1', moved) } }, checks: { [moved]: green } });
+    const movedTree = runBin(repo, 'gstack-wtree', []).out.trim();
+    const mirror = path.join(stateRoot, 'pregate', 'by-tree', `${movedTree}.json`);
+    fs.mkdirSync(path.dirname(mirror), { recursive: true });
+    fs.writeFileSync(path.join(stateRoot, 'pregate', 'by-tree', `${'0'.repeat(movedTree.length)}.json`), JSON.stringify({ schema_version: 1, tree: '0'.repeat(movedTree.length), head: moved, verdict: 'pass', ...complete }));
+    const otherTree = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect(otherTree.status).toBe(EXIT.refused);
+    expect(otherTree.out).toMatch(/^PREGATE: pass .* \(PREGATE_STALE\)$/m);
+    const missing = queue(repo, ['ready', '--pr', '1'], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect(missing.status).toBe(EXIT.refused);
+    expect(missing.out).toMatch(/^PREGATE: missing \(\.gstack\/tmp\/pregate\.json; run gstack-pregate run --allow-repo-commands\)$/m);
+    const suffix = fromSuffix.replace('TREE', movedTree.slice(0, 12));
+    const partial = { ...complete, checks: [{ id: 'timing', status: 'pass' }] };
+    for (const [bad, why] of [[partial, 'a run without the tests stage (lanes)'], [{ ...complete, base: 'origin/develop@0123456789ab' }, 'recorded against origin/develop@0123456789ab, not origin/main'], [{ ...complete, policy: 'head (unreviewed) .gstack/pregate.json' }, 'recorded under the unreviewed head policy']] as const) {
+      fs.writeFileSync(mirror, JSON.stringify({ schema_version: 1, tree: movedTree, head: moved, verdict: 'pass', ...bad }));
+      const ignored = queue(repo, ['ready', '--pr', '1'], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+      expect(ignored.status).toBe(EXIT.refused);
+      expect(line(ignored.out, 'PREGATE:')).toBe(`PREGATE: missing (.gstack/tmp/pregate.json; run gstack-pregate run --allow-repo-commands); the state root's mirror for this tree cannot stand in: ${why}`);
+    }
+    fs.writeFileSync(mirror, JSON.stringify({ schema_version: 1, tree: movedTree, head: moved, verdict: 'pass', ...complete }));
+    const fromMirror = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect([fromMirror.status, fromMirror.err]).toEqual([EXIT.ok, '']);
+    expect(line(fromMirror.out, 'PREGATE:')).toBe(`PREGATE: pass tree=${movedTree.slice(0, 12)} head=${moved.slice(0, 12)} checks=1 ${suffix}`);
+    const missingFromMirror = queue(repo, ['ready', '--pr', '1'], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect([missingFromMirror.status, missingFromMirror.err]).toEqual([EXIT.ok, '']);
+    expect(line(missingFromMirror.out, 'PREGATE:')).toContain(suffix);
+    const current = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, moved)], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect([current.status, current.err]).toEqual([EXIT.ok, '']);
+    expect(line(current.out, 'PREGATE:')).toBe(`PREGATE: pass tree=${movedTree.slice(0, 12)} head=${moved.slice(0, 12)} checks=1`);
+    // Value: protects=a same-tree record that only waits on a remote receipt (the small-machine run) is cleared by the clone's mirror, an
+    // unreadable record falls through to the mirror, and a record whose own checks failed or stayed incomplete is never overridden by a green mirror,
+    // including an incomplete check the environment caused (PREGATE_ENVIRONMENT, #3480: a secrets scanner that never finished is not a scanned diff);
+    // fails_when=ready reads the mirror only for another tree (the documented lane case refuses PREGATE_REMOTE_UNCLEARED) or lets a mirror hide a red
+    // or incomplete local run; why_new=the rows above cover only stale, missing and current records; seam=none; no_claim=the mirror's writer
+    const local = path.join(repo.root, 'pregate-local.json');
+    const obligation = { lane: 'pregate.json/remote_gate', platform: 'remote', workflow: 'pregate.json', job: 'remote_gate', tests: ['test/a.test.ts'], receipt: null };
+    fs.writeFileSync(local, JSON.stringify({ schema_version: 1, tree: movedTree, head: moved, verdict: 'requires-remote', checks: [{ id: 'lanes', status: 'requires-remote' }], requires_remote: [obligation] }));
+    const uncleared = queue(repo, ['ready', '--pr', '1', '--pregate', local], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect([uncleared.status, uncleared.err]).toEqual([EXIT.ok, '']);
+    expect(line(uncleared.out, 'PREGATE:')).toBe(`PREGATE: pass tree=${movedTree.slice(0, 12)} head=${moved.slice(0, 12)} checks=1 ${suffix}`);
+    fs.writeFileSync(local, '{ not json');
+    const unreadable = queue(repo, ['ready', '--pr', '1', '--pregate', local], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect([unreadable.status, unreadable.err]).toEqual([EXIT.ok, '']);
+    expect(line(unreadable.out, 'PREGATE:')).toContain(suffix);
+    fs.writeFileSync(local, JSON.stringify({ schema_version: 1, tree: movedTree, head: moved, verdict: 'fail', checks: [{ id: 'lanes', status: 'fail' }] }));
+    const redLocal = queue(repo, ['ready', '--pr', '1', '--pregate', local], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect(redLocal.status).toBe(EXIT.refused);
+    expect(line(redLocal.out, 'PREGATE:')).toBe(`PREGATE: fail tree=${movedTree.slice(0, 12)} head=${moved.slice(0, 12)} checks=1 — 1 check(s) failed: lanes (PREGATE_LANE_FAILED)`);
+    fs.writeFileSync(local, JSON.stringify({ schema_version: 1, tree: movedTree, head: moved, verdict: 'incomplete', checks: [{ id: 'lanes', status: 'incomplete' }] }));
+    const incompleteLocal = queue(repo, ['ready', '--pr', '1', '--pregate', local], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect(incompleteLocal.status).toBe(EXIT.refused);
+    expect(line(incompleteLocal.out, 'PREGATE:')).toMatch(/\(PREGATE_INCOMPLETE\)$/);
+    fs.writeFileSync(local, JSON.stringify({ schema_version: 1, tree: movedTree, head: moved, verdict: 'incomplete', checks: [{ id: 'secrets', status: 'incomplete', cause: 'environment', environment: { kind: 'missing-binary', evidence: 'gstack-redact: not on PATH', proof: 'launch' } }] }));
+    const environmentLocal = queue(repo, ['ready', '--pr', '1', '--pregate', local], { ...movedShim, GSTACK_STATE_ROOT: stateRoot });
+    expect(environmentLocal.status).toBe(EXIT.refused);
+    expect(line(environmentLocal.out, 'PREGATE:')).toMatch(/\(PREGATE_ENVIRONMENT\)$/);
+    expect(environmentLocal.out).not.toContain(suffix);
     fs.appendFileSync(path.join(repo.work, 'pr-a.txt'), 'dirty\n');
     expect(queue(repo, ['ready', '--pr', '1'], shim(moved, green)).err).toMatch(/uncommitted tracked changes: pr-a\.txt.*\(QUEUE_NOT_READY\)/);
+  }, 180_000);
+
+  test('STAMP_VERSION is unstamped for a PR whose own diff leaves VERSION alone after main moved to a newer version, and the stamp for one that changes it (GST-770 follow-up)', () => {
+    const repo = fixture();
+    const head = makePr(repo, 'pr-a');
+    repo.git('checkout', '-q', 'origin/main', '-B', 'main-moves');
+    fs.writeFileSync(path.join(repo.work, 'VERSION'), '1.2.4.0\n');
+    repo.git('commit', '-qam', 'v1.2.4.0 another PR landed');
+    repo.git('push', '-q', 'origin', 'HEAD:main');
+    repo.git('fetch', '-q', 'origin');
+    repo.git('checkout', '-q', 'pr-a');
+    const shim = (prHead: string) => ghQueueShim(repo, { prs: { '1': { headRefOid: prHead, url: 'https://github.com/o/r/pull/1', body: shippedBody('1', head) } }, checks: { [prHead]: green } });
+    const forked = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, head)], shim(head));
+    expect([forked.status, forked.err]).toEqual([EXIT.ok, '']);
+    expect(forked.out.split('\n').slice(0, 4)).toEqual([`READY #1 ${head} STAMP_VERSION=unstamped`, 'pr: https://github.com/o/r/pull/1', `head: ${head}`, 'version: unstamped']);
+    fs.writeFileSync(path.join(repo.work, 'VERSION'), '1.2.5.0\n');
+    repo.git('commit', '-qam', 'v1.2.5.0 stamp');
+    const stamped = repo.git('rev-parse', 'HEAD');
+    const ok = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, stamped)], shim(stamped));
+    expect(ok.out.split('\n')[0]).toBe(`READY #1 ${stamped} STAMP_VERSION=1.2.5.0`);
+  }, 180_000);
+
+  // Value: protects=a head whose required targeted reader is missing or failed is never READY (GST-966, gstack-evals#140);
+  // fails_when=ready prints REVIEW_TARGETED verdict=missing or failed and still exits 0, or refuses a covered or unrequired head;
+  // seam=bindShippedReceipt (ready, train build and land share it); no_claim=the ledger recording a clean reader as failed (GSTA-167)
+  test('ready refuses QUEUE_RECEIPT_TARGETED_MISSING when a required targeted class is missing or failed, and passes a covered head', () => {
+    const repo = fixture();
+    const head = makePr(repo, 'pr-auth', { file: 'session.ts' });
+    const pregate = pregateFor(repo, head);
+    const shim = (body: string) => ghQueueShim(repo, { prs: { '1': { headRefOid: head, url: 'https://github.com/o/r/pull/1', body } }, checks: { [head]: green } });
+    const base = repo.git('rev-parse', 'origin/main');
+    const depth = { gstack_version: '1.92.61.0', review_depth: { depth: 'full' as const, class: 'code' as const, runtime_lines: 1, rules: '551486253e156572', base, registry: base, gate_scan: { tagged: 0, head }, reasons: ['runtime=1'], risk: [] } };
+    const targeted = (status: 'done' | 'failed') => ({ ...depth, review_targeted: { classes: ['auth' as const], rules: 'r', brief_sha: 'a'.repeat(64), product_patch_id: 'p', status, findings: 0, raised_by: 'targeted' } });
+    const legacy = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim(shippedBody('1', head, depth)));
+    expect(line(legacy.out, 'REVIEW_TARGETED:')).toBe('REVIEW_TARGETED: required=auth receipt=legacy verdict=missing');
+    expect(legacy.status).toBe(EXIT.refused);
+    expect(legacy.err).toMatch(/requires the targeted reader on auth.*records no targeted pass.*\(QUEUE_RECEIPT_TARGETED_MISSING\)/);
+    const failed = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim(shippedBody('1', head, targeted('failed'))));
+    expect(line(failed.out, 'REVIEW_TARGETED:')).toBe('REVIEW_TARGETED: required=auth receipt=none verdict=failed');
+    expect(failed.status).toBe(EXIT.refused);
+    expect(failed.err).toMatch(/requires the targeted reader on auth.*targeted pass failed.*\(QUEUE_RECEIPT_TARGETED_MISSING\)/);
+    const done = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], shim(shippedBody('1', head, targeted('done'))));
+    expect(done.status, done.err).toBe(EXIT.ok);
+    expect(line(done.out, 'REVIEW_TARGETED:')).toBe('REVIEW_TARGETED: required=auth receipt=auth verdict=ok');
+    const plain = makePr(repo, 'pr-plain');
+    const unrequired = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, plain)], ghQueueShim(repo, { prs: { '1': { headRefOid: plain, body: shippedBody('1', plain) } }, checks: { [plain]: green } }));
+    expect(unrequired.status, unrequired.err).toBe(EXIT.ok);
+    expect(line(unrequired.out, 'REVIEW_TARGETED:')).toBe('REVIEW_TARGETED: required=none receipt=legacy verdict=ok');
+  }, 120_000);
+
+  // Value: protects=the re-READY after a slot's stamp push accepts the receipt /ship wrote for the pinned head, and only then;
+  // fails_when=ready binds the receipt to HEAD alone (every stamped READY turns QUEUE_RECEIPT_STALE) or accepts any ancestor's receipt;
+  // why_new=the READY test above binds receipts to the exact head only; seam=none; no_claim=real gh and CI (shims; unit only)
+  test('ready at the stamp commit accepts the receipt written for the pinned head; a real edit on top of the pin, a bare merge of main, or an edit on the pin side under the slot-2 stamp is stale', () => {
+    const repo = fixture();
+    const pin = makePr(repo, 'pr-s');
+    fs.writeFileSync(path.join(repo.work, 'VERSION'), '1.2.4.0\n');
+    repo.git('commit', '-qam', 'v1.2.4.0 stamp');
+    const stamped = repo.git('rev-parse', 'HEAD');
+    const shim = (prHead: string, body: string) => ghQueueShim(repo, { prs: { '1': { headRefOid: prHead, url: 'https://github.com/o/r/pull/1', body } }, checks: { [prHead]: green } });
+    const ok = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, stamped)], shim(stamped, shippedBody('1', pin)));
+    expect([ok.status, ok.err]).toEqual([EXIT.ok, '']);
+    expect(ok.out.split('\n')[0]).toBe(`READY #1 ${stamped} STAMP_VERSION=1.2.4.0`);
+    expect(ok.out).toContain(`SHIP_RECEIPT: pr=1 head=${pin.slice(0, 12)} version=- base=main`);
+    repo.git('checkout', '-q', 'origin/main', '-B', 'main-moves');
+    fs.writeFileSync(path.join(repo.work, 'other.txt'), 'another PR landed\n');
+    repo.git('add', 'other.txt');
+    repo.git('commit', '-qm', 'other PR');
+    repo.git('push', '-q', 'origin', 'HEAD:main');
+    repo.git('fetch', '-q', 'origin');
+    repo.git('checkout', '-q', 'pr-s');
+    repo.git('merge', '-q', '--no-edit', 'origin/main');
+    fs.writeFileSync(path.join(repo.work, 'VERSION'), '1.2.5.0\n');
+    repo.git('commit', '-qam', 'v1.2.5.0 stamp');
+    const slot2 = repo.git('rev-parse', 'HEAD');
+    const merged = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, slot2)], shim(slot2, shippedBody('1', pin)));
+    expect([merged.status, merged.err]).toEqual([EXIT.ok, '']);
+    expect(merged.out).toContain(`SHIP_RECEIPT: pr=1 head=${pin.slice(0, 12)} version=- base=main`);
+    const staleRe = (h: string) => new RegExp(`PR #1's ship receipt is for ${pin.slice(0, 12)}, not the head ${h.slice(0, 12)} being merged.*\\(QUEUE_RECEIPT_STALE\\)`);
+    const bareMerge = repo.git('rev-parse', 'HEAD^1');
+    repo.git('reset', '-q', '--hard', bareMerge);
+    const bare = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, bareMerge)], shim(bareMerge, shippedBody('1', pin)));
+    expect(bare.status).toBe(EXIT.refused);
+    expect(bare.err).toMatch(staleRe(bareMerge));
+    repo.git('commit', '-q', '--allow-empty', '-m', 'empty commit is not a stamp');
+    const emptyOnMerge = repo.git('rev-parse', 'HEAD');
+    const empty = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, emptyOnMerge)], shim(emptyOnMerge, shippedBody('1', pin)));
+    expect(empty.status).toBe(EXIT.refused);
+    expect(empty.err).toMatch(staleRe(emptyOnMerge));
+    repo.git('reset', '-q', '--hard', pin);
+    fs.appendFileSync(path.join(repo.work, 'pr-s.txt'), 'real change before the merge\n');
+    repo.git('commit', '-qam', 'edit on the pin side');
+    repo.git('merge', '-q', '--no-edit', 'origin/main');
+    fs.writeFileSync(path.join(repo.work, 'VERSION'), '1.2.5.0\n');
+    repo.git('commit', '-qam', 'v1.2.5.0 stamp');
+    const editedPin = repo.git('rev-parse', 'HEAD');
+    const pinEdit = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, editedPin)], shim(editedPin, shippedBody('1', pin)));
+    expect(pinEdit.status).toBe(EXIT.refused);
+    expect(pinEdit.err).toMatch(staleRe(editedPin));
+    repo.git('reset', '-q', '--hard', stamped);
+    fs.appendFileSync(path.join(repo.work, 'pr-s.txt'), 'real change after /ship\n');
+    repo.git('commit', '-qam', 'more');
+    const edited = repo.git('rev-parse', 'HEAD');
+    const stale = queue(repo, ['ready', '--pr', '1', '--pregate', pregateFor(repo, edited)], shim(edited, shippedBody('1', pin)));
+    expect(stale.status).toBe(EXIT.refused);
+    expect(stale.err).toMatch(new RegExp(`PR #1's ship receipt is for ${pin.slice(0, 12)}, not the head ${edited.slice(0, 12)} being merged.*\\(QUEUE_RECEIPT_STALE\\)`));
   }, 180_000);
 });
 
@@ -330,7 +514,7 @@ describe('full_e2e gate evidence (review #3235 P1-1)', () => {
     const tree = runBin(repo, 'gstack-wtree', []).out.trim();
     const pregate = path.join(repo.root, 'pregate.json');
     fs.writeFileSync(pregate, JSON.stringify({ schema_version: 1, tree, head, verdict: 'pass', checks: [{ id: 'unit', status: 'pass' }] }));
-    const gh = ghQueueShim(repo, { prs: { '1': { headRefOid: head, body: '' } }, checks: { [head]: { check_runs: [{ status: 'completed', conclusion: 'success' }] } } });
+    const gh = ghQueueShim(repo, { prs: { '1': { headRefOid: head, body: shippedBody('1', head) } }, checks: { [head]: { check_runs: [{ status: 'completed', conclusion: 'success' }] } } });
     const missing = queue(repo, ['ready', '--pr', '1', '--pregate', pregate], gh);
     expect(missing.status).toBe(EXIT.refused);
     expect(missing.out).toContain(`gate-evidence: missing for ${head.slice(0, 12)}`);
@@ -352,7 +536,7 @@ describe('ready reads all of CI at the head (review #3235 P1-5)', () => {
     const tree = runBin(repo, 'gstack-wtree', []).out.trim();
     const pregate = path.join(repo.root, 'pregate.json');
     fs.writeFileSync(pregate, JSON.stringify({ schema_version: 1, tree, head, verdict: 'pass', checks: [{ id: 'unit', status: 'pass' }] }));
-    const gh = ghQueueShim(repo, { prs: { '1': { headRefOid: head, body: '' } }, checks: { [head]: checks }, ...(statuses ? { statuses: { [head]: statuses } } : {}) });
+    const gh = ghQueueShim(repo, { prs: { '1': { headRefOid: head, body: shippedBody('1', head) } }, checks: { [head]: checks }, ...(statuses ? { statuses: { [head]: statuses } } : {}) });
     return { r: queue(repo, ['ready', '--pr', '1', '--pregate', pregate], gh), at: head.slice(0, 12) };
   }
 
@@ -370,11 +554,83 @@ describe('ready reads all of CI at the head (review #3235 P1-5)', () => {
     expect(line(pending.r.out, 'ci: ')).toBe(`ci: pending at ${pending.at} (passed=1 failed=0 pending=1 skipped=0)`);
   }, 120_000);
 
+  test('a superseded run of a check is judged by its latest run, as GitHub\'s rollup counts (gbrain: a cancelled contributor-gate beside later passes)', () => {
+    const older = { id: 1, name: 'contributor-gate', status: 'completed', conclusion: 'cancelled', completed_at: '2026-10-26T01:00:00Z' };
+    const newer = { id: 2, name: 'contributor-gate', status: 'completed', conclusion: 'success', completed_at: '2026-10-26T01:10:00Z' };
+    const other = { id: 3, name: 'free-tests', status: 'completed', conclusion: 'success', completed_at: '2026-10-26T01:05:00Z' };
+    const ok = readyWith({ check_runs: [older, newer, other] });
+    expect(ok.r.status).toBe(EXIT.ok);
+    expect(line(ok.r.out, 'ci: ')).toBe(`ci: green at ${ok.at} (passed=2 failed=0 pending=0 skipped=0)`);
+    const reversed = readyWith({ check_runs: [newer, older, other] });
+    expect(line(reversed.r.out, 'ci: ')).toBe(`ci: green at ${reversed.at} (passed=2 failed=0 pending=0 skipped=0)`);
+    const latestFailed = readyWith({ check_runs: [{ ...older, conclusion: 'success' }, { ...newer, conclusion: 'failure' }, other] });
+    expect(latestFailed.r.status).toBe(EXIT.refused);
+    expect(line(latestFailed.r.out, 'ci: ')).toBe(`ci: red at ${latestFailed.at} (passed=1 failed=1 pending=0 skipped=0)`);
+    const rerunning = readyWith({ check_runs: [{ ...older, conclusion: 'failure' }, { id: 4, name: 'contributor-gate', status: 'in_progress' }, other] });
+    expect(line(rerunning.r.out, 'ci: ')).toBe(`ci: pending at ${rerunning.at} (passed=1 failed=0 pending=1 skipped=0)`);
+    const sameTime = readyWith({ check_runs: [{ ...older, id: 9, completed_at: newer.completed_at }, newer, other] });
+    expect(line(sameTime.r.out, 'ci: ')).toBe(`ci: red at ${sameTime.at} (passed=1 failed=1 pending=0 skipped=0)`);
+    const unnamed = readyWith({ check_runs: [{ status: 'completed', conclusion: 'cancelled' }, { status: 'completed', conclusion: 'success' }] });
+    expect(line(unnamed.r.out, 'ci: ')).toBe(`ci: red at ${unnamed.at} (passed=1 failed=1 pending=0 skipped=0)`);
+    const twoApps = readyWith({ check_runs: [{ ...older, conclusion: 'failure', app: { id: 1 } }, { ...newer, app: { id: 2 } }, other] });
+    expect(line(twoApps.r.out, 'ci: ')).toBe(`ci: red at ${twoApps.at} (passed=2 failed=1 pending=0 skipped=0)`);
+    const undated = readyWith({ check_runs: [{ id: 5, name: 'contributor-gate', status: 'completed', conclusion: 'failure' }, newer, other] });
+    expect(line(undated.r.out, 'ci: ')).toBe(`ci: red at ${undated.at} (passed=2 failed=1 pending=0 skipped=0)`);
+    const queued = readyWith({ check_runs: [{ ...older, conclusion: 'failure' }, { id: 6, name: 'contributor-gate', status: 'queued' }, other] });
+    expect(line(queued.r.out, 'ci: ')).toBe(`ci: pending at ${queued.at} (passed=1 failed=0 pending=1 skipped=0)`);
+    const nullConclusion = readyWith({ check_runs: [{ ...newer, conclusion: null }, other] });
+    expect(line(nullConclusion.r.out, 'ci: ')).toBe(`ci: red at ${nullConclusion.at} (passed=1 failed=1 pending=0 skipped=0)`);
+  }, 240_000);
+
+  test('a commit-status context is never collapsed with a check run of the same name', () => {
+    const r = readyWith({ check_runs: [{ id: 1, name: 'deploy', status: 'completed', conclusion: 'success', completed_at: '2026-10-26T01:00:00Z' }] }, { state: 'failure', statuses: [{ context: 'deploy', state: 'failure' }] });
+    expect(line(r.r.out, 'ci: ')).toBe(`ci: red at ${r.at} (passed=1 failed=1 pending=0 skipped=0)`);
+  }, 120_000);
+
   test('incomplete pagination is unknown, never green', () => {
     const { r, at } = readyWith({ total_count: 101, check_runs: hundred });
     expect(r.status).toBe(EXIT.refused);
     expect(line(r.out, 'ci: ')).toBe(`ci: unknown at ${at} (check_runs: read 100 of total_count=101)`);
   }, 120_000);
+});
+
+describe('ready on a PR that conflicts with the base (CHANGELOG-only conflicts, rule 14)', () => {
+  const pass = { id: 1, name: 'Free Tests', status: 'completed', conclusion: 'success', completed_at: '2026-10-26T01:00:00Z' };
+  function readyWith(mergeable: string, checks: unknown, pr: Record<string, unknown> = {}) {
+    const repo = fixture();
+    const head = makePr(repo, 'pr-a');
+    const tree = runBin(repo, 'gstack-wtree', []).out.trim();
+    const pregate = path.join(repo.root, 'pregate.json');
+    fs.writeFileSync(pregate, JSON.stringify({ schema_version: 1, tree, head, verdict: 'pass', checks: [{ id: 'unit', status: 'pass' }] }));
+    const gh = ghQueueShim(repo, { prs: { '1': { headRefOid: head, body: shippedBody('1', head), mergeable, headRefName: 'pr-a', ...pr } }, checks: { [head]: checks } });
+    return { r: queue(repo, ['ready', '--pr', '1', '--pregate', pregate], gh), at: head.slice(0, 12) };
+  }
+
+  test('no CI at the head and a conflict: the refusal names the workflow_dispatch procedure', () => {
+    const { r, at } = readyWith('CONFLICTING', { check_runs: [] });
+    expect(r.status).toBe(EXIT.refused);
+    expect(line(r.out, 'ci: ')).toBe(`ci: none at ${at} (passed=0 failed=0 pending=0 skipped=0)`);
+    expect(line(r.out, 'ci-hint: ')).toBe(`ci-hint: PR conflicts with the base (no merge ref, so pull_request CI did not run on ${at}); dispatch the free workflows on the branch (gh workflow run free-tests.yml --ref pr-a && gh workflow run windows-smoke.yml --ref pr-a), clear each lane pregate names with a run of that lane's own workflow (gstack-pregate clear --remote <workflow.yml/job> --run-url <that workflow's run>; a run of another workflow is refused), then rerun ready (advisory)`);
+    for (const name of ['x;$(curl evil)', '--field']) {
+      const odd = readyWith('CONFLICTING', { check_runs: [] }, { headRefName: name });
+      expect(line(odd.r.out, 'ci-hint: ')).toContain('gh workflow run free-tests.yml --ref <branch> && gh workflow run windows-smoke.yml --ref <branch>');
+    }
+    const fork = readyWith('CONFLICTING', { check_runs: [] }, { isCrossRepository: true });
+    expect(line(fork.r.out, 'ci-hint: ')).toBe(`ci-hint: PR conflicts with the base (no merge ref, so pull_request CI did not run on ${fork.at}) and its head is on a fork, so the free workflows cannot be dispatched here; the coordinator decides (advisory)`);
+  }, 240_000);
+
+  test('dispatched runs green at the head and a conflict: READY, with the hint saying the dispatched runs count', () => {
+    const { r, at } = readyWith('CONFLICTING', { check_runs: [pass] });
+    expect(r.status).toBe(EXIT.ok);
+    expect(line(r.out, 'ci-hint: ')).toBe(`ci-hint: PR conflicts with the base (no merge ref); the runs at ${at} were not pull_request runs (dispatched on the branch, or push-triggered), and they count (advisory)`);
+  }, 120_000);
+
+  test('no hint without a conflict, and none while the dispatched runs are red or pending', () => {
+    expect(readyWith('MERGEABLE', { check_runs: [] }).r.out).not.toContain('ci-hint:');
+    expect(readyWith('MERGEABLE', { check_runs: [pass] }).r.out).not.toContain('ci-hint:');
+    expect(readyWith('CONFLICTING', { check_runs: [{ ...pass, conclusion: 'failure' }] }).r.out).not.toContain('ci-hint:');
+    expect(readyWith('CONFLICTING', { check_runs: [{ ...pass, status: 'in_progress' }] }).r.out).not.toContain('ci-hint:');
+  }, 240_000);
 });
 
 describe('printed gate-ahead command (review #3235 P2-1)', () => {

@@ -32,6 +32,7 @@
 # Heredoc delivery guard (see bin/gstack-settings-hook for the rationale).
 BASH_COMPAT=50
 set -uo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -374,7 +375,7 @@ status_bridge() {
     # JSON; a failed query is reported as unknown, never as an empty history.
     local egress_json
     if egress_json="$("$EGRESS_BIN" list --sink "$SINK" --json 2>/dev/null)"; then
-      n="$(printf '%s' "$egress_json" | bun -e 'const a=JSON.parse(require("fs").readFileSync(0,"utf8")||"[]");console.log(Array.isArray(a)?a.length:0)' 2>/dev/null)"
+      n="$(printf '%s' "$egress_json" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e 'const a=JSON.parse(require("fs").readFileSync(0,"utf8")||"[]");console.log(Array.isArray(a)?a.length:0)' 2>/dev/null)"
       case "$n" in *[!0-9]*|"") n="unknown (could not parse gstack-egress output)" ;; esac
     else
       n="unknown (gstack-egress list failed; run it yourself)"

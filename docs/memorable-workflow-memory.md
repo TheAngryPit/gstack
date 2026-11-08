@@ -94,10 +94,11 @@ It refuses the hand-off, with one rate-limited line in
 - the prompt carries a HIGH-tier credential shape (checked on the raw bytes
   and on the decoded string values, so a JSON-escaped key does not slip by),
   or is larger than 1 MiB;
-- the repo's per-remote trust policy is `deny` or `read-only` (judged by the
-  session's working directory, so a session that touches other repositories
-  is not covered), or that policy could not be looked up at all (git could
-  not read the repository, the store is unreadable): the lookup fails closed;
+- the repo's per-remote trust policy is `deny`, or `read-only` without the
+  recall opt-in below (judged by the session's working directory, so a
+  session that touches other repositories is not covered), or that policy
+  could not be looked up at all (git could not read the repository, the store
+  is unreadable or corrupt): the lookup fails closed;
 - the receipt cannot be written, or the hook's 4.5 s budget cannot afford the
   next step (the secret scan of a very large prompt, or the vendor spawn).
 
@@ -163,6 +164,34 @@ whatever it stored are untouched: `memorable disable` stops capture,
 The entry also comes out with `gstack-uninstall` (named in its summary) and
 survives `./setup --no-team`, which only tears down team-mode hooks.
 
+## Recall in a read-only repo (per-remote opt-in)
+
+`read-only` keeps a repo's content out of the brain, and by default it also
+keeps that repo's prompts away from Memorable. If you chose `read-only` only
+to stop code ingest, and you have no objection to Memorable seeing prompts
+from that repo, opt that one remote in:
+
+```bash
+gstack-gbrain-repo-policy memorable set github.com/acme/client-a allow
+gstack-gbrain-repo-policy memorable get github.com/acme/client-a   # read-only	allow
+gstack-gbrain-repo-policy memorable set github.com/acme/client-a off
+```
+
+The opt-in is off by default and covers only the remote you name (the SSH and
+HTTPS spellings of it are one key). It is refused on a `deny` remote, and a
+`deny` vetoes recall even if an opt-in was written into the store by hand.
+Changing the remote's tier clears it, so moving a repo back to `read-only`
+later never silently re-opens recall. When `~/.gstack` also makes the remote
+read-only (see [state roots](state-root.md)), that store has to opt it in too.
+A corrupt, empty or unreadable policy store (or a dangling symlink in its
+place) skips recall for every repo until you fix it; the hook never resets it
+to "no policy" and never rewrites it. The lookup checks every configured
+`remote.origin.url`, not the URL after `url.*.insteadOf` rewriting, and any
+denied or not-opted-in read-only one skips recall. `gstack-gbrain-repo-policy list` shows
+opted-in remotes with a `memorable=allow` column. Nothing about gbrain
+ingest changes: the repo stays `read-only` for `/sync-gbrain` and every
+other gbrain writer.
+
 ## If you run gbrain
 
 Memorable can keep its procedures in your own gbrain database instead of its
@@ -189,7 +218,7 @@ and `/sync-gbrain` are unrelated to it.
   (roughly 4 seconds after gstack's own work). That is usually network.
 - **`hook-errors.log` names a refusal.** `refused:redaction-high` means a
   credential shape was in the prompt; `trust policy ... deny or read-only`
-  means the repo is protected; `receipt-unwritable` means
+  means the repo is protected (see the per-remote opt-in above); `receipt-unwritable` means
   `~/.gstack/security` is not writable.
 - **`enable` says the stable install predates this bridge.** Run `./setup`
   (or `/gstack-upgrade`) so the hook registered at `~/.claude/skills/gstack`

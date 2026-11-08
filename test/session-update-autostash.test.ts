@@ -1,5 +1,5 @@
 import { afterEach, describe, test, expect } from 'bun:test';
-import { execFileSync, spawnSync } from 'child_process';
+import { execFileSync, spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -41,7 +41,7 @@ function makeFixture() {
     mode: 0o755,
   });
   fs.writeFileSync(path.join(seed, 'setup'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-  for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
+  for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-lease', 'bin/gstack-update-channel.sh', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
     const target = path.join(seed, relative);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(ROOT, relative), target);
@@ -57,10 +57,18 @@ function makeFixture() {
   return { base, origin, seed, install, state };
 }
 
-function runScript(install: string, state: string) {
+// Each fixture owns its state root (GSTACK_STATE_ROOT tops the chain in
+// bin/gstack-state-root.sh) and its workflow-lease directory. The preload's
+// GSTACK_LEASE_DIR is shared by every test file in this Bun process, so a lease
+// another file leaves there made the updater log SKIP leased (#3385).
+function fixtureEnv(base: string, install: string, state: string) {
+  return { ...process.env, GSTACK_DIR: install, GSTACK_STATE_ROOT: state, GSTACK_LEASE_DIR: path.join(base, 'leases') };
+}
+
+function runScript(base: string, install: string, state: string) {
   return spawnSync('bash', [SCRIPT], {
     encoding: 'utf8',
-    env: { ...process.env, GSTACK_DIR: install, GSTACK_HOME: state, GSTACK_STATE_DIR: state },
+    env: fixtureEnv(base, install, state),
     timeout: 20000,
   });
 }
@@ -93,7 +101,7 @@ describe('gstack-session-update pull wedge (#2566)', () => {
       // prefix-rename / gbrain-block shape: tracked file, modified).
       fs.appendFileSync(path.join(install, 'SKILL.md'), 'locally patched line\n');
 
-      const r = runScript(install, state);
+      const r = runScript(base, install, state);
       expect(r.status).toBe(0);
       const log = await waitForLog(state, /UPDATING|UP_TO_DATE|PULL_FAILED/);
       expect(log).not.toContain('PULL_FAILED');
@@ -118,7 +126,7 @@ describe('gstack-session-update pull wedge (#2566)', () => {
       git(seed, 'commit', '-aqm', 'remote divergence');
       git(seed, 'push', '-q', 'origin', 'main');
 
-      const r = runScript(install, state);
+      const r = runScript(base, install, state);
       expect(r.status).toBe(0);
       const log = await waitForLog(state, /PULL_FAILED/);
       expect(log).toContain('PULL_FAILED');
@@ -130,6 +138,70 @@ describe('gstack-session-update pull wedge (#2566)', () => {
     }
   }, 30000);
 });
+
+describe.skipIf(process.platform === 'win32')('gstack-session-update fixtures ignore leases outside their own (#3385)', () => {
+  const LEASE = path.join(ROOT, 'bin', 'gstack-lease');
+  const sleepers: ReturnType<typeof spawn>[] = [];
+  afterEach(() => { for (const s of sleepers.splice(0)) s.kill('SIGKILL'); });
+
+  function holdLease(install: string, leaseDir: string): number {
+    const sleeper = spawn('sleep', ['120'], { stdio: 'ignore' });
+    sleepers.push(sleeper);
+    const touch = spawnSync('bash', [LEASE, 'touch', '--root', install, '--pid', String(sleeper.pid)], {
+      encoding: 'utf8', env: { ...process.env, GSTACK_LEASE_DIR: leaseDir }, timeout: 10_000,
+    });
+    expect(touch.status, touch.stderr).toBe(0);
+    return sleeper.pid!;
+  }
+
+  function advanceUpstream(seed: string): string {
+    fs.writeFileSync(path.join(seed, 'VERSION'), '1.1.0\n');
+    git(seed, 'commit', '-aqm', 'upstream release');
+    git(seed, 'push', '-q', 'origin', 'main');
+    return git(seed, 'rev-parse', 'HEAD');
+  }
+
+  test('a live lease in the shared preload lease directory does not stop the fixture update (negative control)', async () => {
+    const shared = process.env.GSTACK_LEASE_DIR!;
+    expect(shared).toBeTruthy();
+    const { base, seed, install, state } = makeFixture();
+    let pid = 0;
+    try {
+      const upstreamHead = advanceUpstream(seed);
+      pid = holdLease(install, shared);
+      const ambient = spawnSync('bash', [LEASE, 'live', '--root', install], { encoding: 'utf8', env: process.env, timeout: 10_000 });
+      expect(ambient.status).toBe(0);
+      expect(ambient.stdout).toContain(`${pid} `);
+
+      expect(runScript(base, install, state).status).toBe(0);
+      const log = await waitForLog(state, /UPDATING|PULL_FAILED|SKIP /);
+      expect(log).not.toContain('SKIP leased');
+      expect(log).toContain('UPDATING');
+      expect(git(install, 'rev-parse', 'HEAD')).toBe(upstreamHead);
+    } finally {
+      if (pid) fs.rmSync(path.join(shared, String(pid)), { force: true });
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  test("the fixture's own live lease still skips the update", async () => {
+    const { base, seed, install, state } = makeFixture();
+    try {
+      const before = git(install, 'rev-parse', 'HEAD');
+      advanceUpstream(seed);
+      const pid = holdLease(install, path.join(base, 'leases'));
+
+      expect(runScript(base, install, state).status).toBe(0);
+      const log = await waitForLog(state, /SKIP leased /);
+      expect(log).toMatch(new RegExp(`SKIP leased pid=${pid}/\\d+m`));
+      expect(log).not.toContain('UPDATING');
+      expect(git(install, 'rev-parse', 'HEAD')).toBe(before);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  }, 30000);
+});
+
 
 // ── #2613: the lock pidfile must record the LIVE holder, not the exited parent ──
 //
@@ -152,10 +224,10 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
     return shimDir;
   }
 
-  function runScriptWithPath(install: string, state: string, shimDir: string) {
+  function runScriptWithPath(base: string, install: string, state: string, shimDir: string) {
     return spawnSync('bash', [SCRIPT], {
       encoding: 'utf8',
-      env: { ...process.env, GSTACK_DIR: install, GSTACK_HOME: state, GSTACK_STATE_DIR: state, PATH: `${shimDir}:${process.env.PATH}` },
+      env: { ...fixtureEnv(base, install, state), PATH: `${shimDir}:${process.env.PATH}` },
       timeout: 20000,
     });
   }
@@ -168,7 +240,7 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
     const { base, install, state } = makeFixture();
     const shimDir = makeSlowGitShim(base, 3);
     try {
-      const r = runScriptWithPath(install, state, shimDir);
+      const r = runScriptWithPath(base, install, state, shimDir);
       expect(r.status).toBe(0); // parent hook has EXITED by now (spawnSync waited)
       // Poll for the pidfile the detached subshell writes.
       const pidPath = path.join(state, '.setup-lock', 'pid');
@@ -199,7 +271,7 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
       const lockDir = path.join(state, '.setup-lock');
       fs.mkdirSync(lockDir, { recursive: true });
       fs.writeFileSync(path.join(lockDir, 'pid'), String(holder.pid));
-      const r = runScript(install, state);
+      const r = runScript(base, install, state);
       expect(r.status).toBe(0);
       const log = await waitForLog(state, /SKIP locked_by=/);
       expect(log).toContain(`SKIP locked_by=${holder.pid}`);
@@ -217,10 +289,11 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
       const lockDir = path.join(state, '.setup-lock');
       fs.mkdirSync(lockDir, { recursive: true });
       fs.writeFileSync(path.join(lockDir, 'pid'), String(dead.pid));
-      const r = runScript(install, state);
+      const r = runScript(base, install, state);
       expect(r.status).toBe(0);
       const log = await waitForLog(state, /UP_TO_DATE|UPDATING/);
-      expect(log).toMatch(/UP_TO_DATE|UPDATING/);
+      const lockPid = fs.existsSync(path.join(lockDir, 'pid')) ? fs.readFileSync(path.join(lockDir, 'pid'), 'utf8').trim() : 'no lock';
+      expect(log, `planted dead pid ${dead.pid} (alive now: ${isAlive(dead.pid)}); lock pid after 15 s: ${lockPid} (alive: ${isAlive(Number(lockPid))}); script exit ${r.status}, stderr: ${r.stderr}`).toMatch(/UP_TO_DATE|UPDATING/);
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
     }
@@ -232,7 +305,7 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
       const lockDir = path.join(state, '.setup-lock');
       fs.mkdirSync(lockDir, { recursive: true });
       fs.writeFileSync(path.join(lockDir, 'pid'), ''); // mkdir→echo race window
-      const r = runScript(install, state);
+      const r = runScript(base, install, state);
       expect(r.status).toBe(0);
       const log = await waitForLog(state, /SKIP locked_by=/);
       expect(log).toContain('SKIP locked_by=');
@@ -298,7 +371,7 @@ describe('gstack-session-update lock identity + TTL (#2613)', () => {
       // forever, so liveness alone can never clear this wedge.
       const past = new Date(Date.now() - 40 * 60 * 1000);
       fs.utimesSync(pidPath, past, past);
-      const r = runScript(install, state);
+      const r = runScript(base, install, state);
       expect(r.status).toBe(0);
       const log = await waitForLog(state, /RECLAIMED lock_ttl_expired/);
       expect(log).toContain('RECLAIMED lock_ttl_expired');
@@ -340,7 +413,7 @@ describe.skipIf(process.platform === 'win32')('gstack-session-update: a conflict
     fs.writeFileSync(path.join(seed, 'bin', 'gstack-config'),
       '#!/usr/bin/env bash\nif [ "$1" = "get" ]; then case "$2" in auto_upgrade) echo true;; skill_prefix) echo false;; *) echo "";; esac; fi\nexit 0\n', { mode: 0o755 });
     fs.writeFileSync(path.join(seed, 'bin', 'gstack-patch-names'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-    for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
+    for (const relative of ['bin/gstack-session-update-legacy', 'bin/gstack-lease', 'bin/gstack-update-channel.sh', 'bin/gstack-state-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-egress-lib.sh', 'bin/gstack-egress-receipt', 'bin/gstack-bun-version.sh', 'bin/gstack-hook-check', 'bin/gstack-ff-update', 'bin/gstack-path-spelling.sh', 'lib/egress-receipt.ts', 'lib/state-root.ts']) {
       const target = path.join(seed, relative);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.copyFileSync(path.join(ROOT, relative), target);

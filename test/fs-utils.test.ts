@@ -14,6 +14,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
+import { gitEnv } from "./helpers/git-env";
 import { mkdirpSync } from "../lib/fs-utils";
 
 const REDACT = path.resolve(import.meta.dir, "..", "bin", "gstack-redact");
@@ -93,7 +94,7 @@ describe("install-prepush-hook under bun-on-Windows EEXIST semantics (#2635)", (
     const base = tmpdir();
     try {
       const repo = path.join(base, "repo");
-      spawnSync("git", ["init", "-q", repo], { timeout: 30_000 });
+      spawnSync("git", ["init", "-q", repo], { timeout: 30_000, env: gitEnv() });
       const hookDir = path.join(repo, ".git", "hooks");
       fs.mkdirSync(hookDir, { recursive: true });
       const hookPath = path.join(hookDir, "pre-push");
@@ -106,6 +107,7 @@ describe("install-prepush-hook under bun-on-Windows EEXIST semantics (#2635)", (
         cwd: repo,
         encoding: "utf8",
         timeout: 30_000,
+        env: gitEnv(),
       });
       expect(r.status).toBe(0);
       expect(r.stderr ?? "").not.toContain("EEXIST");

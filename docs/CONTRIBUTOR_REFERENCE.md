@@ -20,7 +20,7 @@ cuts to the coverage audit, review army, or voice directive have real quality co
 
 A second, harder ceiling guards the DISCOVERY surface: `test/catalog-budget.test.ts`
 caps the aggregate frontmatter `name` + `description` across all skills at
-`CATALOG_BUDGET_TOKEN_EQUIVALENTS` (1,194 today; each new skill ratchets it)
+`CATALOG_BUDGET_TOKEN_EQUIVALENTS` (1,452 today; each new skill ratchets it)
 token-equivalents (260-byte per-skill sub-cap), counted through the shared census
 in `test/helpers/skill-census.ts`. This one is enforced, not a warning — every
 host loads the full catalog every session, so growth here taxes every
@@ -50,7 +50,7 @@ send off the machine MUST write a hash-chained receipt to
 polarity is per-class: fail-closed for sensitive sinks (brain-sync, memory-ingest,
 gbrain-sync, telemetry, ngrok tunnels, mcp-verify, supabase-provision, and the
 Memorable bridge's per-prompt memorable-recall hand-off), fail-open
-+ stderr warning for user-facing ones (design OpenAI calls, update-check,
++ stderr warning for user-facing ones (design OpenAI and Gemini calls, update-check,
 dashboards, git-class ops). The new-sink scanner in
 `test/egress-receipt-wiring.test.ts` fails CI on an unreceipted `curl` /
 `git push` / `fetch` to a non-loopback host unless the file carries a reasoned
@@ -111,7 +111,10 @@ determined leaker (a CHANGELOG line that does would fail a hostile screenshotter
 - **Engine + taxonomy:** `lib/redact-patterns.ts` (the single source of truth —
   3 tiers; HIGH = genuinely-secret credentials that block, MEDIUM = PII/legal/
   internal + high-FP credential shapes that confirm via AskUserQuestion, LOW =
-  FYI) and `lib/redact-engine.ts` (pure `scan()` + `applyRedactions()`).
+  FYI) and `lib/redact-engine.ts` (`scan()` + `applyRedactions()`; no I/O,
+  and `scan()`'s one ambient input is the credential-named variables of
+  `process.env`, read by value for the `env.value` HIGH finding unless
+  `ScanOptions.processEnv` names another environment).
   Calibration matters: a gate that cries wolf gets ignored, so context-variable
   shapes (Stripe `pk_live_`, Google `AIza`, JWT, env `*_KEY=`) sit at MEDIUM.
 - **CLI:** `bin/gstack-redact` (exit 0 clean / 2 MEDIUM / 3 HIGH; `--json`,
@@ -128,8 +131,8 @@ determined leaker (a CHANGELOG line that does would fail a hostile screenshotter
   → glab → unknown(=public-strict). Public repos get STERNER per-finding
   confirmation (no batch-acknowledge, no silent-proceed); MEDIUM is never
   auto-promoted to HIGH.
-- **Tool-attributed fences:** wrap Codex/Greptile/eval output in ` ```codex-review `
-  / ` ```greptile ` fences so example credentials those tools quote WARN-degrade
+- **Tool-attributed fences:** wrap Codex/review-bot/Greptile/eval output in ` ```codex-review `
+  / ` ```review-bot ` / ` ```greptile ` fences so example credentials those tools quote WARN-degrade
   instead of blocking. A live-format credential inside the fence still blocks.
 - **Config keys:** `redact_repo_visibility` (public|private|unknown, local-only
   override for repos gh/glab can't read), `redact_prepush_hook` (true|false).
@@ -169,3 +172,33 @@ Option C (this section) keeps secret-distribution scope tight.
 If the user asks you to skip the move (e.g., "just leave it as a fork PR"),
 respect that — eval CI will fail with empty-env auth, but check-freshness,
 workflow-lint, and windows-tests will still pass on the fork PR.
+
+## Auditing Conductor worktrees
+
+Conductor workspaces are git worktrees, so after a few weeks of parallel
+lanes the checkout carries worktrees nobody remembers. `bin/gstack-worktree-audit
+[-b origin/<base>] [--no-fetch] [repo-path]` prints one TSV row per worktree
+beside the main one, largest first: size, age of the last commit, whether its
+head is merged into the base, `clean` / `clean,ignored:<n>` (only gitignored
+entries such as `.env` or build output) / `wip:<n>` (tracked edits) /
+`scratch:<n>` (untracked only) / `missing` (registered, directory gone) /
+`broken` (below) / `unknown` (`git status` failed), `pushed` / `ahead<n>` / `no-remote` /
+`detached` (against the local `origin/<branch>` tracking ref as last fetched),
+the PR on its branch through `gh` (`#n/open|merged|closed`, or `-`; a fork's
+PR on a same-named branch is ignored, so in a fork workflow where `origin` is
+your fork the column is `-`, and an open PR wins over an older closed one on a
+reused branch name), the date of the newest Claude Code chat that ran in it,
+and a bucket: `prunable` (registered, directory gone, not locked), then
+`review` for a locked entry whose directory is gone or a `broken` worktree
+whose own `.git` link is missing, then `hold-wip`, then `hold-open-pr`, then
+`verify-recent-chat` (a chat in the last four days), then `safe`, else
+`review`. `safe` means nothing tracked or untracked exists only in that
+worktree: a clean tree whose head is merged into the base, or whose PR is
+closed or merged with every commit pushed; an unpushed commit or an untracked
+file on a merged branch is `review`. Ignored entries do not change the bucket,
+but removing the worktree removes them too, so read the `ignored:<n>` count
+before you do. A squash-merged branch is never an ancestor of the base, so read
+`MERGED` together with `PR`. The audit only reads, apart from a best-effort fetch
+of the base ref that `--no-fetch` skips; removing a worktree
+(`git worktree remove <path>`) stays your call after the table. `/landing-report` points at it when the sibling table shows
+stale worktrees.

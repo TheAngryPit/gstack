@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DOC_PATH, fixtureDocs } from './helpers/docsync-fixture';
-import { docsCompletedRead, docsToolFailures } from './helpers/docsync-observer';
+import { docsCompletedRead, docsNativeInterface, docsToolFailures } from './helpers/docsync-observer';
 import type { SkillTestResult } from './helpers/session-runner';
 
 function calls(...toolCalls: SkillTestResult['toolCalls']): SkillTestResult {
@@ -35,6 +35,45 @@ test('docs write authority permits the authored doc and private JSON/Markdown ar
       expect(docsToolFailures(calls({ tool: 'Edit', input: { file_path }, output: 'Permission denied' }), fixture,
         [path.join(fixture.home, 'fixture-publish.ts')])).not.toEqual([]);
     }
+  } finally { fixture.clean(); }
+});
+
+// Gate 40290033102 slice 2 (ship-docsync-completion): the parent put the snapshot, the
+// saved section and the compare target under {home}/state, gstack's own state directory
+// (GSTACK_HOME), which the interface never named. The authority is right to refuse the
+// state directory; the interface now names every refused root beside the permitted place.
+test('the declared interface names every refused private-artifact root', () => {
+  const fixture = fixtureDocs('updated');
+  try {
+    const interfaceText = docsNativeInterface(fixture, [path.join(fixture.home, 'fixture-publish.ts')], false, true);
+    // The interface renders the remote root as `${home}/remote.git` (the same literal form the agent reads), not path.join.
+    const refused = [fixture.skills.split(path.sep).join('/'), fixture.env.CLAUDE_CONFIG_DIR, fixture.env.GSTACK_HOME, `${fixture.home}/remote.git`];
+    const sentence = interfaceText.split(/(?<=\.)\s+/).find(part => part.startsWith('A private JSON/Markdown artifact'));
+    expect(sentence).toBeDefined();
+    for (const root of refused) expect(sentence).toContain(`${root}`);
+    expect(sentence).toContain(`directly under ${fixture.home} or in a new directory you create there`);
+    expect(sentence).toContain('never inside the repository');
+    expect(fixture.env.GSTACK_HOME).toBe(path.join(fixture.home, 'state'));
+  } finally { fixture.clean(); }
+});
+
+// The captured transcript is a Linux run: its Bash commands carry POSIX paths, which the literal
+// command grammar rejects once a Windows home is substituted, so the replay is POSIX-only like the
+// late-result replay below.
+test.skipIf(process.platform === 'win32')('the captured state-dir run stays refused, and passes once relocated under the home', () => {
+  const fixture = fixtureDocs('updated');
+  try {
+    const captured = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-state-dir-artifacts-public.json'), 'utf8')) as
+      { calls: SkillTestResult['toolCalls'] };
+    const fill = (text: string) => text.replaceAll('{home}', fixture.home);
+    const replayed = captured.calls.map(call => ({ ...call, input: Object.fromEntries(Object.entries(call.input).map(([key, value]) =>
+      [key, typeof value === 'string' ? fill(value) : value])) }));
+    const failures = docsToolFailures(calls(...replayed), fixture, [path.join(fixture.home, 'fixture-publish.ts')]);
+    expect(failures.filter(failure => failure === 'command outside declared docs observation interface')).toHaveLength(4);
+    expect(failures).toContain('write outside docs fixture authority');
+    const relocated = replayed.map(call => ({ ...call, input: Object.fromEntries(Object.entries(call.input).map(([key, value]) =>
+      [key, typeof value === 'string' ? value.replaceAll(`${fixture.home}/state/`, `${fixture.home}/docs-audit/`) : value])) }));
+    expect(docsToolFailures(calls(...relocated), fixture, [path.join(fixture.home, 'fixture-publish.ts')])).toEqual([]);
   } finally { fixture.clean(); }
 });
 
@@ -103,6 +142,35 @@ test('completed docs review accepts literal cat but not an unrelated command or 
     expect(docsCompletedRead(calls({ tool: 'Bash', input: { command: `cat '${shellDoc}.other'` }, output: original }), doc, fixture)).toBe(false);
     expect(docsCompletedRead(calls({ tool: 'Bash', input: { command: `cat '${shellDoc.replaceAll('/', '\\')}'` }, output: original }), doc, fixture)).toBe(false);
     expect(docsCompletedRead(calls({ tool: 'Read', input: { file_path: doc, limit: 1 }, output: original.slice(0, 20) }), doc, fixture)).toBe(false);
+  } finally { fixture.clean(); }
+});
+
+// Screen 40828580338 slice 8 (ship-docsync-failure, red on its phase read, green on the in-run rerun): the parent's first line
+// printed phase.md in full, then zsh read the separator `echo ======` as an = command lookup and abandoned the line (exit 1).
+test.skipIf(process.platform === 'win32')('captured run 40828580338: a line that opens with the full phase still reads it after a later command failed', () => {
+  const fixture = fixtureDocs('legacy');
+  try {
+    const captured = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-phase-read-aborted-public.json'), 'utf8')) as
+      { calls: SkillTestResult['toolCalls'] };
+    const fill = (text: string) => text.replaceAll('{home}', fixture.home);
+    const phase = path.join(fixture.home, 'phase.md');
+    const command = fill(captured.calls[0].input.command);
+    const shape = /^Exit code 1\n([\s\S]+)\n\(eval\):1: ===== not found$/.exec(captured.calls[0].output);
+    expect(shape).not.toBeNull();
+    const body = shape![1];
+    fs.writeFileSync(phase, `${body}\n`);
+    const read = (line: string, output: string) => docsCompletedRead(calls({ tool: 'Bash', input: { command: line }, output }), phase, fixture);
+    expect(command.startsWith(`cat ${phase}; echo ======; `)).toBe(true);
+    expect(docsToolFailures(calls(...captured.calls.map(call => ({ ...call, input: { command: fill(call.input.command) } }))), fixture)).toEqual([]);
+    expect(read(command, captured.calls[0].output)).toBe(true);
+    expect(read(command, body)).toBe(true);
+    expect(read(`ls ${fixture.home}; ${command}`, captured.calls[0].output)).toBe(false);
+    expect(read(command.replace(`cat ${phase};`, `cat ${phase} | head -400;`), captured.calls[0].output)).toBe(false);
+    expect(read(command.replace(`cat ${phase};`, `cat ${fixture.home}/ship-invocation.md ${phase};`), captured.calls[0].output)).toBe(false);
+    expect(read(command, `Exit code 1\n(eval):1: boom\n${body}`)).toBe(false);
+    expect(read(command, `Exit code 1\n${body.slice(0, 200)}`)).toBe(false);
+    expect(read(command, `Error: ${captured.calls[0].output}`)).toBe(false);
+    expect(read(command, `<tool_use_error>${captured.calls[0].output}</tool_use_error>`)).toBe(false);
   } finally { fixture.clean(); }
 });
 

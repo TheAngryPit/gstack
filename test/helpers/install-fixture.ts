@@ -4,7 +4,9 @@
  *
  * A fixture is a throwaway gstack checkout (the working tree's tracked and
  * untracked-but-not-ignored files, so uncommitted changes are under test) plus
- * a clean HOME. Binaries are stubbed and `bun run build` is refused, so setup
+ * a clean HOME. node_modules is never source, including a worktree's
+ * node_modules symlink to its main checkout, which git lists as untracked
+ * because .gitignore's `node_modules/` matches only directories. Binaries are stubbed and `bun run build` is refused, so setup
  * runs its real registration path without compiling (GSTACK_SKIP_PLAYWRIGHT,
  * GSTACK_SETUP_SKIP_CSO_BUILD, GSTACK_SKIP_FONTS). Every write the test makes
  * goes through `put` or the `fixture*Sync` wrappers, which refuse paths
@@ -25,7 +27,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 export const ROOT = resolve(import.meta.dir, '../..');
 const listed = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: ROOT, encoding: 'utf8', timeout: 10_000 });
 if (listed.status !== 0) throw new Error(listed.stderr);
-const SOURCE_FILES = listed.stdout.split('\0').filter(rel => rel && !/^(?:test|docs|browse\/test|\.github|node_modules)\//.test(rel) && existsSync(join(ROOT, rel)));
+const SOURCE_FILES = listed.stdout.split('\0').filter(rel => rel && !/^(?:test|docs|browse\/test|\.github|node_modules)(?:\/|$)/.test(rel) && existsSync(join(ROOT, rel)));
 const STUB_BINARIES = ['browse/dist/browse', 'design/dist/design', 'make-pdf/dist/pdf', 'browse/dist/.build-complete'];
 const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const POSIX = process.platform !== 'win32';
@@ -172,7 +174,7 @@ export function makeFixture(): Fixture {
   mkdirSync(home, { recursive: true });
   put(join(commands, 'bun'), `#!/usr/bin/env bash
 case "$*" in
-  'install --frozen-lockfile') exit 0 ;;
+  'install --production --frozen-lockfile') exit 0 ;;
   'run build') echo 'Unexpected build in an install fixture' >&2; exit 90 ;;
   *) exec ${quote(process.execPath)} "$@" ;;
 esac
@@ -248,7 +250,7 @@ export function fixture(layout: string) {
   };
   write(join(commands, 'bun'), `#!/usr/bin/env bash
 case "$*" in
-  'install --frozen-lockfile') exit 0 ;;
+  'install --production --frozen-lockfile') exit 0 ;;
   'build --help') echo 'Fixture Bun has no CSO compile flags'; exit 0 ;;
   'run build') echo 'Unexpected build in registration fixture' >&2; exit 90 ;;
   *) exec ${quote(process.execPath)} "$@" ;;

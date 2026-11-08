@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ledgerline weekly summary</title>
+<style>
+  html, body { margin: 0; background: #f4f1ea; }
+  .frame { position: relative; width: 640px; height: 400px; font: 500 15px/1.35 Georgia, serif; color: #1f1c17; }
+  .card { position: absolute; top: 48px; width: 272px; height: 304px; border-radius: 16px; background: #fffdf8;
+    box-shadow: 0 8px 20px rgba(31, 28, 23, 0.08); overflow: hidden; }
+  .revenue { left: 32px; }
+  .queue { left: 336px; }
+  h2 { margin: 22px 22px 4px; font-size: 15px; font-weight: 600; }
+  .value { margin: 0 22px; font-size: 30px; font-variant-numeric: tabular-nums; }
+  .bars { position: absolute; left: 22px; right: 22px; bottom: 26px; height: 120px; display: flex; align-items: flex-end; gap: 10px; }
+  .bars span { flex: 1; border-radius: 4px 4px 0 0; background: #3f6b5c; }
+  .rows { margin: 18px 22px 0; padding: 0; list-style: none; }
+  .rows li { display: flex; justify-content: space-between; padding: 11px 0; border-top: 1px solid #ece6da; }
+  .rows b { font-weight: 600; }
+</style>
+</head>
+<body>
+<main class="frame">
+  <section class="card revenue">
+    <h2>Collected this week</h2>
+    <p class="value">$48,120</p>
+    <div class="bars"><span style="height:42%"></span><span style="height:61%"></span><span style="height:55%"></span><span style="height:78%"></span><span style="height:70%"></span><span style="height:92%"></span></div>
+  </section>
+  <section class="card queue">
+    <h2>Invoices due</h2>
+    <ul class="rows">
+      <li><span>Harbor Dental</span><b>$2,340</b></li>
+      <li><span>Pinecrest Studio</span><b>$1,180</b></li>
+      <li><span>Okafor &amp; Lane</span><b>$4,905</b></li>
+      <li><span>Mill Street Bakery</span><b>$612</b></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

@@ -6,7 +6,10 @@
  *
  * Verdict file: <state root>/install-verdicts/<sha256(checkout realpath)>/<sha256(project realpath | "none")>.json,
  * then the path the GSTACK_LAUNCH line names as GSTACK_INSTALL_VERDICT, then
- * the schema 1 file keyed by the checkout alone (<sha256(checkout)>.json).
+ * the schema 1 file keyed by the checkout alone (<sha256(checkout)>.json). An
+ * install-profile verdict (for=review-voice) at the first path yields to the
+ * launched GSTACK_INSTALL_VERDICT, so a reviewer's install on a shared machine
+ * never shadows the session's own verdict (GST-1161).
  * The project is the working directory's git toplevel unless that is the
  * checkout itself. It is the one record the bun shim, the Bash twin,
  * lib/pregate/runtime.ts and admission read.
@@ -102,11 +105,12 @@ export function installProject(checkout: string, cwd: string = process.cwd()): s
   try { const real = fs.realpathSync(top); return real === checkout ? null : real; } catch { return null; }
 }
 
-/** The verdict file admission reads: (checkout, project), then GSTACK_INSTALL_VERDICT, then the schema 1 file. */
+/** The verdict file admission reads: (checkout, project), then GSTACK_INSTALL_VERDICT, then the schema 1 file. An install-profile verdict at (checkout, project) admits no workflow, so the launched GSTACK_INSTALL_VERDICT outranks it (GST-1161). */
 export function findInstallVerdict(checkout: string, project: string | null, env: Env): string {
   const stateRoot = resolveStateRoot(env);
   const keyed = installVerdictPath(checkout, stateRoot, project);
-  if (fs.existsSync(keyed)) return keyed;
+  if (fs.existsSync(keyed) && !INSTALL_PROFILES.includes(readInstallVerdict(keyed)?.for ?? '')) return keyed;
+  if (fs.existsSync(keyed) && (!env.GSTACK_INSTALL_VERDICT || !fs.existsSync(env.GSTACK_INSTALL_VERDICT))) return keyed;
   if (env.GSTACK_INSTALL_VERDICT && fs.existsSync(env.GSTACK_INSTALL_VERDICT)) return env.GSTACK_INSTALL_VERDICT;
   const legacy = legacyInstallVerdictPath(checkout, stateRoot);
   return fs.existsSync(legacy) ? legacy : keyed;
@@ -138,10 +142,31 @@ export interface VerdictProblem { detail: string; code: ResultCodeName; fix?: st
 export function verdictProblem(skill: string, gstackRoot: string, env: Env, bunPath: string, bunVersion: string, cwd?: string): VerdictProblem | null {
   const src = sourceRoot(gstackRoot);
   const project = installProject(src, cwd);
-  const file = findInstallVerdict(src, project, env);
+  return admittedVerdict(skill, src, findInstallVerdict(src, project, env), project, bunPath, bunVersion).problem;
+}
+
+/**
+ * The verdict file that admits `skill`: `file` itself, else the workflow's own record
+ * <verdict>.for/<skill>.json that every install also writes, so a later install for another
+ * workflow never drops this one (GST-1233), except after a failed ./setup, which changed the
+ * checkout every record certified. When neither admits, `file` with its problem.
+ */
+export function admittedVerdict(skill: string, src: string, file: string, project: string | null, bunPath: string, bunVersion: string): { file: string; problem: VerdictProblem | null } {
+  const problem = verdictFileProblem(file, skill, src, project, bunPath, bunVersion);
+  const own = file.replace(/\.json$/, `.for/${skill}.json`);
+  if (problem && /^[A-Za-z0-9._-]+$/.test(skill) && !readInstallVerdict(file)?.trailer?.startsWith('gstack: fail setup') && fs.existsSync(own) && !verdictFileProblem(own, skill, src, project, bunPath, bunVersion)) return { file: own, problem: null };
+  return { file, problem };
+}
+
+/** Why the verdict in `file` does not admit `skill`; null when it does. */
+function verdictFileProblem(file: string, skill: string, src: string, project: string | null, bunPath: string, bunVersion: string): VerdictProblem | null {
   const v = readInstallVerdict(file);
   const problem = (detail: string): VerdictProblem => ({ detail, code: 'INSTALL_UNVERIFIED' });
-  if (!v) return problem(`no install verdict at ${file} for ${src}`);
+  if (!v && fs.existsSync(file)) return problem(`the install verdict at ${file} is unreadable or has an unsupported schema_version; rerun the installer`);
+  if (!v) {
+    return { ...problem(`no install verdict at ${file} for ${src}`),
+      fix: `run the Capy skill installer (scripts/install.sh --for ${skill}) from ${project ?? 'this directory'}: the verdict is keyed by the project directory the installer runs in, so a run from the skill's own folder does not cover ${project ?? 'it'}; then launch with the GSTACK_LAUNCH line it prints` };
+  }
   if (!v.ok) return problem(`the install verdict says: ${v.trailer}`);
   if (v.checkout !== src) return problem(`the install verdict is for checkout ${v.checkout}, not ${src}`);
   const head = spawnSync('git', ['-C', src, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000 }).stdout?.trim() ?? '';
@@ -155,7 +180,7 @@ export function verdictProblem(skill: string, gstackRoot: string, env: Env, bunP
   const missing = (SKILL_REQUIREMENTS[skill]?.requires ?? []).find(id => !v.required.includes(id));
   if (missing && INSTALL_PROFILES.includes(v.for)) {
     return { ...problem(`the install verdict certified for=${v.for}, which does not cover ${missing} that ${skill} needs (${v.for} certifies only the read-only helpers)`),
-      fix: `run GSTACK_CAPY_ROOT=${src} bash ${src}/capy/skill/gstack/scripts/install.sh --for ${skill} (the full install: ./setup and host profiles), then launch with the GSTACK_LAUNCH line it prints` };
+      fix: `run GSTACK_CAPY_ROOT=${src} bash ${src}/capy/skill/gstack/scripts/install.sh --for ${skill} (upgrades this checkout in place: ./setup and host profiles, no second clone), then launch with the GSTACK_LAUNCH line it prints` };
   }
   if (missing) return problem(`the install verdict certified for=${v.for}, which does not cover ${missing} that ${skill} needs`);
   if (v.bun_path && bunPath && bunPath !== v.bun_path) {

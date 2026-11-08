@@ -1,0 +1,6 @@
+/* Ported from Nutlope/hallmark scripts/fixtures/tailwind-fail/style.css at 7ec8682 (MIT, Copyright (c) 2026 Hallmark contributors; see NOTICE.md and licenses/MIT-hallmark.txt). */
+:root {
+  --color-paper: oklch(18% 0.02 270);
+  --color-ink: oklch(95% 0.01 270);
+  --color-glow: oklch(62% 0.25 300 / 0.6);
+}

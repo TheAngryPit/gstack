@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# gstack-upgrade — move this gstack checkout to the tip of its remote default
-# branch, unattended and fast-forward only. The deterministic twin of the
-# /gstack-upgrade skill's git fast path, for parent agents and fix lines.
+# gstack-upgrade — move this gstack checkout to the tip of its update channel
+# (the remote default branch, or refs/heads/stable, the weekly release, for a
+# team install: bin/gstack-update-channel.sh), unattended and fast-forward
+# only. The deterministic twin of the /gstack-upgrade skill's git fast path,
+# for parent agents and fix lines.
 #
 # Usage:
 #   gstack-upgrade --check   fetch (refs only) and print `gstack-upgrade: current <ver>`
@@ -19,7 +21,10 @@
 # is not a gstack checkout, HEAD is detached or not on the remote default
 # branch (a pin), any tracked byte is dirty, a local commit diverged, the
 # incoming release's Bun floor holds, or another updater holds the setup
-# lock; never stashes, never resets. An unreachable remote is
+# lock, unless the caller holds it and names its pid in GSTACK_SETUP_LOCK_OWNER;
+# never stashes, never resets. Before any fetch it also refuses when
+# bin/gstack-ff-update --preflight does: an enclosing project tracks the
+# install's files, or VERSION was put back behind HEAD (#1022). An unreachable remote is
 # UPGRADE_FETCH_FAILED (exit 3). While another live session holds a workflow
 # lease on this installation (bin/gstack-lease live) it refuses with
 # UPGRADE_BUSY (exit 3); GSTACK_UPGRADE_FORCE=1 overrides. Prints
@@ -48,7 +53,7 @@ case "${1:-}" in
   --check) CHECK=1 ;;
   --ff-only-no-reinstall) REINSTALL=0 ;;
   '') ;;
-  -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "gstack-upgrade: unknown argument '$1'" >&2; exit 2 ;;
 esac
 
@@ -62,11 +67,15 @@ bounded() { if command -v timeout >/dev/null 2>&1; then timeout "${GSTACK_UPGRAD
 
 # Git for Windows answers --show-toplevel as C:/x while pwd -P in Git Bash is
 # /c/x; compare the paths, not their spellings.
+# shellcheck source=bin/gstack-harness-pid.sh
+. "$ROOT/bin/gstack-harness-pid.sh" 2>/dev/null || GSTACK_SHARED_HARNESSES="capy-server"
 # shellcheck source=bin/gstack-path-spelling.sh
 . "$ROOT/bin/gstack-path-spelling.sh" 2>/dev/null || gstack_path_same() { [ "$1" = "$2" ]; }
 TOPLEVEL=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)
 [ -f "$ROOT/VERSION" ] && [ -f "$ROOT/setup" ] && [ -n "$TOPLEVEL" ] && gstack_path_same "$TOPLEVEL" "$ROOT" \
   || refuse "$ROOT is not a gstack checkout" "run gstack-upgrade from a git checkout of https://github.com/garrytan/gstack"
+PF=$(bash "$ROOT/bin/gstack-ff-update" --preflight "$ROOT" 2>/dev/null)
+[ $? -eq 6 ] && { echo "gstack-upgrade: $PF (UPGRADE_REFUSED)" >&2; exit 3; }
 export GIT_TERMINAL_PROMPT=0
 HOST=$(git -C "$ROOT" remote get-url origin 2>/dev/null); HOST="${HOST#*://}"; HOST="${HOST#*@}"; HOST="${HOST%%[/:]*}"
 R="user ran gstack-upgrade"
@@ -76,7 +85,25 @@ BRANCH=$(git -C "$ROOT" symbolic-ref -q --short HEAD) \
 DEFAULT=$(_receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" bounded git -C "$ROOT" ls-remote --symref origin HEAD 2>/dev/null | sed -n 's|^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$|\1|p' | head -1)
 [ -n "$DEFAULT" ] || fetch_failed "git ls-remote origin HEAD failed"
 [ "$BRANCH" = "$DEFAULT" ] || refuse "on branch $BRANCH, not the remote default branch $DEFAULT (a pin)" "git -C $ROOT checkout $DEFAULT, then re-run"
-_receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" bounded git -C "$ROOT" fetch --quiet origin "$DEFAULT" 2>/dev/null || fetch_failed "git fetch origin $DEFAULT failed"
+# Channel (bin/gstack-update-channel.sh, docs/releases.md): a team install
+# follows refs/heads/stable, the weekly release, which is always a commit on
+# the default branch's history, so the fast-forward rules below are unchanged.
+# Before the first release is cut origin has no stable, and main is followed.
+# shellcheck source=bin/gstack-update-channel.sh
+. "$ROOT/bin/gstack-update-channel.sh" 2>/dev/null || gstack_update_channel() { echo main; }
+CHANNEL=$(gstack_update_channel "$ROOT" 2>/dev/null) || CHANNEL=main
+FOLLOW=$DEFAULT
+if [ "$CHANNEL" = stable ]; then
+  if _receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" bounded git -C "$ROOT" fetch --quiet origin stable 2>/dev/null; then
+    FOLLOW=stable
+    echo "gstack-upgrade: channel stable (the weekly release; gstack-config set update_channel main follows every merge)" >&2
+  elif _LSR=$(_receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" bounded git -C "$ROOT" ls-remote origin refs/heads/stable 2>/dev/null) && [ -z "$_LSR" ]; then
+    echo "gstack-upgrade: channel stable has no release on origin yet; following $DEFAULT until the first weekly release is cut" >&2
+  else
+    fetch_failed "git fetch origin stable failed"
+  fi
+fi
+[ "$FOLLOW" = stable ] || _receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" bounded git -C "$ROOT" fetch --quiet origin "$DEFAULT" 2>/dev/null || fetch_failed "git fetch origin $DEFAULT failed"
 INCOMING=$(git -C "$ROOT" rev-parse FETCH_HEAD)
 REMOTE_VER=$(git -C "$ROOT" show FETCH_HEAD:VERSION 2>/dev/null | head -1)
 PENDING="$(git -C "$ROOT" rev-parse --absolute-git-dir)/gstack-upgrade.pending"
@@ -148,7 +175,23 @@ reinstall() { # FROM — run the install step; a pending marker survives a failu
   echo "gstack-upgrade: the checkout is at $(head -1 "$ROOT/VERSION") but its reinstall failed (exit $_rc); fix: re-run $ROOT/bin/gstack-upgrade (it completes the pending reinstall)" >&2
   exit 1
 }
-if [ "$INCOMING" = "$(git -C "$ROOT" rev-parse HEAD)" ] || git -C "$ROOT" merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
+# ver_le A B — version A is not higher than B (numeric, part by part). A
+# depth-1 clone cannot see that an older release is its ancestor; main stamps
+# a higher VERSION at every merge and stable is always a main commit, so a
+# release whose VERSION is not higher is at or behind this install.
+ver_le() {
+  _vl_i=1
+  while :; do
+    _vl_a=$(printf '%s' "$1" | cut -d. -f"$_vl_i"); _vl_b=$(printf '%s' "$2" | cut -d. -f"$_vl_i")
+    [ -z "$_vl_a" ] && [ -z "$_vl_b" ] && return 0
+    case "${_vl_a:-0}${_vl_b:-0}" in *[!0-9]*) return 1 ;; esac
+    [ "${_vl_a:-0}" -lt "${_vl_b:-0}" ] && return 0
+    [ "${_vl_a:-0}" -gt "${_vl_b:-0}" ] && return 1
+    _vl_i=$((_vl_i + 1))
+  done
+}
+if [ "$INCOMING" = "$(git -C "$ROOT" rev-parse HEAD)" ] || git -C "$ROOT" merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null \
+  || { [ "$FOLLOW" = stable ] && ! git -C "$ROOT" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null && [ -n "$REMOTE_VER" ] && ver_le "$REMOTE_VER" "$INSTALLED"; }; then
   if [ -f "$PENDING" ]; then
     echo "gstack-upgrade: current $INSTALLED; reinstall pending from $(head -1 "$PENDING")"
     [ "$CHECK" -eq 1 ] && exit 1
@@ -166,20 +209,30 @@ fi
 DIRTY=$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null | cut -c4- | tr '\n' ' ' | sed 's/ $//')
 [ -z "$DIRTY" ] || refuse "tracked files changed: $DIRTY" "commit or move those changes (git -C $ROOT status --short), then re-run"
 if ! git -C "$ROOT" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null; then
-  _receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" git -C "$ROOT" fetch --quiet --unshallow origin "$DEFAULT" 2>/dev/null || true
+  _receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" git -C "$ROOT" fetch --quiet --unshallow origin "$FOLLOW" 2>/dev/null || true
   git -C "$ROOT" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null \
-    || refuse "diverged: $(git -C "$ROOT" rev-list --count FETCH_HEAD..HEAD 2>/dev/null || echo '?') local commits are not on origin/$DEFAULT" "git -C $ROOT log --oneline FETCH_HEAD..HEAD shows them; move them to another branch, then re-run"
+    || refuse "diverged: $(git -C "$ROOT" rev-list --count FETCH_HEAD..HEAD 2>/dev/null || echo '?') local commits are not on origin/$FOLLOW" "git -C $ROOT log --oneline FETCH_HEAD..HEAD shows them; move them to another branch, then re-run"
 fi
 # Workflow leases (bin/gstack-lease): sessions sharing this installation that
 # are alive and not this process's own chain. Moving the checkout under them
-# is what the lease exists to prevent; the caller's own session never counts.
+# is what the lease exists to prevent; the caller's own session never counts,
+# except under a shared harness (capy-server), where every session on the
+# machine is in the caller's chain: its lease counts until it is 120 minutes
+# old (GST-396).
 if [ "${GSTACK_UPGRADE_FORCE:-}" != 1 ] && [ -x "$ROOT/bin/gstack-lease" ] \
-  && BUSY=$("$ROOT/bin/gstack-lease" live --root "$ROOT" --exclude-ancestry-of $$ 2>/dev/null); then
-  HOLDERS=""
-  while read -r _pid _age; do HOLDERS="$HOLDERS${HOLDERS:+, }pid $_pid ($_age)"; done <<EOF_BUSY
+  && BUSY=$("$ROOT/bin/gstack-lease" live --root "$ROOT" --exclude-ancestry-of $$ --count-shared-harness 2>/dev/null); then
+  HOLDERS="" SHARED_HOLDER=""
+  while read -r _pid _age _comm; do
+    HOLDERS="$HOLDERS${HOLDERS:+, }pid $_pid ($_age${_comm:+ $_comm})"
+    case " $GSTACK_SHARED_HARNESSES " in *" ${_comm:-none} "*) SHARED_HOLDER="$_comm, pid $_pid) holds a lease $_age old" ;; esac
+  done <<EOF_BUSY
 $BUSY
 EOF_BUSY
-  echo "gstack-upgrade: live gstack sessions hold this installation: $HOLDERS; nothing was changed; fix: wait for those sessions to finish, or re-run with GSTACK_UPGRADE_FORCE=1 when you know they are idle (UPGRADE_BUSY)" >&2
+  if [ -n "$SHARED_HOLDER" ]; then
+    echo "gstack-upgrade: a shared harness ($SHARED_HOLDER; every session on this machine runs under it, so the upgrade waits until the lease is 120 minutes old (counted from the last renewal by any session); nothing was changed; fix: re-run then, or with GSTACK_UPGRADE_FORCE=1 when no other session uses this checkout (UPGRADE_BUSY)" >&2
+  else
+    echo "gstack-upgrade: live gstack sessions hold this installation: $HOLDERS; nothing was changed; fix: wait for those sessions to finish, or re-run with GSTACK_UPGRADE_FORCE=1 when you know they are idle (UPGRADE_BUSY)" >&2
+  fi
   exit 3
 fi
 # shellcheck source=bin/gstack-bun-version.sh
@@ -188,17 +241,25 @@ fi
 
 # The same lock directory the session-start auto-updater (bin/gstack-session-update)
 # holds while it pulls and runs setup; a live holder means refuse, never wait.
+# A caller that took it first (bin/gstack-capy-session, before it switches a
+# pin to the default branch) hands it over with GSTACK_SETUP_LOCK_OWNER=<the
+# pid in the lock>; the lock stays the caller's to release.
 GSTACK_STATE_ROOT=$("$ROOT/bin/gstack-paths" --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 LOCK_DIR="$GSTACK_STATE_ROOT/.setup-lock"
-mkdir -p "$GSTACK_STATE_ROOT" 2>/dev/null
-mkdir "$LOCK_DIR" 2>/dev/null || refuse "another gstack updater holds $LOCK_DIR (pid $(cat "$LOCK_DIR/pid" 2>/dev/null || echo unknown))" "wait for it to finish, then re-run"
-echo "$$" > "$LOCK_DIR/pid"
-trap '[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+LOCK_HANDED=0
+if [ -n "${GSTACK_SETUP_LOCK_OWNER:-}" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$GSTACK_SETUP_LOCK_OWNER" ]; then
+  LOCK_HANDED=1
+else
+  mkdir -p "$GSTACK_STATE_ROOT" 2>/dev/null
+  mkdir "$LOCK_DIR" 2>/dev/null || refuse "another gstack updater holds $LOCK_DIR (pid $(cat "$LOCK_DIR/pid" 2>/dev/null || echo unknown))" "wait for it to finish, then re-run"
+  echo "$$" > "$LOCK_DIR/pid"
+  trap '[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+fi
 
 git -C "$ROOT" merge --ff-only -q FETCH_HEAD 2>/dev/null || refuse "git merge --ff-only FETCH_HEAD failed" "git -C $ROOT status, then re-run"
 NEW=$(head -1 "$ROOT/VERSION")
 echo "gstack-upgrade: upgraded $INSTALLED -> $NEW"
-rm -rf "$LOCK_DIR"; trap - EXIT
+[ "$LOCK_HANDED" -eq 1 ] || { rm -rf "$LOCK_DIR"; trap - EXIT; }
 
 [ "$REINSTALL" -eq 1 ] || exit 0
 reinstall "$INSTALLED"

@@ -50,7 +50,7 @@ describe.skipIf(process.platform !== 'linux')('bootstrap paid-shard cleanup inte
         import { runPaidShard } from ${JSON.stringify(path.join(import.meta.dir, '../scripts/test-paid-shards.ts'))};
         const outcome = await runPaidShard(['test/skill-e2e-qa-workflow.test.ts'], 1, 1, {
           rootDir: ${JSON.stringify(path.join(import.meta.dir, '..'))}, timeoutMs: 12000, jobs: 2, logDir: ${JSON.stringify(root)},
-          evalDirBase: ${JSON.stringify(path.join(root, 'artifacts'))}, log: () => {},
+          evalDirBase: ${JSON.stringify(path.join(root, 'artifacts'))}, log: line => console.log(line),
           env: { PATH: process.env.PATH, GSTACK_CLAUDE_CLI_VERSION: 'synthetic-no-provider', EVALS_RUN_ID: 'integration-run' },
           commandFor: () => ({ command: process.execPath, args: ['test', ${JSON.stringify(script)}, '--retry', ${JSON.stringify(scenario === 'retry' ? '1' : '0')}, '--timeout', '10000'] }),
         });
@@ -62,7 +62,7 @@ describe.skipIf(process.platform !== 'linux')('bootstrap paid-shard cleanup inte
       fs.writeFileSync(path.join(root, 'controller.stdout.log'), controller.stdout ?? '', { mode: 0o600 });
       fs.writeFileSync(path.join(root, 'controller.stderr.log'), controller.stderr ?? '', { mode: 0o600 });
       expect(controller.error).toBeUndefined();
-      expect(controller.status).toBe(0);
+      expect(controller.status, `controller exited ${controller.status} (signal ${controller.signal}); stderr tail: ${(controller.stderr ?? '').slice(-600).replace(/\s*\n\s*/g, ' | ')}`).toBe(0);
       const outcome = JSON.parse(fs.readFileSync(outcomePath, 'utf8'));
       if (scenario === 'ack-failure') {
         expect(controller.stdout).toContain('(fail) qa-bootstrap');
@@ -71,7 +71,7 @@ describe.skipIf(process.platform !== 'linux')('bootstrap paid-shard cleanup inte
       const attempts = fs.readFileSync(path.join(root, 'attempts.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
       expect(attempts.length).toBe(scenario === 'retry' ? 2 : 1);
       expect(new Set(attempts.map(attempt => attempt.artifact)).size).toBe(attempts.length);
-      expect(outcome.status).toBe(scenario === 'success' || scenario === 'retry' ? 'passed' : 'failed');
+      expect(outcome.status, `shard ${JSON.stringify({ ...outcome, files: undefined })}; controller stdout tail: ${(controller.stdout ?? '').slice(-1200).replace(/\s*\n\s*/g, ' | ')}`).toBe(scenario === 'success' || scenario === 'retry' ? 'passed' : 'failed');
       for (const attempt of attempts) {
         const state = path.dirname(path.dirname(attempt.root));
         if (scenario === 'ack-failure') {

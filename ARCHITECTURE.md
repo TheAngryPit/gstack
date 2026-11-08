@@ -91,7 +91,7 @@ The server writes `.gstack/browse.json` (atomic write via tmp + rename, mode 0o6
 { "pid": 12345, "port": 34567, "token": "uuid-v4", "startedAt": "...", "binaryVersion": "abc123" }
 ```
 
-The CLI reads this file to find the server. If the file is missing or the daemon process is dead, the CLI spawns a new server. A process that is alive but not answering `/health` is busy, not dead: the CLI probes for a bounded ~8s, then reports busy with a nonzero exit — only an explicit `--force-restart` kills a live daemon. Process liveness uses signal-0 (`isProcessAlive`, EPERM counts as alive) on every platform, with the health check (GET /health) as the responsiveness signal. Daemon stdout/stderr persists to `<project>/.gstack/browse-daemon.log`.
+The CLI reads this file to find the server. If the file is missing or the daemon process is dead, the CLI spawns a new server. A process that is alive but not answering `/health` is busy, not dead: the CLI probes for a bounded ~8s, then reports busy with a nonzero exit — only an explicit `--force-restart` kills a live daemon. Process liveness uses signal-0 (`isProcessAlive`, EPERM counts as alive) on every platform, with the health check (GET /health) as the responsiveness signal. Its `status` covers the daemon and its Chromium connection only; the active tab's main thread is reported separately (`activeTab.responsive`, a probe bounded to 1s), so one page stuck in a long script never makes the CLI refuse commands. Daemon stdout/stderr persists to `<project>/.gstack/browse-daemon.log`.
 
 ### Port selection
 
@@ -199,7 +199,7 @@ Storage reset and authentication verification are independent opt-ins. `--clear-
 
 ### Shell injection prevention
 
-The browser registry (Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, and macOS-only Comet, Arc, Dia) is hardcoded. Database roots come from known platform locations; profile directory input is validated. Keychain access uses `Bun.spawn()` with explicit argument arrays, not shell string interpolation.
+The browser registry (Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, and macOS-only Comet and Arc) is hardcoded. Database roots come from known platform locations; profile directory input is validated. Keychain access uses `Bun.spawn()` with explicit argument arrays, not shell string interpolation.
 
 ### Egress receipt ledger (v1.63.0.0)
 
@@ -338,7 +338,7 @@ Templates contain the workflows, tips, and examples that require human judgment.
 | `{{ASIDE_RESEARCH}}` | `resolvers/aside.ts` | Web research through `aside exec` in the user's browser, WebSearch as the fallback, then the no-search degrade |
 | `{{ASIDE_EXEC_PRELUDE}}` | `resolvers/aside.ts` | One-line `_aside_exec` definition: an `aside exec` call writes an egress receipt before the prompt leaves the machine (fail-open, user-facing sink: it runs unreceipted only when the egress library is missing); skills never call `aside exec` bare |
 | `{{UNTRUSTED_CONTENT_WARNING}}` | `resolvers/aside.ts` | The one untrusted-content rule for everything either browser hands back |
-| `{{PREAMBLE}}` | `gen-skill-docs.ts` | Startup block: update check, session tracking, contributor mode, AskUserQuestion format |
+| `{{PREAMBLE}}` | `resolvers/preamble.ts`, `resolvers/preamble-hoist.ts` | Startup block: update check, session tracking, contributor mode, AskUserQuestion format; tier 2+ skills get a pointer to their shared `sections/preamble.md` plus the sections that are their own |
 | `{{BROWSE_SETUP}}` | `gen-skill-docs.ts` | Binary discovery + setup instructions |
 | `{{BROWSE_FALLBACK}}` | `resolvers/browse.ts` | Aside→`$B` hand-off: binary discovery + the step-by-step equivalence table, rendered right after `{{ASIDE_SETUP}}` in every browsing skill |
 | `{{BASE_BRANCH_DETECT}}` | `gen-skill-docs.ts` | Dynamic base branch detection for PR-targeting skills (ship, review, qa, plan-ceo-review) |
@@ -356,8 +356,10 @@ Templates contain the workflows, tips, and examples that require human judgment.
 | `{{DESIGN_MD_CHECK}}` | `resolvers/design.ts` | Open DESIGN.md format check through `bin/gstack-design-md.ts`, with the one-time conversion offer persisted in the file; `:calibrate` renders the tokens-as-calibration form for /design-review |
 | `{{OVERUSED_FONTS}}` | `resolvers/design.ts` | Role-scoped font lists from `lib/design-catalog.ts` (overused as display, fine as body/UI, mono, banned, verified-free) for /design-consultation |
 | `{{DESIGN_SLOP_BULLETS}}` | `resolvers/design.ts` | Prose-only slop bullets from `lib/design-catalog.ts` (no rule ids) for the proposal skills |
+| `{{DESIGN_CRAFT_RULE:<lead>}}` | `resolvers/design-craft.ts` | One paragraph of `design-html/sections/craft.md.tmpl`, found by its bold lead, with its bullets, for /design-review's craft audit; a missing or ambiguous lead fails generation |
+| `{{DESIGN_PERSUADE_CHECKS}}` | `resolvers/design-craft.ts` | The five Persuade conversion checks (one primary action, named objections, proof beside each claim, a real risk reversal, an index/noindex decision) for /design-review's craft audit and /plan-design-review Pass 1 |
 | `{{DESIGN_SHOTGUN_LOOP}}` | `resolvers/design.ts` | Shared comparison board feedback loop for /design-shotgun, /plan-design-review, /design-consultation |
-| `{{UX_PRINCIPLES}}` | `resolvers/design.ts` | User behavioral foundations (scanning, satisficing, goodwill reservoir, trunk test) for /design-html, /design-shotgun, /design-review, /plan-design-review |
+| `{{UX_PRINCIPLES}}` | `resolvers/design.ts` | User behavioral foundations (scanning, satisficing, goodwill reservoir, trunk test) for /design-html and /design-shotgun |
 | `{{GBRAIN_CONTEXT_LOAD}}` | `resolvers/gbrain.ts` | Brain-first context search with keyword extraction, health awareness, and data-research routing. Injected into 10 brain-aware skills. Suppressed on non-brain hosts. |
 | `{{GBRAIN_SAVE_RESULTS}}` | `resolvers/gbrain.ts` | Post-skill brain persistence with entity enrichment, throttle handling, and per-skill save instructions. 8 skill-specific save formats. |
 | `{{FOREGROUND_DISPATCH_NOTE}}` | `resolvers/constants.ts` | Canonical `run_in_background: false` guidance for every synchronous Agent-tool subagent dispatch (subagents run in the background by default since Claude Code v2.1.198). Single source of truth; carriers are pinned per file by `test/run-in-background-guidance.test.ts`. |
@@ -369,7 +371,10 @@ This is structurally sound — if a command exists in code, it appears in docs. 
 The generator also owns two files that are not skill docs: `review/design-checklist.md` is rendered from `lib/design-catalog.ts` (through `scripts/resolvers/design-checklist.ts`), and `lib/dom-dump.js` is written from `lib/dom-dump-script.ts`. The checklist `/review` and `/ship` read and the DOM dump `/design-review` runs therefore cannot drift from the catalog and the script the templates describe; `test/design-checklist-sync.test.ts` pins both.
 
 The internal async `runGeneration()` driver inventories skills, Claude sections
-and QA/qa-only sections on every supported host, host metadata, OpenClaw snippets,
+and, on every supported host, the sections of the skills carved on every host
+(`CARVED_ON_EVERY_HOST` in `scripts/resolvers/sections.ts`: qa, qa-only, ship,
+plan-ceo-review, office-hours and design-review), each tier 2+ skill's shared
+`sections/preamble.md` on every host, host metadata, OpenClaw snippets,
 the index, the agent digest, and auxiliary assets. Other skills remain inline on
 non-Claude hosts; QA assets resolve relative to the installed host skill.
 Every artifact goes through one compare-or-write function. Dry runs
@@ -393,6 +398,8 @@ Most workflow skills start with a `{{PREAMBLE}}` block that runs before the skil
 3. **Operational self-improvement** — at the end of every skill session, the agent reflects on failures (CLI errors, wrong approaches, project quirks) and logs operational learnings to the project's JSONL file for future sessions.
 4. **AskUserQuestion format** — universal format: context, question, `RECOMMENDATION: Choose X because ___`, lettered options. Consistent across all skills.
 5. **Search Before Building** — before building infrastructure or unfamiliar patterns, search first. Three layers of knowledge: tried-and-true (Layer 1), new-and-popular (Layer 2), first-principles (Layer 3). When first-principles reasoning reveals conventional wisdom is wrong, the agent names the "eureka moment" and logs it. See `ETHOS.md` for the full builder philosophy.
+
+Tier 2+ skills share most of this text, so it is not repeated in each SKILL.md. `scripts/resolvers/preamble-hoist.ts` renders the skill-independent preamble sections once per host into `sections/preamble.md` beside the SKILL.md, and the SKILL.md opens with a short "Shared preamble (load first)" pointer that names the file's id (a hash of the install root and the shared text before host rewrites, so it changes when that text changes but can repeat across hosts); the agent reads the file unless its own earlier Read of that file, headed by that id, is still in context, so a session loads it once and text that merely carries the id never stands in for it. A section moves only when the skill's render of it is byte-identical to the shared render. The start command, sections that name the skill (Question Tuning, Repo Ownership, Search Before Building, Telemetry) and skill-specific variants stay inline. Tier 1 skills keep their short preamble inline.
 
 ### Why committed, not generated at runtime?
 

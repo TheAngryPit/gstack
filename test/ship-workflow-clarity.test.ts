@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { ALL_HOST_CONFIGS } from '../hosts';
 import { generateAdversarialStep } from '../scripts/resolvers/outside-voice-steps';
 import { generateQAReview } from '../scripts/resolvers/qa';
+import { generateReviewArmy } from '../scripts/resolvers/review-army';
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import { between, compact, expectAbsent, expectMentions, expectOrdered, expectTokens } from './helpers/prompt-structure';
 import { readWorkflowExcerpt } from './helpers/workflow-excerpt';
@@ -117,7 +118,7 @@ test('Step 11.5 reads review records and blocks on a mismatch', () => {
 
 test('version recovery and digest generation keep their tokens', () => {
   const version = compact(between(entryTemplate, '## Step 12:', '## Step 14:'));
-  expectTokens(version, ['`baseVersion`', '`currentVersion`', 'ALREADY_BUMPED', '`agents-digest/gstack-AGENTS.md`', '`agentsDigest`', '`bun scripts/gen-agents-digest.ts`'], 'ship version step');
+  expectTokens(version, ['`baseVersion`', '`currentVersion`', 'ALREADY_BUMPED', '`agents-digest/gstack-AGENTS.md`', '`agentsDigest`', '`bun --no-env-file --config=/dev/null scripts/gen-agents-digest.ts`'], 'ship version step');
   expectAbsent(version, ['skip if ALREADY_BUMPED'], 'ship version step');
 });
 
@@ -200,7 +201,7 @@ test('linked spec discovery reads frontmatter fields and claims closure only for
 test('comment triage reports one of three statuses with fixed result strings', () => {
   const section = compact(readTemplate('ship/sections/greptile.md.tmpl'));
   expectTokens(section, ['"status":"complete|no_pr|unavailable"', '`complete`', '`no_pr`', '`unavailable`',
-    '"Greptile: no PR exists"', '"Greptile: fetched, zero comments"', '`Greptile triage: UNAVAILABLE (dispatch failed)`'], 'ship greptile section');
+    '"Review bots: not run (no PR, or both bot lists are none)"', '"Review bots: fetched, zero comments"', '`Review bot triage: UNAVAILABLE (dispatch failed)`'], 'ship greptile section');
   expectAbsent(section, ['If no PR exists, `gh` fails, the API errors, or there are zero comments'], 'ship greptile section');
 });
 
@@ -212,4 +213,40 @@ test('ship resolves branch and installed-asset references without competing inst
   const row = readTemplate('ship/SKILL.md').split('\n').find(line => line.startsWith('| exploratory QA before Fix-First'));
   expect(row, 'ship section index lost its exploratory QA row').toBeDefined();
   expectTokens(row!, ['`sections/review-army.md`'], 'ship section index');
+});
+
+test('a repository without a version source or CHANGELOG ships with one skipped line per step and a receipt that says version none (E18)', () => {
+  const step12 = compact(between(entryTemplate, '## Step 12:', '{{SECTION:changelog}}'));
+  expectTokens(step12, ['**NO_VERSION**', '`Version bump: skipped (no version source: <path, reason>)`', 'never create VERSION', '`"version":null`'], 'ship Step 12');
+  const changelog = compact(readTemplate('ship/sections/changelog.md.tmpl'));
+  expectTokens(changelog, ['**NO_VERSION (Step 12):**', '**No CHANGELOG:**', '`CHANGELOG: skipped (none at <path>)`', 'never create the file', '`"none"`'], 'ship changelog section');
+  expectOrdered(changelog, ['**NO_VERSION (Step 12):**', '**No CHANGELOG:**'], 'ship changelog section');
+});
+
+test('Step 14.5 runs the doc caps before the verification gate and records the audit for the receipt, with the owner exception shape (E11)', () => {
+  // The caps come from origin/<base>'s policy (a branch cannot raise its own cap), and the per-invocation record is cleared before the first launch.
+  expectOrdered(docsTemplate, ['rm -f .gstack/tmp/docs-audit.json', '### Continue or recover', 'gstack-ship-receipt docs-caps --base <base>', 'never the\nbranch\'s copy', '`DOCS_CAP: <path> <bytes>/<max> ok|over`', 'write the receipt\'s record to `.gstack/tmp/docs-audit.json`', '## Blocked recovery'], 'ship documentation section');
+  expectAbsent(docsTemplate, ['docs-caps --policy .gstack/ship-policy.json'], 'ship documentation section cap source');
+  expectTokens(docs, ['`DOCS_CAP: none declared`', '"status":"updated|current"', '"status":"blocked"', '"exception":{"accepted_by"', '`DOCS_AUDIT_BLOCKED`', 'An unattended run has no owner to accept: it stops here.'], 'ship documentation section');
+  const compose = between(prTemplate, 'Handoff record first', '**Existing open PR/MR**');
+  expectTokens(compose, ['--docs @.gstack/tmp/docs-audit.json', '`DOCS_AUDIT_BLOCKED`'], 'ship pr-body receipt write');
+  expectTokens(compact(between(prTemplate, '## Documentation', '## Test plan')), ['`Documentation exception: accepted by <accepted_by> <date> via <via>: <reason>`'], 'ship pr-body Documentation');
+});
+
+test('Step 9.4 applies the cap before any edit, names its scratch files under .gstack/tmp/, logs Step 11 late defers, and hands reviewers the range from pass 2 (PR 1 review notes)', () => {
+  const fixFirst = between(reviewTemplate, '## Step 9.4:', '### Decide whether to repeat Step 9');
+  expectOrdered(fixFirst, ['0. **Scope the findings.**', '.gstack/tmp/review-findings-p$PASS.json', '.gstack/tmp/review-classified-p$PASS.json', '1. **Apply the cap before any edit, then classify.**', '2. **Auto-fix all AUTO-FIX items.**', '**Late defers from Step 11.**', '"skill":"review-late-defer"', '6. Persist the review result'], 'ship Step 9.4');
+  expectTokens(compact(fixFirst), ['`.gstack/tmp/review-deferred.json`', '`CYCLES >= 3`', '`PASS >= 3`', 'no `--finish` token'], 'ship Step 9.4');
+  // The sha is written into each dispatched prompt: a reviewer's shell never sees the parent's RANGE_BASE, so a variable there would silently widen the read.
+  expectTokens(reviewFlow, ['`DIFF_BASE=<diff-base>`', 'RANGE_BASE..HEAD', 'never sees your shell\'s `RANGE_BASE`'], 'ship Step 9 range');
+  expectAbsent(reviewFlow, ['DIFF_BASE=${RANGE_BASE'], 'ship Step 9 range fallback');
+  for (const host of ALL_HOST_CONFIGS) {
+    const army = generateReviewArmy({ host: host.name, skillName: 'ship', tmplPath: '', paths: HOST_PATHS[host.name] });
+    if (!army) continue;
+    expect(army.match(/DIFF_BASE=<diff-base>/g)?.length, `${host.name} ship review army range`).toBe(2);
+    expectAbsent(army, ['${RANGE_BASE'], `${host.name} ship review army fallback`);
+    expectTokens(army, ['--review-fanout auto|serial|parallel', /Fan-out: N specialists in\s+M batches of K/], `${host.name} ship review army fan-out`);
+    const review = generateReviewArmy({ host: host.name, skillName: 'review', tmplPath: '', paths: HOST_PATHS[host.name] });
+    expectAbsent(review, ['RANGE_BASE', '--review-fanout'], `${host.name} /review army`);
+  }
 });

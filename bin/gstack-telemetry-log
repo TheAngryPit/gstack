@@ -21,6 +21,7 @@
 #
 # NOTE: Uses set -uo pipefail (no -e) — telemetry must never exit non-zero
 set -uo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 GSTACK_DIR="${GSTACK_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPT_DIR="$GSTACK_DIR/bin"
@@ -205,7 +206,7 @@ ERR_FIELD="null"
 # look like a JSON string, the whole message becomes null — never raw.
 ERR_MSG_FIELD="null"
 if [ -n "$ERROR_MESSAGE" ]; then
-  ERR_MSG_FIELD="$(printf '%s' "$ERROR_MESSAGE" | GSTACK_LIB_DIR="$SCRIPT_DIR/../lib" bun -e "
+  ERR_MSG_FIELD="$(printf '%s' "$ERROR_MESSAGE" | GSTACK_LIB_DIR="$SCRIPT_DIR/../lib" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
 const { redactFindingSpans } = await import(process.env.GSTACK_LIB_DIR + '/redact-engine.ts');
 const input = await Bun.stdin.text();
 const out = redactFindingSpans(input, { repoVisibility: 'private' });

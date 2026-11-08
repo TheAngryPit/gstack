@@ -17,8 +17,8 @@
  */
 
 import { spawnSync } from "child_process";
-import { existsSync } from "fs";
-import { join } from "path";
+import { lstatSync, statSync } from "fs";
+import { dirname, join } from "path";
 import { mergedStateRoots, resolveStateRoot } from "./state-root";
 
 export type RepoPolicyTierValue = "deny" | "read-only" | "read-write" | "none";
@@ -46,9 +46,36 @@ export function repoPolicyStorePath(env: NodeJS.ProcessEnv = process.env): strin
 /**
  * No store on disk = no policy was ever set (the fast path — no subprocess).
  * The ~/.gstack store counts too: its deny tiers merge into every state root.
+ * Only confirmed absence is "no store": ENOENT whose nearest existing
+ * ancestor resolves (so no dangling symlink cut the walk short). A dangling
+ * symlink at the store or above it, a non-directory component, or a path that
+ * cannot be checked (an unsearchable directory) counts as a store, so the
+ * caller spawns the script and its own fail-closed rules apply.
  */
 export function hasRepoPolicyStore(env: NodeJS.ProcessEnv = process.env): boolean {
-  return mergedStateRoots(env).some((root) => existsSync(join(root, "gbrain-repo-policy.json")));
+  return mergedStateRoots(env).some((root) => {
+    let path = join(root, "gbrain-repo-policy.json");
+    try {
+      lstatSync(path);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    }
+    for (let up = dirname(path); up !== path; path = up, up = dirname(up)) {
+      try {
+        lstatSync(up);
+      } catch {
+        continue;
+      }
+      try {
+        statSync(up);
+        return false;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  });
 }
 
 /** The bash script that owns the store — resolved relative to this file (lib/ → bin/), never cwd. */
@@ -92,6 +119,50 @@ export function repoPolicyTier(
   if (tier === "deny" || tier === "read-only" || tier === "read-write") return { tier };
   if (tier === "unset") return { tier: "none" };
   return { tier: "none", error: "unreadable" }; // unexpected output — a read failure, not a tier
+}
+
+export interface MemorableRecallPolicy extends RepoPolicyResult {
+  /**
+   * True only when the tier is `read-only` and the store opts this remote in
+   * to Memorable recall. Never true alongside `error` or any other tier.
+   */
+  memorableOptIn: boolean;
+}
+
+/**
+ * Tier plus the per-remote Memorable recall opt-in, via
+ * `gstack-gbrain-repo-policy memorable get <url>` (one spawn). Unlike
+ * repoPolicyTier, the script never quarantines a corrupt store on this path,
+ * so a corrupt store reads as `unreadable` instead of as "no policy".
+ * Fast paths and failure classification match repoPolicyTier; anything but
+ * exactly "<tier>\t<allow|off>" is `unreadable`. POLARITY IS THE CALLER'S.
+ */
+export function memorableRecallPolicy(
+  url: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+  timeoutMs: number = 10_000,
+): MemorableRecallPolicy {
+  if (!hasRepoPolicyStore(env)) return { tier: "none", memorableOptIn: false };
+  if (!url) return { tier: "none", memorableOptIn: false };
+  const [cmd, args]: [string, string[]] =
+    process.platform === "win32"
+      ? ["bash", [POLICY_SCRIPT, "memorable", "get", url]]
+      : [POLICY_SCRIPT, ["memorable", "get", url]];
+  const res = spawnSync(cmd, args, {
+    encoding: "utf-8",
+    timeout: Math.max(1, timeoutMs),
+    env: { ...env } as NodeJS.ProcessEnv,
+  });
+  if (res.error) {
+    const code = (res.error as NodeJS.ErrnoException).code;
+    return { tier: "none", memorableOptIn: false, error: code === "ENOENT" ? "spawn-failed" : "unreadable" };
+  }
+  const unreadable: MemorableRecallPolicy = { tier: "none", memorableOptIn: false, error: "unreadable" };
+  if (res.status !== 0) return unreadable;
+  const match = /^(deny|read-only|read-write|unset)\t(allow|off)\n?$/.exec(res.stdout || "");
+  if (!match) return unreadable;
+  const tier = match[1] === "unset" ? "none" : (match[1] as RepoPolicyTierValue);
+  return { tier, memorableOptIn: tier === "read-only" && match[2] === "allow" };
 }
 
 /**

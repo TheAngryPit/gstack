@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * gstack-design-detect — find, and run, an impeccable engine the USER installed.
  *
@@ -97,6 +97,7 @@ import { writeReceipt, writeOutcome } from '../lib/egress-receipt';
 import { readConfigKey, resolveStateRoot } from '../lib/state-root';
 import { DESIGN_SLOP_CATALOG, entryForImpeccableId } from '../lib/design-catalog';
 import { isFrontendPath } from '../lib/frontend-scope';
+import { baseArg } from '../lib/gate-diff/git';
 
 // ── Environment ──────────────────────────────────────────────────────────────
 
@@ -821,7 +822,7 @@ function resolveTargets(args: ScanArgs, p: Probe): { targets: string[]; refusedB
       for (const rel of r.stdout.toString('utf-8').split('\0')) if (rel) files.add(rel);
       return true;
     };
-    if (!runZ(['diff', '-z', '--name-only', '--diff-filter=ACMR', `${base}...HEAD`])) {
+    if (!runZ(['diff', '-z', '--name-only', '--diff-filter=ACMR', `${baseArg('gstack-design-detect', base, top)}...HEAD`])) {
       // A base that does not resolve must not read as "no frontend changes".
       refuse(base, 'git diff against this base failed (unknown ref or unfetched base)');
       return { targets: out, refusedBase: true };
@@ -829,7 +830,8 @@ function resolveTargets(args: ScanArgs, p: Probe): { targets: string[]; refusedB
     runZ(['diff', '-z', '--name-only', '--diff-filter=ACMR', 'HEAD']);
     runZ(['ls-files', '-z', '--others', '--exclude-standard']);
     for (const rel of [...files].sort()) {
-      if (!isFrontendPath(rel)) continue;
+      // impeccable reads web sources; a Dart file is frontend scope but not a scan target.
+      if (!isFrontendPath(rel) || rel.endsWith('.dart')) continue;
       const abs = path.join(top, rel);
       try { if (fs.lstatSync(abs).isSymbolicLink()) { refuse(rel, 'symlink named by git is never scanned'); continue; } } catch { continue; }
       const real = realpathOrNull(abs);

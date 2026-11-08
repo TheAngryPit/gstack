@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { runPublicationHook } from '../autoplan/bin/phase-publication-hook.ts';
+import { linkedWorktrees, runPublicationHook } from '../autoplan/bin/phase-publication-hook.ts';
 import { OWNED_READ_APPROVAL } from '../autoplan/bin/owned-read';
 
 const ROOT = path.join(import.meta.dir, '..');
@@ -192,3 +192,63 @@ describe('Autoplan hook journal-root verdicts', () => {
     for (const detail of ['unrecognized_shape:cwd_spelling', 'analytics/autoplan-guard.jsonl']) expect(guide).toContain(detail);
   });
 });
+
+describe('linkedWorktrees from a project directory below the repository root (#3296)', () => {
+  const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '0' };
+  const git = (cwd: string, ...args: string[]) => {
+    const child = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 10_000, env: gitEnv });
+    expect(child.status).toBe(0);
+  };
+  function repo(): string {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'autoplan-nested-'))); dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'seed');
+    return dir;
+  }
+  const real = (dir: string) => fs.realpathSync(dir);
+
+  test.skipIf(process.platform === 'win32')('the reporter layout: a subfolder project directory owns its worktree under that subfolder', () => {
+    const root = repo(), sub = path.join(root, 'sub'); fs.mkdirSync(path.join(sub, '.claude', 'worktrees'), { recursive: true });
+    const worktree = path.join(sub, '.claude', 'worktrees', 'w');
+    git(root, 'worktree', 'add', '-q', worktree);
+    expect(linkedWorktrees(sub)).toEqual([real(worktree)]);
+    expect(linkedWorktrees(path.join(sub, 'deeper', 'still'))).toEqual([real(worktree)]);
+    expect(linkedWorktrees(root)).toEqual([real(worktree)]);
+  });
+
+  test.skipIf(process.platform === 'win32')('a nested independent repository stops the walk at its own .git', () => {
+    const outer = repo(), inner = path.join(outer, 'vendor', 'lib');
+    fs.mkdirSync(inner, { recursive: true });
+    git(inner, 'init', '-q', '-b', 'main');
+    git(inner, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'seed');
+    git(outer, 'worktree', 'add', '-q', path.join(outer, 'outer-wt'));
+    expect(linkedWorktrees(inner)).toEqual([]);
+    expect(linkedWorktrees(path.join(inner, 'src'))).toEqual([]);
+  });
+
+  test.skipIf(process.platform === 'win32')('a project directory inside a linked worktree has no registry of its own', () => {
+    const root = repo(), worktree = path.join(root, 'wt');
+    git(root, 'worktree', 'add', '-q', worktree);
+    fs.mkdirSync(path.join(worktree, 'pkg'));
+    expect(linkedWorktrees(worktree)).toEqual([]);
+    expect(linkedWorktrees(path.join(worktree, 'pkg'))).toEqual([]);
+  });
+
+  test('a registry entry whose worktree names another repository is still refused from a subfolder', () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'autoplan-nested-'))); dirs.push(root);
+    const other = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'autoplan-nested-other-'))); dirs.push(other);
+    const worktree = path.join(root, 'sub', 'wt'); fs.mkdirSync(worktree, { recursive: true });
+    const entry = path.join(root, '.git', 'worktrees', 'wt'); fs.mkdirSync(entry, { recursive: true });
+    const foreign = path.join(other, '.git', 'worktrees', 'wt'); fs.mkdirSync(foreign, { recursive: true });
+    fs.writeFileSync(path.join(entry, 'gitdir'), path.join(worktree, '.git') + '\n');
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${foreign}\n`);
+    expect(linkedWorktrees(path.join(root, 'sub'))).toEqual([]);
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${entry}\n`);
+    expect(linkedWorktrees(path.join(root, 'sub'))).toEqual([worktree]);
+  });
+
+  test('a directory with no .git anywhere above it has no worktrees', () => {
+    expect(linkedWorktrees(path.parse(tmpdir()).root)).toEqual([]);
+  });
+});
+

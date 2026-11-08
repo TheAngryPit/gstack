@@ -36,8 +36,8 @@ ${isShip ? `4. Output before Step 9:
 5. The Scope Check is **INFORMATIONAL**, not a separate blocker; retain it for the PR body and continue to Step 9. It never waives the plan audit's discrepancy gate.
 
 ---` : `4. Keep these notes provisional. Next, execute the plan-completion section;
-   it resolves the HIGH-impact decision and emits the single final Scope Check
-   before Step 2. The Scope Check itself is informational, not another gate.`}`;
+   it resolves the HIGH-impact decision before Step 2; Step 3 emits the single
+   final Scope Check after its full diff read. It is informational, not another gate.`}`;
 }
 
 // ─── Cross-Review Finding Dedup ──────────────────────────────────────
@@ -133,11 +133,12 @@ or missing-reviewer rules.`;
 export function generateSharedCodeReuse(ctx: TemplateContext): string {
   return `**Reuse a skipped shared-code advisory only with complete structural evidence:**
 
-1. **Read the evidence.** Read all supporting callers and the helper destination.
-   Establish first-party authored provenance and whether the current extraction
-   is worthwhile; the checker cannot decide that. Retain \`evidence_paths\`/\`helper_target\`.
+1. **Read the evidence.** Read all supporting callers and the helper target
+   read-only: \`git update-index\`, even \`--really-refresh\`, clears the index flags
+   the checker reads. Establish first-party authored provenance and whether this
+   extraction is worthwhile; the checker cannot. Retain \`evidence_paths\`/\`helper_target\`.
 2. **Run the checker.** From the repository root, pass the current finding as
-   literal JSON on stdin. Replace REVIEW_START with this pass's captured token
+   literal JSON on stdin. Replace REVIEW_START with this pass's token
    and the example paths/symbol with actual evidence. Keep the quoted delimiter.
 
 \`\`\`bash
@@ -146,17 +147,17 @@ export function generateSharedCodeReuse(ctx: TemplateContext): string {
 GSTACK_SHARED_LIBS_REUSE_JSON
 \`\`\`
 
-3. **Act on its result.** Read the JSON. Only \`reusable: true\` permits suppression.
+3. **Act on its result.** Only \`reusable: true\` permits suppression.
    False, command failure or unreadable output requires fresh source review and a
    new decision, never suppression. Do not supply your own snapshot, prior record or coverage.
-4. **Persist through the logger.** The logger recomputes final coverage; never
-   supply proof yourself. Real defects retain normal Fix-First handling independently.
+4. **Persist through the logger.** The logger recomputes coverage; never supply
+   proof. Real defects retain normal Fix-First handling.
 
-**What a reusable result proves (do not reconstruct these checks yourself):**
-- Identity: \`sharedLibsFingerprint\` plus the actual repo, raw branch and current snapshot.
+**What a reusable result proves (never reconstruct these checks):**
+- Identity: \`sharedLibsFingerprint\` plus the repo, raw branch and current snapshot.
   The checker reads REVIEW_START without consuming/replacing it. Sanitized branch names are not identity.
 - Prior decision: completed/converged review, verified binding, explicit Skip and
-  logger-versioned \`snapshot_covered_paths\`; older unversioned coverage needs a fresh decision.
+  logger-versioned \`snapshot_covered_paths\`; unversioned coverage needs a fresh decision.
 - Source: \`canReuseSharedLibsAdvisory\` requires every supporting path's raw file
   byte-for-byte with its blob. Exclude assume-unchanged, skip-worktree and sparse index
   entries; symlinks/ancestors, submodules, ignored/outside or unreadable files;

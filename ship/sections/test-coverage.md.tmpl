@@ -6,7 +6,9 @@ For Steps 7, 8 and 10, use the Agent tool with `run_in_background: false`.
 Omitting the flag runs the subagent in the background. The explicit flag waits
 for a result while keeping a fresh context. Do not invoke the target as a Skill
 or run it inline instead. Inline work is allowed only under that section's
-documented fallback, after a failed subagent has stopped.
+documented fallback, after a failed subagent has stopped. The Step 7 and 8 audits
+cannot block, so they run at `light` effort on the same model family (the host
+default when `gstack-config get review_effort_tiers` prints `off`).
 
 Dispatch the audit through Agent with `subagent_type: "general-purpose"` and
 `run_in_background: false`, using the shared foreground-dispatch rule above.

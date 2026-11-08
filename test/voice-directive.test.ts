@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { generateVoiceDirective } from '../scripts/resolvers/preamble/generate-voice-directive';
 import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
 import { between, expectMentions } from './helpers/prompt-structure';
+import { readSkillStartup } from './helpers/skill-startup';
 
 const ctx: TemplateContext = { skillName: 'review', tmplPath: 'review/SKILL.md.tmpl', host: 'claude', paths: HOST_PATHS.claude };
 const tiers: number[] = [1, 3];
@@ -28,10 +29,10 @@ describe('shared voice directive', () => {
   test('every generated skill with a Voice section carries the reply-language rule', () => {
     const root = join(import.meta.dir, '..');
     const skills = execFileSync('git', ['ls-files', 'SKILL.md', '*/SKILL.md'], { cwd: root, encoding: 'utf8', timeout: 10_000 }).split('\n').filter(Boolean);
-    const voiced = skills.filter(file => readFileSync(join(root, file), 'utf8').includes('\n## Voice\n'));
+    const voiced = skills.filter(file => readSkillStartup(join(root, file)).includes('\n## Voice\n'));
     expect(voiced.length).toBeGreaterThan(40);
     const missing = voiced.filter(file => {
-      const voice = between(readFileSync(join(root, file), 'utf8'), '\n## Voice\n', /\n## /).toLowerCase();
+      const voice = between(readSkillStartup(join(root, file)), '\n## Voice\n', /\n## /).toLowerCase();
       return !(voice.includes('language') && voice.includes('latest message') && voice.includes('verbatim'));
     });
     expect(missing).toEqual([]);

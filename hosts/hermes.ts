@@ -3,14 +3,17 @@ import { defineHost, CROSS_MODEL_RESOLVERS, preambleToolGlossary } from './defin
 const hermes = defineHost({
   name: 'hermes',
   displayName: 'Hermes',
-  tier: 'instruction-only',
+  tier: 'experimental',
   capabilities: { toolExecution: true, questions: 'native', planMode: false, delegation: true, browser: true, safetyHooks: 'advisory' },
 
-  // Hermes indexes skills by frontmatter name, first match wins (#2825).
+  // Hermes indexes skills by frontmatter name, first match wins (#2825). Its
+  // skills index shows 57 chars of a description and "..." (agent/skill_utils.py
+  // SKILL_PROMPT_DESC_LIMIT = 60), so each description leads with when to use it.
   frontmatter: {
     mode: 'allowlist',
     keepFields: ['name', 'description'],
     descriptionLimit: null,
+    descriptionLead: 57,
     nameMatchesDirectory: true,
   },
 
@@ -43,11 +46,11 @@ const hermes = defineHost({
     // If Hermes has GBrain as a mod, brain features activate automatically.
   ],
 
-  // No full install arm — users can hand-copy the instruction-only digest
-  // (setup's explainer arm prints this path; never auto-copied).
+  // ./setup --host hermes (and setup run inside Hermes) registers every skill
+  // through gstack-harness into $HERMES_HOME/skills/gstack (one category).
   install: {
     linkingStrategy: 'symlink-generated',
-    instructionTier: { rulesFile: 'agents-digest/gstack-AGENTS.md' },
+    registration: 'harness',
   },
 
   coAuthorTrailer: 'Co-Authored-By: Hermes Agent <agent@nousresearch.com>',

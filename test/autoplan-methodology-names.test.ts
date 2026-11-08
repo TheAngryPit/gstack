@@ -27,8 +27,9 @@ function fixture(phase: string, layout: string) {
   mkdirSync(target);
   cpSync(join(source, 'SKILL.md'), join(target, 'SKILL.md'));
   // C4: Codex carves plan-ceo-review too, so an install that has sections/ copies it.
-  const carved = existsSync(join(source, 'sections'));
-  if (carved) cpSync(join(source, 'sections'), join(target, 'sections'), { recursive: true });
+  // Every tier 2+ skill ships sections/preamble.md; carving is the review section.
+  const carved = existsSync(join(source, 'sections', 'review-sections.md'));
+  if (existsSync(join(source, 'sections'))) cpSync(join(source, 'sections'), join(target, 'sections'), { recursive: true });
   if (layout === 'patchedClaude') {
     const result = spawnSync('bash', [join(ROOT, 'bin/gstack-patch-names'), dir, 'true'], { encoding: 'utf8', timeout: 10_000 });
     expect(result.status, result.stderr).toBe(0);

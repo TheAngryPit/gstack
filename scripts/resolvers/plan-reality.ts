@@ -59,6 +59,6 @@ in an unattended run, never a warning; interactive runs follow the repair rule a
 rows (tier 1 always, never \`n/a\`: ${TIER1_ROW_IDS.join(', ')}; tier 2 by detected scope, \`--scope <csv>\`).
 Every row cites a file:line receipt (with no linked issue, deferred-asks is \`pass\`); the premise table counts \`unverified=<n>\`. End with
 one line per row, \`${REALITY_LINE_SHAPE}\`, then run
-\`${BIN} check --phase ${phase} <review-file|->\`: a missing row is \`incomplete\`
+\`${BIN} check --phase ${phase} <review-file|->\` (prints \`PLAN_REALITY\`): a missing row is \`incomplete\`
 unattended; interactive runs repair twice, then warn at the gate.`;
 }

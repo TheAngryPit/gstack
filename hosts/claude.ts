@@ -17,8 +17,11 @@ const claude = defineHost({
     // allowed-tools/hooks; bin/gstack-brain-context-load reads gbrain: — which
     // is why gbrain and hooks are NOT stripped). Stripping them trims the
     // always-on frontmatter catalog every session loads.
-    stripFields: ['sensitive', 'voice-triggers', 'interactive', 'benefits-from'],
+    stripFields: ['sensitive', 'manual_only', 'voice-triggers', 'interactive', 'benefits-from', 'codex_default_prompt'],
     descriptionLimit: null,
+    conditionalFields: [
+      { if: { manual_only: true }, add: { 'disable-model-invocation': true } },
+    ],
   },
 
   generation: {
@@ -35,6 +38,11 @@ const claude = defineHost({
 
   coAuthorTrailer: 'Co-Authored-By: Claude <noreply@anthropic.com>',
   learningsMode: 'full',
+
+  transcripts: {
+    root: '~/.claude/projects/<slug>/*.jsonl',
+    layout: 'one folder per workspace; <slug> is the workspace path with every character that is not a letter or digit turned into "-"',
+  },
 });
 
 export default claude;

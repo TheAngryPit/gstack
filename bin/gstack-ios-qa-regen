@@ -3,6 +3,7 @@
 # package and the app-owned typed state accessors.
 
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 usage() {
   cat <<'EOF'
@@ -144,7 +145,7 @@ do
   fi
 done
 
-bun run "$GENERATOR" --input "$APP_SOURCE" --output "$GENERATED_DIR"
+bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" run "$GENERATOR" --input "$APP_SOURCE" --output "$GENERATED_DIR"
 
 # Stamp only after successful accessor generation. ios-sync uses this marker
 # to distinguish a complete current install from an interrupted regeneration.

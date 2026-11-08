@@ -69,6 +69,13 @@ export const PR_PROFILE_FILES: Record<string, readonly string[]> = {
 };
 
 const ROOT = path.resolve(import.meta.dir, '..');
+/** gstack's own changelog_fragments.dir (.gstack/ship-policy.json): release notes the merge step folds into CHANGELOG.md, read by no paid case (GST-400). */
+const CHANGELOG_FRAGMENTS_DIR = ((): string | null => {
+  try {
+    const dir = JSON.parse(fs.readFileSync(path.join(ROOT, '.gstack', 'ship-policy.json'), 'utf8'))?.changelog_fragments?.dir;
+    return typeof dir === 'string' && dir.trim() ? dir.replace(/^(\.\/)+/, '').replace(/\/+$/, '') : null;
+  } catch { return null; }
+})();
 
 /** The one paid test file whose source registers a case (its touchfiles name exactly one), else null. */
 export function caseOwnerFile(id: string, maps: Pick<PrProfileMaps, 'e2eTouchfiles'> = PR_PROFILE_MAPS): string | null {
@@ -153,6 +160,8 @@ export interface PrProfileSelection {
   directCases: string[];
   /** Unmapped changed files placed by derived references (scripts/pr-dependencies.ts), with their consumer counts. */
   derivedFiles: Array<{ file: string; e2e: number; judges: number }>;
+  /** Narrow screens: derived files whose closure reaches every gate case, left to the train gate's full census. */
+  hubFiles?: string[];
   /** Unmapped changed files under derivable directories that no paid case's reference closure reaches. */
   noConsumerFiles: string[];
   deferredPromptFiles: string[];
@@ -228,12 +237,17 @@ export const PAID_WORKFLOW_FILES = [
 export const FREE_ONLY_PR_FILES = [
   'scripts/test-free-shards.ts',
   'scripts/lib/free-home-guard.ts', // Imported only by the free shard runner.
+  'scripts/lib/shard-jobs.ts', // Free runner's --ci-run --jobs sub-shards; ship-measure loads it through test-free-shards.ts, so its touchfiles list it.
   'test/helpers/auq-parallel-worker.ts',
   'test/helpers/stored-zip.ts', // Read only by the free test-health report tests.
   'scripts/free-test-durations.json',
+  'scripts/free-test-seed-allowlist.json', // Read only by the free seed ratchet (test/free-seed-ratchet.test.ts).
   'scripts/paid-test-durations.json',
   'scripts/ubicloud/**',
+  'qm/**', // The QM edition (scripts/gen-qm-edition.ts): shipped to QM as a deployment layer, read by no paid case; free test/qm-edition.test.ts covers it (GST-1492).
   'capy/skill/**', // The vendored Capy skill (Drive bootstrapper): run by Capy agents, read by no paid case; test/capy-skill-wrapper.test.ts covers it.
+  'USING_GBRAIN_WITH_GSTACK.md', // The /setup-gbrain guide: README, docs/gbrain-quick-tour.md and free tests read it; no skill prompt or paid fixture does (GST-1027).
+  'captain/templates/**', // The /captain crew templates (CREW.md, merge-ask.md, slot-call.md, …): copied into a Captain's drive by people and Captains, read by no paid case; free test/captain-skill.test.ts covers them (#3499).
   'tsconfig.test.json', // Read only by `tsc -p tsconfig.test.json` (typecheck:test); Bun's runtime reads tsconfig.json.
   '.gitignore', // Changes which untracked files git reports, never tracked content a case reads.
   '.gstack/generated.json', // gstack's own regen registry: gstack-regen/gstack-pregate read it from origin/<base> of the repo they run in; paid cases run in fixture repos.
@@ -247,6 +261,7 @@ export const FREE_ONLY_PR_FILES = [
   '.github/ISSUE_TEMPLATE/**', // Issue templates: read by GitHub and free test/gstack-doctor.test.ts.
   'scripts/retired-command.ts', // One-release stubs for retired package scripts; no paid case imports it.
   'careful/bin/check-careful.sh', // /careful PreToolUse hook: covered by test/hook-scripts.test.ts; no paid fixture copies or runs it.
+  'careful/bin/mask-commit-message.awk', // Loaded only by check-careful.sh (above): covered by test/hook-scripts.test.ts.
   // Reporting and launch tools: they read CI history or start a lane, never run inside a paid case.
   'scripts/test-health-report.ts',
   'scripts/bump-harness-version.ts',
@@ -275,13 +290,27 @@ export const FREE_ONLY_PR_FILES = [
   '.github/workflows/skill-docs.yml',
   '.github/workflows/test-health.yml',
   '.github/workflows/eval-sweep.yml', // The weekly off-ship sweep on main; no PR-gate case reads it, and it never gates a PR.
+  '.github/workflows/evals-main-backstop.yml', // The merge-train backstop on main: it dispatches evals.yml after a push to main; no PR-gate case reads it, and it never gates a PR.
+  '.github/workflows/release-gate.yml', // The 8-hour release gate on main: it dispatches evals.yml on main's head; no PR-gate case reads it, and it never gates a PR.
+  '.github/workflows/weekly-release.yml', // The Monday release cut (tag, stable, GitHub Release): reads check runs on main; no paid case reads it, and it never gates a PR.
+  'scripts/release-cut.ts', // The release cut's logic, run only by weekly-release.yml; covered by the free test/release-cut.test.ts.
   '.github/actionlint.yaml', // Runner labels for actionlint only.
   'scripts/ship-measure-sweep.ts', // The weekly sweep CLI; it launches paid cases, never runs inside one.
   '.github/workflows/version-gate.yml',
   '.github/workflows/windows-free-tests.yml',
   '.github/workflows/windows-pregate-e2e.yml',
+  '.github/workflows/windows-scoped-tests.yml',
   '.github/workflows/windows-setup-e2e.yml',
+  '.github/workflows/windows-smoke.yml',
 ] as const;
+
+/**
+ * Release metadata no paid case reads: the third-party notices and licence
+ * texts, and the root LICENSE. A courtesy entry or a licence line never
+ * widens the PR gate (#3499); CHANGELOG.md and VERSION, which the train stamp
+ * rewrites on every slot, are already exempt in knownNonBehaviorFile.
+ */
+export const RELEASE_METADATA_FILES = ['NOTICE.md', 'LICENSE', 'licenses/**'] as const;
 
 /**
  * Inputs every paid case consumes that must always restore the full gate
@@ -301,6 +330,13 @@ export const PR_FULL_GATE_FILES = [
   'test/helpers/periodic-exclude-data.ts',
 ] as const;
 
+/**
+ * Full-gate inputs a narrow screen derives like any other file. No paid run executes ./setup (evals.yml only
+ * builds) and scripts/pr-dependencies.ts maps it to the cases that invoke it; pull_request runs, broad screens
+ * and --profile full still restore the full gate for it, and the train gate's full census runs every case.
+ */
+export const NARROW_DERIVED_FULL_GATE_FILES = ['setup'] as const;
+
 /** Periodic- and marathon-lane workflows: the PR gate never runs a case under them; their branch dispatch validates them. */
 export const PERIODIC_ONLY_PR_FILES = ['.github/workflows/evals-periodic.yml', '.github/workflows/evals-marathon.yml'] as const;
 
@@ -315,6 +351,8 @@ export function knownNonBehaviorFile(file: string): boolean {
     // by free doc/generation checks and are not copied into paid fixtures.
     || ['AGENTS.md', 'CLAUDE.md', 'agents-digest/gstack-AGENTS.md'].includes(file)
     || FREE_ONLY_PR_FILES.some(pattern => matchGlob(file, pattern))
+    || RELEASE_METADATA_FILES.some(pattern => matchGlob(file, pattern))
+    || (CHANGELOG_FRAGMENTS_DIR !== null && path.posix.dirname(file) === CHANGELOG_FRAGMENTS_DIR && file.endsWith('.md'))
     || (PERIODIC_ONLY_PR_FILES as readonly string[]).includes(file)
     || (file.startsWith('test/fixtures/') && Object.keys(FREE_FIXTURES).some(pattern => matchGlob(file, pattern)))
     // Free test files anywhere (test/, browse/test/, design/test/, make-pdf/test/): no paid case runs or reads a free test.
@@ -376,6 +414,11 @@ export function selectPrProfile(options: {
   derived?: DerivedDependencies | null;
   /** Exercised-path consumers for the shadow block; default: the checkout's committed map for the real maps, none for fixture maps. */
   exercised?: ExercisedConsumers | null;
+  /**
+   * narrow (screens and eval:bg:pr): a derived file whose closure reaches every gate case selects nothing by itself; those
+   * cases run in the train gate's full census. broad (the default here, and `ready --screen --broad`): every dependent runs.
+   */
+  screenPolicy?: 'narrow' | 'broad';
 }): PrProfileSelection {
   const maps = options.maps ?? PR_PROFILE_MAPS;
   const profile = options.profile ?? PR_PROFILE_CASE_IDS;
@@ -424,9 +467,14 @@ export function selectPrProfile(options: {
     consumers.clear(); derivedGlobal.length = 0; noConsumerFiles.length = 0;
     for (const file of unmapped) deletedLabels.set(file, { label: 'import scan failed', fix: `scripts/pr-dependencies.ts could not scan the imports of ${scanFailed.slice(0, 3).join(', ')}${scanFailed.length > 3 ? ` and ${scanFailed.length - 3} more` : ''}; fix the parse error so ${file}'s consumers can be derived` });
   }
-  const derivedFiles = [...consumers.keys()];
+  const gateIds = Object.keys(maps.e2eTouchfiles).filter(id => maps.tiers[id] === 'gate');
+  const hubFiles = options.screenPolicy === 'narrow' && gateIds.length > 0
+    ? [...consumers.keys()].filter(file => derived?.tracked.has(file) && gateIds.every(id => consumers.get(file)!.e2e.has(id))) : [];
+  const derivedFiles = [...consumers.keys()].filter(file => !hubFiles.includes(file));
   const unknownFiles = unmapped.filter(file => !derivedGlobal.includes(file) && !consumers.has(file) && !noConsumerFiles.includes(file));
-  const sharedInputs = files.filter(file => depends(file, PR_FULL_GATE_FILES));
+  const fullGateFiles = options.screenPolicy === 'narrow'
+    ? PR_FULL_GATE_FILES.filter(file => !(NARROW_DERIVED_FULL_GATE_FILES as readonly string[]).includes(file)) : PR_FULL_GATE_FILES;
+  const sharedInputs = files.filter(file => depends(file, fullGateFiles));
   const fallback = unknownFiles.length > 0 || sharedInputs.length > 0;
   const dependentsMode = !fallback && derivedFiles.length > 0;
   const derivedE2E = derivedFiles.flatMap(file => [...consumers.get(file)!.e2e]);
@@ -464,6 +512,7 @@ export function selectPrProfile(options: {
   const reasons: string[] = [];
   if (unknownFiles.length) reasons.push(`Unknown dependencies restore every gate case and judge: ${unknownFiles.map(file => `${file} (${(deletedLabels.get(file) ?? unknownFileLabel(file)).label})`).join(', ')}`);
   if (sharedInputs.length) reasons.push(`Shared runtime/build inputs restore every gate case and judge: ${sharedInputs.join(', ')}`);
+  if (hubFiles.length && !fallback && !everything) reasons.push(`Narrow screen: derived references reach every gate case only through the static closure, so these files select no case here and the train gate's full census runs them: ${hubFiles.join(', ')} (EVALS_SCREEN_POLICY=broad restores them)`);
   if (dependentsMode) reasons.push(`Derived references select every dependent gate case: ${derivedFiles.map(file => `${file} (${consumers.get(file)!.e2e.size} cases)`).join(', ')}`);
   else if (!fallback) reasons.push('Changed-input selection intersected with the fast PR profile; selected judges retained');
   if (files.includes(EXERCISED_MAP_PATH)) reasons.push(`${EXERCISED_MAP_PATH} is shadow-only data (it changes no selection yet), so it selects no paid case (${EXERCISED_MAP_ANCHOR})`);
@@ -479,7 +528,7 @@ export function selectPrProfile(options: {
   return {
     mode: fallback ? 'full-fallback' : dependentsMode ? 'dependents' : 'pr', e2e, judges, deferred,
     unknownFiles, unknownFileLabels: unknownFiles.map(file => ({ file, ...(deletedLabels.get(file) ?? unknownFileLabel(file)) })), directCases,
-    derivedFiles: derivedFiles.map(file => ({ file, e2e: consumers.get(file)!.e2e.size, judges: consumers.get(file)!.judges.size })), noConsumerFiles,
+    derivedFiles: derivedFiles.map(file => ({ file, e2e: consumers.get(file)!.e2e.size, judges: consumers.get(file)!.judges.size })), hubFiles, noConsumerFiles,
     deferredPromptFiles, missingCoverage, needsFullValidation: missingCoverage.length > 0, reasons, ...(shadow ? { shadow } : {}),
   };
 }
@@ -539,7 +588,7 @@ function shadowSelection(options: Parameters<typeof selectPrProfile>[0] & { maps
 export interface CoverageSummaryInput {
   profile?: string;
   selection?: { e2e: string[] | null; judges: string[] | null };
-  prCoverage?: Pick<PrProfileSelection, 'mode' | 'deferred' | 'unknownFiles'> & Partial<Pick<PrProfileSelection, 'unknownFileLabels' | 'derivedFiles' | 'noConsumerFiles' | 'shadow'>>;
+  prCoverage?: Pick<PrProfileSelection, 'mode' | 'deferred' | 'unknownFiles'> & Partial<Pick<PrProfileSelection, 'unknownFileLabels' | 'derivedFiles' | 'hubFiles' | 'noConsumerFiles' | 'shadow'>>;
 }
 
 /**
@@ -560,6 +609,7 @@ export function formatPrCoverageSummary(manifest: CoverageSummaryInput, totals?:
     lines.push(`- Derived dependents (scripts/pr-dependencies.ts) of ${coverage.derivedFiles.length} unmapped file(s):`);
     for (const item of coverage.derivedFiles.slice(0, 40)) lines.push(`  - \`${item.file}\`: ${item.e2e} case(s), ${item.judges} judge(s)`);
   }
+  if (coverage?.hubFiles?.length) lines.push(`- Left to the train gate's full census (narrow screen): ${coverage.hubFiles.slice(0, 40).map(file => `\`${file}\``).join(', ')}`);
   const shadow = coverage?.shadow;
   if (shadow) lines.push(shadow.error ? `- Shadow exercised-path map: unavailable (${shadow.error}); selection unaffected`
     : `- Shadow exercised-path map (not active): would select ${shadow.e2e.length} gate case(s), dropping ${shadow.wouldDrop.length} and adding ${shadow.wouldAdd.length}; predicted saving $${shadow.predictedSavingUsd.toFixed(2)}${shadow.unpricedCases ? ` (${shadow.unpricedCases} unpriced)` : ''}, a lower bound: known cost excludes the ${Math.round(100 * (shadow.unknownCostShare ?? 0))}% of observed case runs with unknown cost (PTY) (${EXERCISED_MAP_ANCHOR})`);

@@ -178,7 +178,6 @@ function openaiLifecycle(text: string): ParsedSource {
   if (!upcoming || !modelTables.length) throw new Error('missing-deprecation-tables');
   const lifecycle = modelTables.flatMap(table => table.slice(1).flatMap(row => {
     if (/^(?:Videos API|Assistants API|OpenAI-Beta: |New fine-tuning training on )/.test(row[1]) || row[1].startsWith('`/')) return [];
-    if (!row[1].startsWith('`')) throw new Error('unrecognized-deprecated-model-cell');
     const floor = row[0].startsWith('at earliest ');
     const date = lifecycleDate(row[0].replace(/^at earliest /, ''));
     if (!date) throw new Error('missing-shutdown-date');

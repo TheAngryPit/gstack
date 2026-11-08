@@ -1,9 +1,10 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * gstack-ship-queue — the shared merge queue, one subcommand per protocol
  * step (field list 2, W1; docs/ship-policy.md#run-a-shared-merge-queue).
  *
  *   gstack-ship-queue ready --pr <n> [--pregate <pregate.json>] [--gate-exit <rc> --gate-log <file>]
+ *                           (refused with QUEUE_RECEIPT_MISSING|STALE unless the PR body carries /ship's receipt for HEAD)
  *   gstack-ship-queue stamp --pr <n> --version <X> --expect-gated <sha> --expect-base <sha>
  *                           [--expect-order <pr,...>] [--allow-repo-commands] [--gate-exit <rc> --gate-log <file>]
  *   gstack-ship-queue verify --pr <n> (--gated <sha> | --record <gate-ahead.json>) [--receipt <sha256>]
@@ -11,11 +12,19 @@
  *   gstack-ship-queue gate-ahead --after <pr> --pr <n> [--predecessor-ref <ref>] [--allow-repo-commands]
  *   gstack-ship-queue gate-ahead --record --pr <n> --attempt <id> --exit <rc> --log <file>
  *   gstack-ship-queue gate-ahead --list --pr <n>
- *   gstack-ship-queue train build|status|verdict|bisect|rebuild|prune ...   (merge trains; train --help)
+ *   gstack-ship-queue verify --pr <n> --screen                  (train policy: the head's screen verdict from its run)
+ *   gstack-ship-queue verify --post-merge <sha> [--timeout <s>] (after a merge: main's push workflows at that commit until they settle)
+ *   gstack-ship-queue land --pr <n> --pin <sha> [--repair] [--dry-run] [--allow-repo-commands] [--break-lock]   (merge: direct; lib/ship-queue-land-direct.ts)
+ *   gstack-ship-queue land --pr <n> [--dry-run] [--no-wait] [--break-lock [--break-train-lock]]   (the merge step; lib/ship-queue-land.ts)
+ *   gstack-ship-queue land --pr <n> --repair                    (after QUEUE_LAND_DRIFT: open the outside merge's release PR)
+ *   gstack-ship-queue land --census
+ *   gstack-ship-queue train build|status|verdict|bisect|rebuild|watch|prune ...   (merge trains; train --help)
+ *   gstack-ship-queue wave plan|build|status|settle ...   (wave PRs: 3-6 same-area PRs in one train slot; wave --help)
  *
- * Every subcommand takes --base <branch> (default origin/HEAD, else main) and
+ * Every subcommand takes --base <branch> (default lib/default-base.ts) and
  * ends with GSTACK_RESULT: skill=ship-queue status=complete|refused run=<path>.
- * gstack-restamp stays the primitive. Nothing here pushes, except under a
+ * gstack-restamp stays the primitive. Nothing here pushes, except land, ready
+ * under changelog_fragments (its READY receipt note), and under a
  * ship policy with a `train` block: merge trains push train/<nonce> branches
  * and the refs/notes/gstack-trains records, and dispatch through eval-bg.
  * Logic: lib/ship-queue.ts, lib/ship-queue-gate.ts, lib/ship-queue-train*.ts
@@ -29,11 +38,15 @@ import { RESULT_CODES } from '../lib/result-codes';
 import { resolveBaseBranch } from '../lib/ship-policy';
 import { loadBasePolicy, ready, stamp, verify, type QueueContext, type StepOutput } from '../lib/ship-queue';
 import { attemptFile, listAttempts, prepareGateAhead, recordGateAhead, type QueueFailure } from '../lib/ship-queue-gate';
+import { logShipCall } from '../lib/ship-call-log';
+
+logShipCall('gstack-ship-queue');
 
 const HELP = `gstack-ship-queue — the shared merge queue's protocol steps (docs/ship-policy.md#run-a-shared-merge-queue)
 
   ready --pr <n> [--pregate <file>] [--gate-exit <rc> --gate-log <file>]
-                                           READY #<n> <head> STAMP_VERSION=<X|unstamped>, CI at that head, PREGATE, gate state
+                                           READY #<n> <head> STAMP_VERSION=<X|unstamped>, CI at that head, PREGATE, gate state,
+                                           SHIP_RECEIPT (refused unless the PR body carries /ship's receipt for that head)
   stamp --pr <n> --version <X> --expect-gated <sha> --expect-base <sha> [--expect-order <pr,...>] [--allow-repo-commands]
         [--gate-exit <rc> --gate-log <file>]
                                            restamp, commit and prove: QUEUE_STAMP: <pr> <X> head= gated= tree= receipt=
@@ -45,11 +58,29 @@ const HELP = `gstack-ship-queue — the shared merge queue's protocol steps (doc
   gate-ahead --record --pr <n> --attempt <id> --exit <rc> --log <file>
                                            bind the gate result to that attempt's gated tree; removes its worktree
   gate-ahead --list --pr <n>               attempts for a PR, newest last (the current one)
-  train build|status|verdict|bisect|rebuild|prune ...
+  verify --pr <n> --screen                 (train policy) the PR head's screen verdict read from its run (SCREEN_VERDICT)
+  verify --post-merge <sha> [--timeout <s>] wait for every check run at a merged commit to settle: POST_MERGE: green|red|pending
+                                           and one CHECK: line per workflow; resumable, default timeout 2700 s
+  land --pr <n> --pin <sha> [--repair] [--dry-run] [--allow-repo-commands] [--break-lock]
+                                           merge: direct: merge the PR at its own green head (receipt and READY at the pin, no stamp
+                                           files, checks green, mergeable clean), verify the tree, write a land note; a stale base
+                                           runs land.merged_checks, repo commands, only with --allow-repo-commands (never --dry-run);
+                                           it holds the land lock from the re-fetch to the merge (--break-lock: a stale one);
+                                           --repair: while frozen, land the one repair PR the freeze admits (recorded under the lock)
+  land --pr <n> [--dry-run] [--no-wait] [--timeout <min>] [--break-lock [--break-train-lock]] [--allow-repo-commands]
+                                           the merge step: lock, merge the base, stamp (fragments folded), push the stamp commit,
+                                           wait for its checks, squash with --match-head-commit, confirm the base tree; resumable
+  land --pr <n> --repair                   after QUEUE_LAND_DRIFT: open the PR that gives the merge outside land its own
+                                           release; /ship and land it, which releases the lock
+  land --census                            what land would do with every open PR (read-only)
+  train build|status|verdict|bisect|rebuild|watch|prune ...
                                            merge trains, when the base policy declares a train block (train --help;
                                            docs/ship-policy.md#run-a-merge-train); ready then takes --screen|--no-screen
+  wave plan|build|status|settle ...        wave PRs under a train policy: 3-6 same-area PRs in one slot and one version
+                                           (wave --help; docs/ship-policy.md#wave-prs)
 
---base <branch>: base branch (default: origin/HEAD, else main). Nothing here pushes.
+--base <branch>: base branch (default: origin/HEAD unless it names the checked-out branch, else the PR's base, origin/main). Nothing here pushes, except land (the stamp commit and the
+refs/notes/gstack-land lock), ready under changelog_fragments (its READY receipt note) and merge trains.
 ${exitTableHelp()}`;
 
 function flag(args: string[], name: string): string | undefined {
@@ -65,7 +96,7 @@ function finish(cmd: string, out: StepOutput): number {
   }
   process.stdout.write(formatResult('ship-queue', out.ok ? 'complete' : 'refused', out.run) + '\n');
   if (out.ok) return EXIT.ok;
-  return out.failure && ['QUEUE_VERIFY_MISMATCH', 'QUEUE_STAMP_NOT_STAMP_ONLY'].includes(out.failure.code) ? EXIT.fail : EXIT.refused;
+  return out.failure && ['QUEUE_VERIFY_MISMATCH', 'QUEUE_STAMP_NOT_STAMP_ONLY', 'QUEUE_LAND_UNVERIFIED'].includes(out.failure.code) ? EXIT.fail : EXIT.refused;
 }
 
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -142,7 +173,23 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === 'train') {
     const train = await import('../lib/ship-queue-train-cli');
     if (!args[0] || args[0].startsWith('-')) { process.stdout.write(train.TRAIN_HELP + '\n'); return args.includes('--help') || args.includes('-h') ? EXIT.ok : EXIT.usage; }
+    const loaded = args[0] === 'build' || args[0] === 'land' ? loadBasePolicy(ctx) : null;
+    if (loaded && !('message' in loaded) && loaded.policy.merge === 'direct') return finish(`train ${args[0]}`, { ok: false, lines: [], run: 'none', failure: { code: 'QUEUE_NOT_READY', message: 'the base policy sets merge: direct, so trains are off', fix: 'land each READY PR with gstack-ship-queue land --pr <n> --pin <sha> (docs/ship-policy.md#land-direct)' } });
     return train.trainMain(ctx, args);
+  }
+  if (cmd === 'wave') return (await import('../lib/ship-queue-wave')).waveMain(ctx, args);
+  if (cmd === 'verify' && flag(args, '--post-merge') !== undefined) return (await import('../lib/ship-queue-train-cli')).postMergeMain(ctx, args);
+  if (cmd === 'land') {
+    const l = await import('../lib/ship-queue-land');
+    if (args.includes('--census')) return finish('land', l.census(ctx));
+    if (!pr || !/^\d+$/.test(pr)) return usage('land needs --pr <number> (or --census)');
+    if (args.includes('--pin')) {
+      const pin = flag(args, '--pin') ?? '';
+      if (!/^[0-9a-f]{40,64}$/.test(pin)) return usage('--pin needs the full head sha the READY names');
+      return finish('land', (await import('../lib/ship-queue-land-direct')).landDirect(ctx, { pr, pin, dryRun: args.includes('--dry-run'), allowRepoCommands: args.includes('--allow-repo-commands'), breakLock: args.includes('--break-lock'), repair: args.includes('--repair') }));
+    }
+    const timeout = flag(args, '--timeout');
+    return finish('land', l.land(ctx, { pr, repair: args.includes('--repair'), dryRun: args.includes('--dry-run'), noWait: args.includes('--no-wait'), breakLock: args.includes('--break-lock'), breakTrainLock: args.includes('--break-train-lock'), allowRepoCommands: args.includes('--allow-repo-commands'), waitTimeoutMin: timeout && /^\d+$/.test(timeout) ? Number(timeout) : undefined }));
   }
   if (!pr || !/^\d+$/.test(pr)) return usage(`${cmd} needs --pr <number>`);
   const gateExit = flag(args, '--gate-exit');
@@ -166,7 +213,7 @@ async function main(argv: string[]): Promise<number> {
     }));
   }
   if (cmd === 'verify') {
-    if (flag(args, '--train')) return (await import('../lib/ship-queue-train-cli')).verifyMain(ctx, args, pr);
+    if (flag(args, '--train') || args.includes('--screen')) return (await import('../lib/ship-queue-train-cli')).verifyMain(ctx, args, pr);
     const record = flag(args, '--record');
     return finish('verify', verify(ctx, {
       pr, gated: flag(args, '--gated'), record: record ? path.resolve(record) : undefined, receipt: flag(args, '--receipt'),

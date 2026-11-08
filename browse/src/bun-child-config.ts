@@ -33,3 +33,41 @@ export function emptyBunConfig(platform: NodeJS.Platform = process.platform): st
   emptyConfig = file;
   return file;
 }
+
+export interface BunExeLookup {
+  env?: NodeJS.ProcessEnv;
+  execPath?: string;
+  isBun?: boolean;
+  isFile?: (p: string) => boolean;
+}
+
+/**
+ * The bun.exe a Windows parent spawns its bun children with, or null when
+ * none is installed: the running bun.exe itself, then BUN_INSTALL\bin, each
+ * absolute PATH entry (plus, beside npm's bun.cmd shim, the bun.exe it
+ * forwards to), then USERPROFILE\.bun\bin. The terminal agent and the native
+ * cookie-import worker (cookie-import-native.ts) both resolve through it; it
+ * lives here because this file is part of the native import's source-bound
+ * qualification (NATIVE_CODE_INPUTS), and terminal-agent-control.ts is not.
+ */
+export function findWindowsBunExe(opts: BunExeLookup = {}): string | null {
+  const win = path.win32;
+  const env = opts.env ?? process.env;
+  const execPath = opts.execPath ?? process.execPath;
+  const isBun = opts.isBun ?? !!process.versions.bun;
+  const isFile = opts.isFile ?? ((p: string) => { try { return fs.statSync(p).isFile(); } catch { return false; } });
+  // A compiled browse.exe also reports versions.bun, so check the name too.
+  if (isBun && /^bun\.exe$/i.test(win.basename(execPath))) return execPath;
+  const dirs = (env.PATH || env.Path || '').split(';').filter(d => d && win.isAbsolute(d));
+  const candidates = [
+    ...(env.BUN_INSTALL ? [win.join(env.BUN_INSTALL, 'bin', 'bun.exe')] : []),
+    ...dirs.flatMap(d => [
+      win.join(d, 'bun.exe'),
+      // npm global install: PATH holds only the bun.cmd shim; the real
+      // binary it forwards to lives under node_modules.
+      ...(isFile(win.join(d, 'bun.cmd')) ? [win.join(d, 'node_modules', 'bun', 'bin', 'bun.exe')] : []),
+    ]),
+    ...(env.USERPROFILE ? [win.join(env.USERPROFILE, '.bun', 'bin', 'bun.exe')] : []),
+  ];
+  return candidates.find(isFile) ?? null;
+}

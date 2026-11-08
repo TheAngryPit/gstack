@@ -1,0 +1,78 @@
+---
+name: write-skill
+preamble-tier: 2
+version: 0.1.0
+description: |
+  Write a new agent skill or improve one without bloat: the edit ladder,
+  levels, drift and size checks, full diets. Use when asked to "write a skill",
+  "improve this skill", "add this lesson to the <name> skill" or "put this
+  skill on a diet". (gstack)
+codex_default_prompt: "Use $gstack-write-skill to change this skill the lean way: fix the tool first, edit the line that already covers the idea, and record the size before and after."
+triggers:
+  - write a skill
+  - improve this skill
+  - add this lesson to the skill
+  - put this skill on a diet
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
+  - Grep
+  - Glob
+  - AskUserQuestion
+---
+
+{{PREAMBLE}}
+
+# /write-skill: write and improve skills, lean
+
+## 1. Find the skill
+
+Run `~/.claude/skills/gstack/bin/gstack-skill-bill <name|folder>`. It prints the skill's kind,
+its size per level and its `EVIDENCE:` row. A new skill: make the folder first (in a gstack checkout, follow CONTRIBUTING.md
+"Adding a new skill"), then write every line by sections 2 and 3.
+- `user`: edit it in place.
+- `gstack-install`: never edit; gstack-upgrade overwrites it. Edit `<skill>/SKILL.md.tmpl` in a gstack checkout, or
+  copy the skill to a folder the user owns.
+- `gstack-checkout`: edit `SKILL.md.tmpl`, never `SKILL.md`, then `bun run gen:skill-docs`.
+
+## 2. Levels
+
+Put each fact on the lowest level that still reaches the agent before it needs it.
+
+| Level | Holds | Loaded |
+|---|---|---|
+| description | one trigger per case | every session |
+| SKILL.md | what every task needs | every use |
+| `references/` | what some tasks need, behind a line saying when to read it | that case |
+| the tool's `--help` | flags, values, examples | when the agent picks the command |
+| the tool's replies, errors, tests | the right name, the fix, the next step | when a guess is wrong |
+
+## 3. Edit ladder
+
+Stop at the first step that handles the change.
+1. **Fix it below the skill.** A clearer error, a flag, a check or a test in the tool. Prose is for judgment calls.
+2. **Earn its place.** Add a skill, step, instruction, check or default only with evidence it helps frontier models
+   or a dated plan to measure it (skill-evals `tasks.json` or an /eval-plan prereg). If a fresh session does it right
+   without the line, add nothing.
+3. **Edit, don't append.** Change the line that already covers the idea; each meaning lives in one place.
+4. **Pick its level** (section 2).
+5. **Rule, not story.** One positive rule under a short name; the incident goes in the commit message.
+
+Keep two or three safety lines inline for each risky area: writes, data leaving the machine, paid spend.
+When code changes a name or flag a skill teaches, update the skill in the same change.
+
+## 4. Check and record
+
+- Run `~/.claude/skills/gstack/bin/gstack-skill-bill` before and after, and put `Skill-Size: <before>→<after> bytes (<file>)` in the commit
+  message. DUE means it grew over 10% since its last `Skill-Diet:` commit: diet it instead of adding.
+- Add `Evidence: <run id, results file or commit>`, `Evidence: plan <tasks.json or prereg> measure_by <date>` or
+  `Evidence: safety: <reason>`. A new gstack skill adds its `docs/inventory/evidence.json` row (`gstack-inventory --check`).
+- In a gstack checkout: `bun test test/skill-bin-drift.test.ts test/parity-suite.test.ts` and the budgets in
+  CONTRIBUTING.md. A red context-budget ratchet means diet, not a higher ceiling.
+- Rerun the case that prompted the change in a fresh session.
+
+## Look up the rest
+
+- Full diet of a large, bloated or drifted skill → read `references/diet.md` in this skill's folder.

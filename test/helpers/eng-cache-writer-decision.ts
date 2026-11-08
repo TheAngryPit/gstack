@@ -6,7 +6,7 @@ export function engCacheWriterDecision(q: NativePlanQuestion): boolean {
   const lines = q.question.split('\n');
   // Severity, confidence and source citations annotate an owned issue; they
   // never replace its current defect, assessment or opposed choices.
-  const annotated = /^D([1-9]\d*) [—–:-] Issue ([1-9]\d*) \[P[0-3]\] \(confidence (?:10|[1-9])\/10\) [A-Za-z][\w./-]*:[1-9]\d*(?:-[1-9]\d*)?(?: \+ :[1-9]\d*(?:-[1-9]\d*)?)? [—–:-] ([A-Za-z_$][\w$]*) and ([A-Za-z_$][\w$]*) both mutate one module-level ([A-Za-z_$][\w$]*) that does not serialize mutations\. How should the shared cache be wired\?$/.exec(lines[0] ?? '');
+  const annotated = /^D([1-9]\d*) [—–:-] Issue ([1-9]\d*) \[(?:P[0-3]|CRITICAL|INFORMATIONAL)\] \(confidence (?:10|[1-9])\/10\) [A-Za-z][\w./-]*:[1-9]\d*(?:-[1-9]\d*)?(?: \+ :[1-9]\d*(?:-[1-9]\d*)?)? [—–:-] ([A-Za-z_$][\w$]*) and ([A-Za-z_$][\w$]*) both mutate one module-level ([A-Za-z_$][\w$]*) that does not serialize mutations\. How should the shared cache be wired\?$/.exec(lines[0] ?? '');
   const architecture = /^D([1-9]\d*) [—–:-] Architecture issue ([1-9]\d*): global mutable ([A-Za-z_$][\w$]*) shared by two services with unserialized mutations\.?$/.exec(lines[0] ?? '');
   const declared = annotated || architecture;
   const ordinal = declared?.[1] ?? /^D([1-9]\d*) [—–:-] Who is allowed to write to the auth cache\?$/.exec(lines[0] ?? '')?.[1];

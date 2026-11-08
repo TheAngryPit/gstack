@@ -48,12 +48,12 @@ Failed/incomplete outside review → unavailable; disabled → skip outside. Bot
 
 {{OUTSIDE_PROVENANCE:eng}}
 
-  Error handling: Phase 1 failure/degradation policy applies.
+  Errors: Phase 1 failure/degradation policy applies.
 
 - Architecture choices: explicit over clever (P5). If {{OUTSIDE_LABEL}} disagrees with valid reason → TASTE DECISION. Scope changes both models agree on → USER CHALLENGE.
 - Evals: always include all relevant suites (P1)
 - Test plan: generate artifact at `$GSTACK_STATE_ROOT/projects/$SLUG/{user}-{branch}-eng-review-test-plan-{datetime}.md` (the loaded eng skill's name and root)
-- TODOS.md: collect all deferred scope expansions from every prior phase (Eng runs last), auto-write
+- TODOS.md: collect every prior phase's deferred scope expansions (Eng runs last), auto-write
 
 **Required execution checklist (Eng):**
 
@@ -63,14 +63,14 @@ Failed/incomplete outside review → unavailable; disabled → skip outside. Bot
 
 2. Step 0.5 (Dual Voices): Present the completed calls above under {{OUTSIDE_LABEL}} SAYS
    (eng — architecture challenge) and {{NATIVE_LABEL}} SUBAGENT (eng — independent review).
-   Produce eng consensus table:
+   Eng consensus table:
 
 ```
 ENG DUAL VOICES — CONSENSUS TABLE:
   Dimension                           {{NATIVE_LABEL}}  {{OUTSIDE_LABEL}}  Consensus
   1. Architecture sound?               —       —      —
   2. Test coverage sufficient?         —       —      —
-  3. Performance risks addressed?      —       —      —
+  3. Perf risks + budget/bench named?  —       —      —
   4. Security threats covered?         —       —      —
   5. Error paths handled?              —       —      —
   6. Deployment risk manageable?       —       —      —
@@ -95,7 +95,7 @@ Missing/disabled voice = N/A, never CONFIRMED. Flag any single-voice critical fi
      skipping the analysis.
    - Write the test plan artifact to disk
 
-6. Section 4 (Performance): Evaluate N+1 queries, memory, caching, slow paths.
+6. Section 4 (Performance): Evaluate N+1 queries, memory, caching, slow paths; a hot path with no budget nor bench step is a finding.
 
 **Mandatory outputs from Phase 3:**
 - "NOT in scope" section
@@ -104,8 +104,8 @@ Missing/disabled voice = N/A, never CONFIRMED. Flag any single-voice critical fi
 - Test diagram mapping codepaths to coverage (Section 3)
 - Test plan artifact written to disk (Section 3)
 - Failure modes registry with critical gap flags
-- Completion Summary (the full summary from the Eng skill)
-- TODOS.md updates (collected from all phases)
+- Completion Summary (from the Eng skill)
+- TODOS.md updates (all phases)
 
 **Close this phase:**
 

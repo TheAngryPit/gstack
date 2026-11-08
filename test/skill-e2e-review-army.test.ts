@@ -254,22 +254,31 @@ finish with a brief acknowledgement rather than repeating the findings in the fi
     let passed = false;
     try {
       expect(result.exitReason).toBe('success');
-      expect(result.toolCalls.some(call =>
-        ['Agent', 'Task'].includes(call.tool)
-        && /\bred[ -]team\b/i.test(call.input.description ?? call.input.subagent_type ?? '')
-        && call.input.run_in_background === false,
-      )).toBe(true);
       const foreground = result.toolCalls.filter(call =>
         ['Agent', 'Task'].includes(call.tool) && call.input.run_in_background === false);
       const label = (call: { input: any }) => call.input.description ?? call.input.subagent_type ?? '';
       const isRedTeam = (call: { input: any }) => /\bred[ -]team\b/i.test(label(call));
       const performance = foreground.findIndex(call => /\bperformance\b/i.test(label(call)) && !isRedTeam(call));
       expect(performance).toBeGreaterThanOrEqual(0);
-      expect(foreground.findIndex(isRedTeam)).toBeGreaterThan(performance);
 
       const outputPath = path.join(dir, 'review-output.md');
       expect(fs.existsSync(outputPath)).toBe(true);
       const content = fs.readFileSync(outputPath, 'utf-8').toLowerCase();
+      // The Red Team activates only on a CRITICAL specialist finding (a test that would
+      // fail, a production break, or a security or data-loss defect). An N+1 on a
+      // 12-line diff is usually INFORMATIONAL under that definition, so the case asserts
+      // the branch the run took: a foreground Red Team subagent that ran must follow the
+      // Performance specialist; no Red Team is correct only when the report's own count
+      // says 0 critical and its Red Team line names that reason.
+      const criticalCount = Number(/specialist review:.*?\((\d+) critical/.exec(content)?.[1] ?? NaN);
+      expect(Number.isFinite(criticalCount)).toBe(true);
+      const redTeamIndex = foreground.findIndex(isRedTeam);
+      if (redTeamIndex >= 0) {
+        expect(redTeamIndex).toBeGreaterThan(performance);
+      } else {
+        expect(criticalCount).toBe(0);
+        expect(content).toMatch(/red team[^\n]*(not activated|not dispatched|skipped)[^\n]*critical/);
+      }
       const hasN1Finding =
         content.includes('n+1') ||
         content.includes('n + 1') ||

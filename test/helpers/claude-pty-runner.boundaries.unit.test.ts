@@ -17,7 +17,6 @@ import {
   nativePlanCallFingerprint,
   devexStep0Boundary,
   type AskUserQuestionFingerprint,
-  pickDesignFocusAll,
 } from './claude-pty-runner';
 
 describe('Step0BoundaryPredicate per-skill', () => {
@@ -1771,23 +1770,5 @@ describe('explicit Step 0 complexity gate with size in native choices', () => {
       mutate(call);
       expect(engSetupAUQ(nativePlanCallFingerprint(call, 0, false))).toBe(false);
     }
-  });
-});
-
-describe('pickDesignFocusAll: the seed-declared all-seven answer for the pending 0D focus menu', () => {
-  const captured = require('../fixtures/design-floor-focus-36597762183.json');
-  const q = () => structuredClone(captured.question);
-  test('census 36597762183 pending menu selects the all-seven option', () => {
-    expect(pickDesignFocusAll(q())).toBe(1);
-  });
-  test.each([
-    ['a different title', (x: any) => { x.question = x.question.replace('Review all 7 design dimensions, or focus?', 'Which fixes should I apply?'); }],
-    ['a non-narrowing alternative', (x: any) => { x.options[1].label = 'Approve every fix now'; }],
-    ['two all-seven options', (x: any) => { x.options[1].label = 'All seven dimensions'; }],
-    ['a bundled product approval', (x: any) => { x.question = x.question.replace('Net:', 'Also approve the CTA redesign.\nNet:'); }],
-    ['a foreign plan context', (x: any) => { x.question = x.question.replace('plan-design-review of PLAN.md', 'plan-design-review of OTHER.md'); }],
-    ['multi select', (x: any) => { x.multiSelect = true; }],
-  ])('%s is not answered', (_name, mutate) => {
-    const x = q(); mutate(x); expect(pickDesignFocusAll(x)).toBeNull();
   });
 });

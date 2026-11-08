@@ -1,7 +1,9 @@
 /**
  * redact-engine — pure scanning + auto-redaction over the shared taxonomy.
  *
- * No I/O. Deterministic. The CLI shim (`bin/gstack-redact`), the pre-push hook
+ * No I/O. Deterministic given its one ambient input: `scan()` reads the
+ * credential-named variables of `process.env` by value unless `processEnv` is
+ * passed (GSTA-104). The CLI shim (`bin/gstack-redact`), the pre-push hook
  * (`bin/gstack-redact-prepush`), and tests all import from here.
  *
  * Key behaviors (locked in /plan-eng-review + two Codex passes):
@@ -15,7 +17,7 @@
  *     finding (drives sterner AUQ wording in the skill) but never promotes a
  *     MEDIUM to HIGH. (TENSION-2-followup.)
  *   - Placeholder suppression is per-matched-span.
- *   - Tool-attributed fences (``` ```codex-review ``` / ``` ```greptile ```)
+ *   - Tool-attributed fences (``` ```codex-review ``` / ``` ```review-bot ``` / ``` ```greptile ```)
  *     degrade credential findings to a non-blocking WARN — UNLESS the span is a
  *     live-format credential the doc-example heuristic can't excuse. No nonce,
  *     no trust exemption (the marker scheme was dropped as theater).
@@ -24,6 +26,7 @@
 import {
   PATTERNS,
   PATTERNS_BY_ID,
+  clearStringSpanCache,
   isPlaceholderSpan,
   type RedactPattern,
   type Tier,
@@ -75,6 +78,17 @@ export interface ScanOptions {
    * literal: in a TypeScript/JSX file `session: SessionState,` is a type.
    */
   sourcePath?: string;
+  /**
+   * The environment whose credential-named variables (a name whose last
+   * `_`-separated word is KEY, TOKEN, SECRET, PASSWORD, PASSWD, PASS, PAT or
+   * APIKEY, or that ends in _PWD, any case, carrying no PUBLIC word; see
+   * `credentialEnvValues`) are scanned for BY VALUE: wherever one of those
+   * values appears in the text it is an `env.value` HIGH finding, whatever its
+   * shape, so a value that reached the text (a dumped environment in a tool
+   * output, GSTA-96) never reaches a PR body, receipt, report or Drive file.
+   * Defaults to `process.env`; pass `{}` to scan without one.
+   */
+  processEnv?: Record<string, string | undefined>;
 }
 
 export interface ScanResult {
@@ -210,7 +224,7 @@ export function maskPreview(span: string): string {
 
 // ── Tool-attributed fence detection ───────────────────────────────────────────
 
-const TOOL_FENCE_INFO = /^```(codex-review|greptile|eval|codex|tool-output)\b/;
+const TOOL_FENCE_INFO = /^```(codex-review|review-bot|greptile|eval|codex|tool-output)\b/;
 
 /**
  * Returns a sorted list of [start, end) offset ranges (in normalized text) that
@@ -459,6 +473,47 @@ function scanInternal(input: string, opts: ScanOptions, spans?: Map<Finding, Ori
       }
     }
   }
+  clearStringSpanCache();
+
+  // Environment values, by exact value: a credential that is already in the
+  // process environment needs no shape to be recognized.
+  for (const { name, value: raw } of credentialEnvValues(opts.processEnv ?? process.env)) {
+    // The text was normalized before matching; the value takes the same form,
+    // and the allowlist and placeholder rules see both forms.
+    const value = normalizeOriginal(raw).normalized;
+    if (allow.has(raw) || allow.has(value) || value.length < MIN_ENV_VALUE_LENGTH || isPlaceholderSpan(value)) continue;
+    let from = 0;
+    let normOffset: number;
+    while ((normOffset = normalized.indexOf(value, from)) !== -1) {
+      from = normOffset + value.length;
+      const origOffset = map[Math.min(normOffset, map.length - 1)] ?? 0;
+      // Keyed on the span, not the offset alone: when one credential's value is
+      // a prefix of another's, both findings exist and their spans coalesce.
+      const key = `env.value:${origOffset}:${value.length}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      starts ??= lineStarts(input);
+      const { line, col } = lineColAt(starts, input, origOffset);
+      const finding: Finding = {
+        id: "env.value",
+        tier: "HIGH",
+        severity: "HIGH",
+        category: "secret",
+        description: `Value of the ${name} environment variable`,
+        line,
+        col,
+        // A live credential: the name already says what leaked; show no bytes.
+        preview: "********",
+        autoRedactable: false,
+        repoVisibility,
+      };
+      findings.push(finding);
+      if (spans) {
+        const end = spanEnds?.[normOffset + value.length - 1];
+        if (end !== undefined && end > origOffset) spans.set(finding, { start: origOffset, end });
+      }
+    }
+  }
 
   // Stable order: by line, then col, then id.
   findings.sort((a, b) => a.line - b.line || a.col - b.col || a.id.localeCompare(b.id));
@@ -467,6 +522,41 @@ function scanInternal(input: string, opts: ScanOptions, spans?: Map<Finding, Ori
   for (const f of findings) counts[f.severity] += 1;
 
   return { findings, counts, repoVisibility, oversize: false };
+}
+
+const CREDENTIAL_ENV_NAME = /(^|_)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PAT|APIKEY)$|_PWD$/i;
+/** Framework-public keys (NEXT_PUBLIC_*_KEY, VITE_PUBLIC_*, *_PUBLIC_KEY) are committed on purpose. */
+const PUBLIC_ENV_NAME = /(^|_)PUBLIC(_|$)/i;
+/** gstack's own credential-named variables whose values are not secrets (bin/gstack-brain-lock.sh sets the lock token). */
+export const NON_SECRET_ENV_NAMES: ReadonlySet<string> = new Set(["GSTACK_BRAIN_LOCK_TOKEN"]);
+const MIN_ENV_VALUE_LENGTH = 8;
+
+/**
+ * The (name, value) pairs of `env` worth scanning for by value: credential-named
+ * variables (the last `_`-separated word is KEY, TOKEN, SECRET, PASSWORD, PASSWD,
+ * PASS, PAT or APIKEY, or the name ends in _PWD; names carrying a PUBLIC word and
+ * gstack's own non-secret tokens are exempt) whose trimmed value is long enough to
+ * be a credential and is not a placeholder. A short or placeholder value would
+ * match ordinary prose. There is no path exemption on purpose: a shape rule
+ * exempted base64 secrets that start with `/`, and an existence check let the
+ * scanned agent exempt a value by creating a path of that name; a path-valued
+ * SSL_KEY that must appear in a text goes through `allowlist` where a caller
+ * passes one (`gstack-redact`, the pre-push hook), else the variable is set
+ * empty for that one command. The value is
+ * trimmed, so a key read from a file with a trailing newline still matches its
+ * leaked form; it is matched against the normalized text in its own normalized
+ * form, so a value NFKC rewrites still finds its leaked bytes.
+ */
+export function credentialEnvValues(env: Record<string, string | undefined>): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  for (const [name, raw] of Object.entries(env)) {
+    if (!CREDENTIAL_ENV_NAME.test(name) || PUBLIC_ENV_NAME.test(name) || NON_SECRET_ENV_NAMES.has(name)) continue;
+    const value = raw?.trim() ?? "";
+    if (value.length < MIN_ENV_VALUE_LENGTH) continue;
+    if (isPlaceholderSpan(value)) continue;
+    out.push({ name, value });
+  }
+  return out;
 }
 
 function withFlags(flags: string): string {

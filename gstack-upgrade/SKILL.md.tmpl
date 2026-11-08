@@ -70,7 +70,7 @@ fi
 }
 if [ -z "$SOURCE_DIR" ]; then
   case "{{HOST_ID}}" in
-    copilot|agy) SOURCE_DIR="$(cat "$ACTIVE_ROOT/.source-path" 2>/dev/null || true)" ;;
+    copilot|agy|gemini) SOURCE_DIR="$(cat "$ACTIVE_ROOT/.source-path" 2>/dev/null || true)" ;;
   esac
 fi
 [ -z "$SOURCE_DIR" ] || [ -d "$SOURCE_DIR/.git" ] || {
@@ -121,6 +121,12 @@ candidate. “Never ask again” disables update checks; it does not authorize a
 unverified update.
 
 ### Other origins stay manual
+
+For Gemini CLI, after the verified source update succeeds, use
+`./setup --host gemini --refresh-registered` from that source checkout.
+The active runtime's `.source-path` identifies it; this guidance does not run
+setup or change a registration by itself.
+
 
 For MANUAL_UPGRADE_AVAILABLE, report that the installed origin has a newer
 VERSION but does not have the trusted fork's exact-SHA CI proof. Do not use

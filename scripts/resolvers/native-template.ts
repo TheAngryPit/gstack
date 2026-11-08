@@ -24,6 +24,9 @@ export function adaptNativeTemplate(text: string, ctx: TemplateContext, source: 
   // before matching host-specific template paths so the same Codex adapters
   // run on every platform.
   source = source.replaceAll('\\', '/');
+  if (ctx.skillName === 'eval-plan') {
+    text = text.replace('say `claude -p` on a seat', 'for example an explicitly authorized subscription transport');
+  }
   if (ctx.skillName === 'office-hours') {
     text = text.replace('second opinion (Codex or Claude subagent)', 'second opinion (native reviewer)')
       .replace('against cross-model challenge (kept original premise when Codex disagreed', 'against independent-context challenge (kept original premise when the reviewer disagreed');
@@ -98,7 +101,7 @@ ${nativeWorker}`);
     } else {
       text = replaceBlock(text,
         'Dispatch a subagent through Agent with `subagent_type: "general-purpose"` and\n`run_in_background: false`, using Step 7\'s shared foreground-dispatch rule.',
-        'It fetches and classifies all Greptile comments,',
+        "It fetches and classifies every configured bot's comments,",
         `Dispatch a fresh native reviewer through the session's advertised context
 API, using Step 7's shared native-worker rule. Wait for actual completion and
 validate the returned contract before acting.

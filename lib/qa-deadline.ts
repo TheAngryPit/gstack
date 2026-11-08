@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { bunIsolationArgs } from './bun-isolation';
 import { constants as osConstants } from 'node:os';
 import { initializeWindowsReviewJob } from './claude-code-windows-job';
 
@@ -215,7 +216,7 @@ export async function runQaWindowsWorker(args: string[], emit: Emit, entrypoint:
   captureFiles?: { stdout: number; stderr: number }): Promise<number> {
   try { await initializeWindowsReviewJob(); } catch { throw new QaDeadlineError('Windows process containment is unavailable; no command was started'); }
   return new Promise<number>(resolve => {
-    const worker = spawn(process.execPath, [...process.execArgv, entrypoint, '--receipt-worker', ...args], {
+    const worker = spawn(process.execPath, [...bunIsolationArgs(), ...process.execArgv, entrypoint, '--receipt-worker', ...args], {
       stdio: ['inherit', captureFiles?.stdout ?? 'inherit', captureFiles?.stderr ?? 'inherit', 'ipc'], windowsHide: true,
     });
     const kill = () => { worker.kill('SIGKILL'); };
@@ -223,6 +224,9 @@ export async function runQaWindowsWorker(args: string[], emit: Emit, entrypoint:
     worker.on('message', (message: any) => {
       if (message?.type === messageType && ['stdout', 'stderr'].includes(message.stream)
         && message.receipt && typeof message.receipt === 'object') emit(message.stream, message.receipt, message.completion);
+      if (message?.type === messageType && Number.isSafeInteger(message.seq)) {
+        try { worker.send({ type: `${messageType}-ack`, seq: message.seq }, () => {}); } catch {}
+      }
     });
     worker.once('error', () => {
       process.off('exit', kill);
@@ -243,6 +247,10 @@ export async function withQaReceiptOutput(receiptWorker: boolean, messageType: s
     stderr: fs.createWriteStream('', { fd: 2, autoClose: false }),
   };
   const writes: Promise<void>[] = [];
+  const acks = new Map<number, () => void>();
+  if (receiptWorker) process.on('message', (message: any) => {
+    if (message?.type === `${messageType}-ack`) acks.get(message.seq)?.();
+  });
   let writeFailed = false;
   const failed = () => { writeFailed = true; };
   output.stdout.on('error', failed);
@@ -251,7 +259,11 @@ export async function withQaReceiptOutput(receiptWorker: boolean, messageType: s
     writes.push(new Promise<void>(resolve => {
       const done = (error?: Error | null) => { if (error) writeFailed = true; resolve(); };
       try {
-        if (receiptWorker) process.send!({ type: messageType, stream, receipt, ...(completion ? { completion } : {}) }, done);
+        if (receiptWorker) {
+          const seq = writes.length;
+          acks.set(seq, () => { acks.delete(seq); resolve(); });
+          process.send!({ type: messageType, seq, stream, receipt, ...(completion ? { completion } : {}) }, (error?: Error | null) => { if (error) done(error); });
+        }
         else output[stream].write(format(receipt), done);
       } catch { writeFailed = true; resolve(); }
     }));

@@ -155,14 +155,17 @@ describe('template wiring', () => {
   const main = source('SKILL.md.tmpl');
   const step = (title: string, next: string) => main.slice(main.indexOf(title), main.indexOf(next));
 
-  test('Step 2 and the Step 3 CI wait call the helper, not a --required-only query', () => {
+  test('Step 2 calls the gate helper and Step 3 is one gstack-pr-wait call, not a polling loop or a --required-only query', () => {
     const step2 = step('## Step 2: Pre-merge checks', '## Step 3: Wait for CI');
     const step3 = step('## Step 3: Wait for CI', '## Step 3.4');
     expect(step2).toContain('bin/gstack-ci-gate --repo "$REPO" --pr "$PR_NUMBER" --expect-head "$PR_HEAD"');
-    expect(step3).toMatch(/bin\/gstack-ci-gate [^\n]*--expect-head "\$PR_HEAD" --wait \d+/);
+    expect(step3).toContain('bin/gstack-pr-wait "$PR_NUMBER" --repo "$REPO" --until green');
+    expect(step3.match(/```bash/g)).toHaveLength(1);
     expect(`${step2}${step3}`).not.toMatch(/gh pr checks[^\n]*--required/);
-    expect(step3).not.toContain('--watch');
-    expect(step3).toContain('still-pending checks');
+    expect(step3).not.toMatch(/--watch|--wait \d+|4-minute|sleep/);
+    for (const code of ['Exit 0', 'PR_WAIT_BLOCKED', 'PR_WAIT_REFUSED']) expect(step3).toContain(code);
+    expect(step3).toMatch(/restart at\s+Step 1/);
+    expect(main).not.toContain('4-minute');
     expect(step2).toContain('never on the exit code');
   });
 

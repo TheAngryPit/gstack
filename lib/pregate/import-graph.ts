@@ -11,7 +11,13 @@
  *      Python, dotted `mock.patch` targets (`'pkg.mod.Class.method'`);
  *   3. the `bin/<name>` → `test/<name>*.test.*` convention (with and without
  *      the `gstack-` prefix);
- *   4. explicit `.gstack/pregate.json` `dependencies` declarations.
+ *   4. explicit `.gstack/pregate.json` `dependencies` declarations;
+ *   5. in a Django project, the files Django loads by name (lib/pregate/django.ts);
+ *   6. in a Cargo crate, every `.rs` file and the Cargo.toml select the crate's
+ *      tests and its dependents' (lib/pregate/rust.ts); in-source
+ *      `#[cfg(test)]` files and `<crate>/tests/` files are the tests.
+ * Dart directives (`import`/`export`/`part`, conditional URIs included) resolve
+ * `package:<name>/x` through every tracked pubspec.yaml to `<root>/lib/x`.
  * Uncertainty selects more tests, never fewer: a dependency on a directory
  * selects every test under it; a touched file with no path to a test is the
  * caller's `no lane` failure, not a pass. test/helpers/touchfile-closure.ts
@@ -21,11 +27,13 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { matchesAny } from '../ship-policy';
+import { djangoEdges } from './django';
+import { rustEdges } from './rust';
 
-export const SOURCE_EXT = /\.(?:[cm]?[jt]sx?|py|rb|sh|bash|go|rs)$/;
-export const TEST_FILE_RE = /(?:^|\/)(?:test|tests|spec|__tests__)\/.*\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)[^/]*\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go|rb)$|_spec\.rb$|(?:^|\/)[^/]*\.bats$/;
+export const SOURCE_EXT = /\.(?:[cm]?[jt]sx?|py|rb|sh|bash|go|rs|dart)$/;
+export const TEST_FILE_RE = /(?:^|\/)(?:test|tests|spec|__tests__)\/.*\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)[^/]*\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go|rb)$|_spec\.rb$|(?:^|\/)[^/]*\.bats$|(?:^|\/)test\/(?:.*\/)?[^/]*_test\.dart$/;
 
-export interface Edge { from: string; via: 'import' | 'literal' | 'convention' | 'declared' | 'generated' }
+export interface Edge { from: string; via: 'import' | 'literal' | 'convention' | 'declared' | 'generated' | 'framework' }
 export interface Graph {
   files: Set<string>;
   tests: Set<string>;
@@ -35,21 +43,130 @@ export interface Graph {
   unresolved?: Map<string, string[]>;
   /** tsconfig/jsconfig `extends` hops that were not followed (for the no-lane explanation). */
   aliasNotes?: string[];
+  /** Removed test → the files still in the tree its merge-base text exercised (never tests, helpers or fixtures); only for `goneSources`. */
+  goneSubjects?: Map<string, string[]>;
 }
 
 const scanner = new Bun.Transpiler({ loader: 'tsx' });
 // `( ) [ ] +` appear in framework route paths: Next.js route groups `(app)`,
 // dynamic segments `[id]` / `[[...slug]]`, SvelteKit `+page.svelte`. A literal
 // that matches more text only gains an edge when it resolves to a repo file.
-const QUOTED = /['"`]([A-Za-z0-9_@][A-Za-z0-9_./@()[\]+-]*)['"`]/g;
+// A relative literal (`'../ship/sections/pr-body.md.tmpl'` read through
+// `new URL(…, import.meta.url)` or `readFileSync`) resolves from the file that
+// names it, like a relative import; without it a test reading a template by
+// relative path had no edge to the template (GSTA-121's test/ship-publication-gates.test.ts).
+const QUOTED = /['"`]((?:\.\.?\/)*[A-Za-z0-9_@][A-Za-z0-9_./@()[\]+-]*)['"`]/g;
+// A dot-led literal (`'.gitleaks.toml'`, `'../.github/x.yml'`) runs as its own pass and leaves its
+// closing quote unconsumed, so a closing quote followed by `.method(` never eats the next literal's quote.
+const DOTFILE = /['"`]((?:\.\.?\/)*\.[A-Za-z0-9_@][A-Za-z0-9_./@()[\]+-]*)(?=['"`])/g;
 const JOIN = /\bjoin\(([^()]*)\)/g;
-const RESOLVE_EXT = ['', '.ts', '.tsx', '.js', '.mjs', '.cjs', '/index.ts', '/index.js'];
+const RESOLVE_EXT = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.mjs'];
 // A statement starts a line or follows `;` or a compound statement's `:`. The module spec is
 // non-empty and starts with a dot or a word character, so no two repetitions can share a dot or a space.
 const PY_IMPORT = /(?:^|[;:])[ \t\f]*(?:from[ \t]+(\.+(?:\w[\w.]*)?|\w[\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n;]+)|import[ \t]+([^\n;]+))/gm;
 const PY_DOTTED = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/;
 
-export function isTestFile(rel: string): boolean { return TEST_FILE_RE.test(rel); }
+/** Flutter's device-only directories: their Dart files need a device, so they are never tests here (a touched one has no lane until declared `[]`). */
+const DEVICE_TEST_DIR = /(?:^|\/)(?:integration_test|test_driver)\//;
+export function isDeviceDart(rel: string): boolean { return rel.endsWith('.dart') && DEVICE_TEST_DIR.test(rel); }
+export function isTestFile(rel: string): boolean { return TEST_FILE_RE.test(rel) && !isDeviceDart(rel); }
+
+/**
+ * A repo file's text, or null when it is not a regular file, is a symlink
+ * resolving outside the repo, is over `maxBytes` (default 1 MiB), or is
+ * unreadable. A committed symlink to a device or FIFO, or a directory named
+ * like the file, is skipped rather than read (a read could hang or exhaust memory).
+ */
+export function readRepoFile(repoRoot: string, rel: string, maxBytes = 1024 * 1024): string | null {
+  const abs = path.join(repoRoot, rel);
+  try {
+    if (fs.lstatSync(abs).isSymbolicLink()) {
+      const real = fs.realpathSync(abs);
+      const top = fs.realpathSync(repoRoot);
+      if (real !== top && !real.startsWith(top + path.sep)) return null;
+    }
+    const st = fs.statSync(abs);
+    if (!st.isFile() || st.size > maxBytes) return null;
+    return fs.readFileSync(abs, 'utf8');
+  } catch { return null; }
+}
+
+/** Dart package name → its roots (`''` for the repository root), from every tracked pubspec.yaml; a name two pubspecs share keeps both, in ls-files order. */
+export function dartPackages(repoRoot: string, files: Iterable<string>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const f of files) {
+    if (path.posix.basename(f) !== 'pubspec.yaml') continue;
+    const text = readRepoFile(repoRoot, f);
+    if (text === null) continue;
+    const name = /^name:\s*['"]?([A-Za-z_][\w]*)/m.exec(text.replace(/^\uFEFF/, ''))?.[1];
+    const root = path.posix.dirname(f);
+    if (name) out.set(name, [...(out.get(name) ?? []), root === '.' ? '' : root]);
+  }
+  return out;
+}
+
+/** The repo files one Dart directive URI names: `package:<name>/x` → the tracked `<root>/lib/x` of the importer's own package (the deepest pubspec root of any name containing `fromFile`) when that package is `<name>` and holds it, otherwise every tracked `<root>/lib/x` of `<name>` (an ambiguous name selects more, never fewer); a relative URI from `fromFile`; `dart:` and external packages name none. */
+function resolveDartUri(files: Set<string>, packages: Map<string, string[]>, fromFile: string, uri: string): string[] {
+  const pkg = /^package:([\w]+)\/(.+)$/.exec(uri);
+  if (pkg) {
+    const roots = packages.get(pkg[1]!) ?? [];
+    const targetIn = (root: string) => normalize(path.posix.join(root, 'lib', pkg[2]!));
+    const own = [...packages.values()].flat().filter(r => r === '' || fromFile.startsWith(`${r}/`)).sort((a, b) => b.length - a.length)[0];
+    if (own !== undefined && roots.includes(own) && files.has(targetIn(own))) return [targetIn(own)];
+    return roots.map(targetIn).filter(t => files.has(t));
+  }
+  if (/^[a-z][\w+.-]*:/.test(uri)) return [];
+  const target = normalize(path.posix.join(path.posix.dirname(fromFile), uri));
+  return files.has(target) ? [target] : [];
+}
+
+/**
+ * The URIs of every `import`/`export`/`part` directive (never `part of`), comments blanked. A directive runs from its keyword at
+ * a line start or after a `;`, metadata (`@deprecated`) allowed before it, to the next unquoted `;`, across any number of lines whatever their indentation (a conditional import's
+ * `if (…) 'uri'` clause may start a line). The scan resumes after each directive, so it is one linear pass; a directive missing its
+ * `;` reads to the end of the file, which can only add edges.
+ */
+export function dartDirectiveUris(source: string): string[] {
+  const code = blankDartComments(source.replace(/^\uFEFF/, ''));
+  const start = /(?:^|;)[ \t]*(?:@[\w.$]+(?:\([^;]*?\))?\s+)*(?:import|export|part)\b(?!\s+of\b)/gm;
+  const uris: string[] = [];
+  for (let m = start.exec(code); m; m = start.exec(code)) {
+    const from = m.index + m[0].length;
+    let end = from;
+    for (let quote = ''; end < code.length && (quote || code[end] !== ';'); end++) {
+      const c = code[end]!;
+      if (quote) { if (c === '\\') end++; else if (c === quote || c === '\n') quote = ''; } else if (c === "'" || c === '"') quote = c;
+    }
+    for (const u of code.slice(from, end).matchAll(/'([^'\n]+)'|"([^"\n]+)"/g)) uris.push((u[1] ?? u[2])!);
+    start.lastIndex = Math.max(end, from);
+  }
+  return uris;
+}
+
+/** Dart source with line and (nested) block comments blanked to spaces (newlines kept, so line structure holds), quote-aware, in one linear pass. */
+export function blankDartComments(source: string): string {
+  let out = '';
+  let quote = '';
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i]!;
+    if (quote) { out += c; if (c === '\\') { out += source[i + 1] ?? ''; i++; } else if (c === quote || c === '\n') quote = ''; continue; }
+    if (c === "'" || c === '"') { quote = c; out += c; continue; }
+    const line = source.startsWith('//', i);
+    if (!line && !source.startsWith('/*', i)) { out += c; continue; }
+    let stop: number;
+    if (line) { const e = source.indexOf('\n', i); stop = e < 0 ? source.length : e; }
+    else {
+      // Dart block comments nest.
+      let depth = 0;
+      for (stop = i; stop < source.length;) {
+        if (source.startsWith('/*', stop)) { depth++; stop += 2; } else if (source.startsWith('*/', stop)) { depth--; stop += 2; if (!depth) break; } else stop++;
+      }
+    }
+    out += source.slice(i, stop).replace(/[^\n]/g, ' ');
+    i = stop - 1;
+  }
+  return out;
+}
 
 export function listRepoFiles(repoRoot: string): string[] {
   const r = spawnSync('git', ['ls-files', '-co', '--exclude-standard', '-z'], { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
@@ -177,11 +294,11 @@ function resolveCandidate(files: Set<string>, dirs: Set<string>, c: string, lite
  */
 function resolveRefs(files: Set<string>, dirs: Set<string>, fromFile: string, ref: string, literal = false, config: PathAliases = NO_ALIASES): string[] {
   if (!ref || ref.startsWith('node:') || ref.startsWith('bun:')) return [];
-  if (ref.startsWith('.')) { const t = resolveCandidate(files, dirs, normalize(path.posix.join(path.posix.dirname(fromFile), ref)), literal); return t ? [t] : []; }
+  if (/^\.\.?(?:\/|$)/.test(ref)) { const t = resolveCandidate(files, dirs, normalize(path.posix.join(path.posix.dirname(fromFile), ref)), literal); return t ? [t] : []; }
   const { chosen, others } = matchAliases(config.aliases, ref);
   for (const c of chosen ?? []) { const t = resolveCandidate(files, dirs, c, literal); if (t) return [t]; }
   if (!chosen && others.length === 0 && ref.startsWith('@') && !ref.includes('/')) return [];
-  const plausible = [...others, ...(config.baseUrl ? [normalize(path.posix.join(config.baseUrl, ref))] : []), normalize(ref)];
+  const plausible = [...others, ...(config.baseUrl ? [normalize(path.posix.join(config.baseUrl, ref))] : []), normalize(ref), ...(literal && ref.startsWith('.') ? [normalize(path.posix.join(path.posix.dirname(fromFile), ref))] : [])];
   return [...new Set(plausible.map(c => resolveCandidate(files, dirs, c, literal)).filter((t): t is string => t !== null))];
 }
 
@@ -224,7 +341,7 @@ function pyFromBase(rel: string, spec: string): string | null {
  * stay inert. Backslash escapes are honoured; an unterminated string runs to
  * its line end, or to the end of the file when triple-quoted.
  */
-function pythonCode(source: string): string {
+export function pythonCode(source: string): string {
   const parts: string[] = [];
   let from = 0;
   for (let i = 0; i < source.length;) {
@@ -292,8 +409,11 @@ function addEdge(graph: Graph, dependency: string, dependent: string, via: Edge[
  * repo paths and join() segment runs. Import specifiers that resolve nowhere
  * and look like repo paths go to `unresolved` when given.
  */
-export function referencesIn(files: Set<string>, dirs: Set<string>, rel: string, source: string, config: PathAliases = NO_ALIASES, unresolved?: string[]): Array<{ target: string; via: Edge['via'] }> {
+export function referencesIn(files: Set<string>, dirs: Set<string>, rel: string, source: string, config: PathAliases = NO_ALIASES, unresolved?: string[], packages: Map<string, string[]> = new Map()): Array<{ target: string; via: Edge['via'] }> {
   const out: Array<{ target: string; via: Edge['via'] }> = [];
+  if (rel.endsWith('.dart')) {
+    for (const uri of dartDirectiveUris(source)) for (const t of resolveDartUri(files, packages, rel, uri)) out.push({ target: t, via: 'import' });
+  }
   const importOf = (spec: string) => {
     const targets = resolveRefs(files, dirs, rel, spec, false, config);
     for (const target of targets) out.push({ target, via: 'import' });
@@ -312,6 +432,7 @@ export function referencesIn(files: Set<string>, dirs: Set<string>, rel: string,
   // sources (a test spawns a bin; a bash bin calls a sibling). Prose and
   // manifests name everything and would make every file a hub.
   if (!scansLiterals(rel)) return out;
+  for (const m of source.matchAll(DOTFILE)) for (const target of resolveRefs(files, dirs, rel, m[1]!, true, config)) out.push({ target, via: 'literal' });
   for (const m of source.matchAll(QUOTED)) {
     const targets = resolveRefs(files, dirs, rel, m[1]!, true, config);
     for (const target of targets) out.push({ target, via: 'literal' });
@@ -327,42 +448,67 @@ export function referencesIn(files: Set<string>, dirs: Set<string>, rel: string,
   return out;
 }
 
+const TEST_TREE = /(?:^|\/)(?:test|tests|spec|__tests__)\//;
+
 /** Test-tree files (tests, helpers, fixtures), bin/ entrypoints and shell sources carry literal dependencies. */
 export function scansLiterals(rel: string): boolean {
-  return /(?:^|\/)(?:test|tests|spec|__tests__)\//.test(rel) || isTestFile(rel) || rel.startsWith('bin/') || /\.(?:sh|bash)$/.test(rel);
+  return TEST_TREE.test(rel) || isTestFile(rel) || rel.startsWith('bin/') || /\.(?:sh|bash)$/.test(rel);
+}
+
+/** The bin/ entrypoints a `test/<name>.test.*` file names by convention: test/gstack-ship-receipt-census.test.ts names bin/gstack-ship-receipt-census, then bin/gstack-ship-receipt, then bin/gstack-ship, … */
+function conventionBins(test: string, files: Set<string>): string[] {
+  const m = /^(?:[\w.-]+\/)*?test\/([\w-]+)\.(?:test|spec)\./.exec(test);
+  if (!m) return [];
+  const parts = m[1]!.split('-');
+  const out: string[] = [];
+  for (let n = parts.length; n >= 1; n--) {
+    const name = parts.slice(0, n).join('-');
+    for (const bin of [`bin/${name}`, `bin/gstack-${name}`, `bin/${name}.ts`, `bin/gstack-${name}.ts`]) if (files.has(bin)) out.push(bin);
+  }
+  return out;
 }
 
 export interface BuildOptions {
   declarations?: Record<string, string[]>; maxBytes?: number;
-  /** Paths that no longer exist (deleted or renamed-from) but that tests may still name; they resolve as dependencies so their consumers are found. */
+  /** Paths that no longer exist (deleted or renamed-from) but that tests may still name; they resolve as dependencies so their consumers are found, and are never tests themselves (`git ls-files` still lists an unstaged deletion). */
   extraFiles?: string[];
+  /** Merge-base text of removed test files; their forward edges to files still in the tree become `goneSubjects`. */
+  goneSources?: Map<string, string>;
 }
 
 /** The whole-repo reverse graph. Files over maxBytes (default 2 MiB) are skipped: generated bundles, not tests. */
 export function buildGraph(repoRoot: string, opts: BuildOptions = {}): Graph {
-  const all = listRepoFiles(repoRoot);
-  const files = new Set([...all, ...(opts.extraFiles ?? [])]);
+  const gone = new Set(opts.extraFiles ?? []);
+  const all = listRepoFiles(repoRoot).filter(f => !gone.has(f));
+  const files = new Set([...all, ...gone]);
   const dirs = new Set<string>();
-  for (const f of all) { let d = path.posix.dirname(f); while (d && d !== '.') { dirs.add(d); d = path.posix.dirname(d); } }
+  for (const f of files) { let d = path.posix.dirname(f); while (d && d !== '.') { dirs.add(d); d = path.posix.dirname(d); } }
   const config = readPathAliases(repoRoot);
   const graph: Graph = { files, tests: new Set(all.filter(isTestFile)), reverse: new Map(), unresolved: new Map(), aliasNotes: config.notes };
   const maxBytes = opts.maxBytes ?? 2 * 1024 * 1024;
+  const packages = dartPackages(repoRoot, all);
+  const pySources = new Map<string, string>();
   for (const rel of all) {
     if (!SOURCE_EXT.test(rel) && !rel.startsWith('bin/')) continue;
     let source: string;
     try { const st = fs.statSync(path.join(repoRoot, rel)); if (!st.isFile() || st.size > maxBytes) continue; source = fs.readFileSync(path.join(repoRoot, rel), 'utf8'); } catch { continue; }
+    if (rel.endsWith('.py')) pySources.set(rel, source);
     const unresolved: string[] = [];
-    for (const { target, via } of referencesIn(files, dirs, rel, source, config, graph.tests.has(rel) ? unresolved : undefined)) addEdge(graph, target, rel, via);
+    for (const { target, via } of referencesIn(files, dirs, rel, source, config, graph.tests.has(rel) ? unresolved : undefined, packages)) addEdge(graph, target, rel, via);
     if (unresolved.length) graph.unresolved!.set(rel, unresolved);
   }
-  for (const test of graph.tests) {
-    const m = /^(?:[\w.-]+\/)*?test\/([\w-]+)\.(?:test|spec)\./.exec(test);
-    if (!m) continue;
-    // test/gstack-ship-receipt-census.test.ts names bin/gstack-ship-receipt-census, then bin/gstack-ship-receipt, then bin/gstack-ship, …
-    const parts = m[1]!.split('-');
-    for (let n = parts.length; n >= 1; n--) {
-      const name = parts.slice(0, n).join('-');
-      for (const bin of [`bin/${name}`, `bin/gstack-${name}`, `bin/${name}.ts`, `bin/gstack-${name}.ts`]) if (files.has(bin)) addEdge(graph, bin, test, 'convention');
+  const rust = rustEdges(all, rel => readRepoFile(repoRoot, rel, maxBytes));
+  for (const t of rust.tests) graph.tests.add(t);
+  for (const e of rust.edges) addEdge(graph, e.dependency, e.dependent, e.via);
+  const django = djangoEdges({ files: [...files], tests: graph.tests, read: rel => pySources.get(rel) ?? readRepoFile(repoRoot, rel, maxBytes), code: pythonCode, resolveDotted: dotted => pythonPatchTarget(files, dotted) });
+  for (const e of django) addEdge(graph, e.dependency, e.dependent, 'framework');
+  for (const test of graph.tests) for (const bin of conventionBins(test, files)) addEdge(graph, bin, test, 'convention');
+  if (opts.goneSources) {
+    const present = new Set(all);
+    graph.goneSubjects = new Map();
+    for (const [rel, source] of opts.goneSources) {
+      const targets = [...referencesIn(files, dirs, rel, source, config, undefined, packages).map(r => r.target), ...conventionBins(rel, files)];
+      graph.goneSubjects.set(rel, [...new Set(targets)].filter(t => present.has(t) && !isTestFile(t) && !TEST_TREE.test(t)).sort());
     }
   }
   for (const [glob, tests] of Object.entries(opts.declarations ?? {})) {

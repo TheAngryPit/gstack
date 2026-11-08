@@ -11,7 +11,8 @@
 #                       write updated ~/.gstack/developer-profile.json.
 #   --profile           emit the full profile as JSON (all fields).
 #   --gap               emit declared-vs-inferred gap as JSON.
-#   --trace <dim>       show events that contributed to a dimension.
+#   --trace <dim>       show events that contributed to a dimension, each
+#                       UTC day clamped by the per-day bound, and the total.
 #   --narrative         (v2 stub) output a coach bio paragraph.
 #   --vibe              (v2 stub) output the one-word archetype.
 #   --check-mismatch    detect meaningful gaps between declared and observed.
@@ -24,10 +25,15 @@
 #                       `completed` events in projects/*/timeline.jsonl.
 #                       Idempotent; backfilled rows count for tenure only.
 #
+# Writers (--derive, --log-session, --reconcile, --migrate) hold
+# developer-profile.json.lock for their read-modify-write and exit 5 when
+# another writer keeps it past the give-up window (#3437).
+#
 # Profile file: ~/.gstack/developer-profile.json (unified schema — see
 # docs/designs/PLAN_TUNING_V0.md). Event file: ~/.gstack/projects/{SLUG}/
 # question-events.jsonl.
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -35,6 +41,10 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select
 GSTACK_HOME="$_gstack_sr_root"
+# A relative state root is anchored to the starting directory once, here:
+# do_derive changes directory, and the profile lock must name the same path
+# when it is taken and when it is released.
+case "$GSTACK_HOME" in /*|[A-Za-z]:[\\/]*) ;; *) GSTACK_HOME="$PWD/$GSTACK_HOME" ;; esac
 # Windows git-bash: GSTACK_HOME resolves to an MSYS path (/c/Users/...), which
 # Bun on Windows cannot open as a filesystem path (bites --derive). Normalize
 # once, here, before PROFILE_FILE/LEGACY_FILE are derived from it below —
@@ -44,6 +54,7 @@ case "$(uname -s)" in
 esac
 PROFILE_FILE="$GSTACK_HOME/developer-profile.json"
 LEGACY_FILE="$GSTACK_HOME/builder-profile.jsonl"
+MIN_EVIDENCE=3
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null || true)"
 SLUG="${SLUG:-unknown}"
 
@@ -51,9 +62,99 @@ CMD="${1:---read}"
 shift || true
 
 # -----------------------------------------------------------------------
+# Profile lock (#3437). Every subcommand that rewrites the profile reads,
+# changes and renames the whole file, and gstack-question-log starts a
+# background --derive after every append, so writers overlap: a shared temp
+# name made renames fail and an unlocked rewrite dropped a concurrent
+# --log-session. Writers hold a mkdir lock (<profile>.lock/, whose owner file
+# names the holder's pid and a random token; release is ownership-checked)
+# from before their read until after their rename, and write a unique temp
+# file. A lock whose holder process is gone is taken over at once; one older
+# than 5 minutes is taken over even when its pid is alive, since no writer
+# runs that long and the pid may have been reused. Takeovers are serialized by a second mkdir lock
+# (<profile>.lock.takeover/) and re-read the owner under it, so two waiters
+# cannot both take over or remove a lock a third writer just took. A lock or
+# takeover directory older than 30 s with no owner belongs to a writer that
+# died before writing one; cleanup removes a takeover lock this writer holds. A writer that cannot get the lock within the
+# give-up window writes nothing and exits 5. Writers outside this binary
+# (gstack-distill-apply, /plan-tune's declared edits) do not take it yet.
+# -----------------------------------------------------------------------
+LOCK_DIR="$PROFILE_FILE.lock"
+TAKEOVER_DIR="$LOCK_DIR.takeover"
+LOCK_TOKEN=""
+HOLDS_TAKEOVER=""
+PROFILE_TMP=""
+
+cleanup() {
+  if [ -n "$PROFILE_TMP" ]; then rm -f "$PROFILE_TMP"; fi
+  if [ -n "$HOLDS_TAKEOVER" ]; then rmdir "$TAKEOVER_DIR" 2>/dev/null || true; fi
+  if [ -n "$LOCK_TOKEN" ] && [ "$(cat "$LOCK_DIR/owner" 2>/dev/null || true)" = "$LOCK_TOKEN" ]; then
+    rm -rf "$LOCK_DIR"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+dir_age_s() {
+  local mtime
+  # GNU stat first: BSD-style stat -f on Linux prints a filesystem block.
+  mtime=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo "")
+  case "$mtime" in ""|*[!0-9]*) echo 0 ;; *) echo $(( $(date +%s) - mtime )) ;; esac
+}
+
+lock_abandoned() {
+  if [ -n "$1" ]; then
+    ! kill -0 "${1%%-*}" 2>/dev/null || [ "$(dir_age_s "$LOCK_DIR")" -gt 300 ]
+  else
+    [ "$(dir_age_s "$LOCK_DIR")" -gt 30 ]
+  fi
+}
+
+acquire_lock() {
+  if [ -n "$LOCK_TOKEN" ]; then return 0; fi
+  mkdir -p "$GSTACK_HOME"
+  # GSTACK_PROFILE_LOCK_TIMEOUT_MS: test-only override for the give-up.
+  local give_up_ms="${GSTACK_PROFILE_LOCK_TIMEOUT_MS:-10000}" waited_ms=0 started=$SECONDS vanished=0 owner
+  local token="$$-$RANDOM$RANDOM"
+  until mkdir "$LOCK_DIR" 2>/dev/null; do
+    # mkdir failed with no lock to wait for: retry once in case a holder just
+    # released it, then report the directory instead of waiting out the window.
+    if [ ! -e "$LOCK_DIR" ]; then
+      if [ "$vanished" -eq 0 ]; then vanished=1; continue; fi
+      echo "gstack-developer-profile: cannot create $LOCK_DIR (is $GSTACK_HOME writable?), so nothing was written (exit 5)." >&2
+      exit 5
+    fi
+    vanished=0
+    owner=$(cat "$LOCK_DIR/owner" 2>/dev/null || true)
+    if [ -d "$LOCK_DIR" ] && lock_abandoned "$owner"; then
+      if [ -d "$TAKEOVER_DIR" ] && [ "$(dir_age_s "$TAKEOVER_DIR")" -gt 30 ]; then rmdir "$TAKEOVER_DIR" 2>/dev/null || true; fi
+      if mkdir "$TAKEOVER_DIR" 2>/dev/null; then
+        HOLDS_TAKEOVER=1
+        if [ "$(cat "$LOCK_DIR/owner" 2>/dev/null || true)" = "$owner" ] && lock_abandoned "$owner"; then
+          rm -rf "$LOCK_DIR" 2>/dev/null || true
+        fi
+        rmdir "$TAKEOVER_DIR" 2>/dev/null || true
+        HOLDS_TAKEOVER=""
+        if [ ! -e "$LOCK_DIR" ]; then continue; fi
+      fi
+    fi
+    if [ "$waited_ms" -ge "$give_up_ms" ] || [ $(( SECONDS - started )) -gt $(( give_up_ms / 1000 )) ]; then
+      echo "gstack-developer-profile: another writer held $LOCK_DIR for ${give_up_ms} ms, so nothing was written (exit 5)." >&2
+      exit 5
+    fi
+    sleep 0.05
+    waited_ms=$(( waited_ms + 50 ))
+  done
+  printf '%s\n' "$token" > "$LOCK_DIR/owner"
+  LOCK_TOKEN="$token"
+}
+
+# -----------------------------------------------------------------------
 # Migration: builder-profile.jsonl → developer-profile.json
 # -----------------------------------------------------------------------
 do_migrate() {
+  acquire_lock
   if [ ! -f "$LEGACY_FILE" ]; then
     echo "MIGRATE: no legacy file to migrate"
     return 0
@@ -66,11 +167,9 @@ do_migrate() {
   fi
 
   # Run migration in a temp file, then atomic rename.
-  local TMPOUT
-  TMPOUT=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
-  trap 'rm -f "$TMPOUT"' EXIT
+  PROFILE_TMP=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
 
-  cat "$LEGACY_FILE" | bun -e "
+  cat "$LEGACY_FILE" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
     const sessions = [];
     const signalsAcc = {};
@@ -111,11 +210,11 @@ do_migrate() {
       schema_version: 1,
     };
     console.log(JSON.stringify(profile, null, 2));
-  " > "$TMPOUT"
+  " > "$PROFILE_TMP"
 
   # Atomic rename.
-  mv "$TMPOUT" "$PROFILE_FILE"
-  trap - EXIT
+  mv "$PROFILE_TMP" "$PROFILE_FILE"
+  PROFILE_TMP=""
 
   # gbrain-sync: enqueue the migrated file for cross-machine sync (no-op if off).
   SCRIPT_DIR_E="$(cd "$(dirname "$0")" && pwd)"
@@ -127,7 +226,7 @@ do_migrate() {
   mv "$LEGACY_FILE" "$LEGACY_FILE.migrated-$TS"
 
   local COUNT
-  COUNT=$(PROFILE_FILE_PATH="$PROFILE_FILE" bun -e "console.log(JSON.parse(require('fs').readFileSync(process.env.PROFILE_FILE_PATH,'utf-8')).sessions.length)" 2>/dev/null || echo "?")
+  COUNT=$(PROFILE_FILE_PATH="$PROFILE_FILE" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "console.log(JSON.parse(require('fs').readFileSync(process.env.PROFILE_FILE_PATH,'utf-8')).sessions.length)" 2>/dev/null || echo "?")
   echo "MIGRATE: ok — migrated $COUNT sessions from builder-profile.jsonl"
 }
 
@@ -175,7 +274,8 @@ EOF
 # and update aggregates (signals_accumulated, resources_shown, topics).
 # Fix for #1671: the writer side of the v1.0.0.0 migration. Reader and
 # writer now share the same file.
-# Silent skip on invalid input (matches gstack-timeline-log:22-26 pattern).
+# Invalid input is skipped silently; a Bun failure is reported and returned,
+# as in gstack-timeline-log (#3415).
 # -----------------------------------------------------------------------
 do_log_session() {
   local INPUT="${1:-}"
@@ -184,20 +284,30 @@ do_log_session() {
   fi
 
   # Validate: input must be parseable JSON with required fields (date, mode).
-  if ! printf '%s' "$INPUT" | bun -e "
-    const j = JSON.parse(await Bun.stdin.text());
-    if (!j.date || !j.mode) process.exit(1);
-  " 2>/dev/null; then
-    return 0
+  # The validator prints its verdict; a non-zero exit means Bun itself failed.
+  local VALIDATE_RC=0 VALIDATE_OUT
+  VALIDATE_OUT=$(printf '%s' "$INPUT" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
+    const text = await Bun.stdin.text();
+    let j;
+    try { j = JSON.parse(text); } catch {}
+    console.log(j && j.date && j.mode ? 'valid' : 'invalid');
+  ") || VALIDATE_RC=$?
+  if [ "$VALIDATE_RC" -ne 0 ]; then
+    echo "gstack-developer-profile: bun exited $VALIDATE_RC before the session was validated; nothing was logged" >&2
+    return "$VALIDATE_RC"
   fi
+  case "$VALIDATE_OUT" in
+    valid) ;;
+    invalid) return 0 ;;
+    *) echo "gstack-developer-profile: bun printed no verdict while validating the session; nothing was logged" >&2; return 1 ;;
+  esac
 
+  acquire_lock
   ensure_profile
 
-  local TMPOUT
-  TMPOUT=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
-  trap 'rm -f "$TMPOUT"' EXIT
+  PROFILE_TMP=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
 
-  PROFILE_FILE_PATH="$PROFILE_FILE" RECORD_INPUT="$INPUT" TMPOUT_PATH="$TMPOUT" bun -e "
+  PROFILE_FILE_PATH="$PROFILE_FILE" RECORD_INPUT="$INPUT" TMPOUT_PATH="$PROFILE_TMP" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     const fs = require('fs');
     const entry = JSON.parse(process.env.RECORD_INPUT);
     if (!entry.ts) entry.ts = new Date().toISOString();
@@ -224,8 +334,8 @@ do_log_session() {
     fs.writeFileSync(process.env.TMPOUT_PATH, JSON.stringify(profile, null, 2));
   "
 
-  mv "$TMPOUT" "$PROFILE_FILE"
-  trap - EXIT
+  mv "$PROFILE_TMP" "$PROFILE_FILE"
+  PROFILE_TMP=""
   "$SCRIPT_DIR/gstack-brain-enqueue" "developer-profile.json" 2>/dev/null &
 }
 
@@ -238,13 +348,12 @@ do_log_session() {
 # rewritten only when something was added.
 # -----------------------------------------------------------------------
 do_reconcile() {
+  acquire_lock
   ensure_profile
 
-  local TMPOUT
-  TMPOUT=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
-  trap 'rm -f "$TMPOUT"' EXIT
+  PROFILE_TMP=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
 
-  PROFILE_FILE_PATH="$PROFILE_FILE" PROJECTS_DIR="$GSTACK_HOME/projects" TMPOUT_PATH="$TMPOUT" bun -e "
+  PROFILE_FILE_PATH="$PROFILE_FILE" PROJECTS_DIR="$GSTACK_HOME/projects" TMPOUT_PATH="$PROFILE_TMP" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     const fs = require('fs');
     const path = require('path');
     const profile = JSON.parse(fs.readFileSync(process.env.PROFILE_FILE_PATH, 'utf-8'));
@@ -299,13 +408,13 @@ do_reconcile() {
     console.log('RECONCILE: ' + added + ' backfilled from ' + runs.length + ' office-hours run(s)');
   "
 
-  if [ -s "$TMPOUT" ]; then
-    mv "$TMPOUT" "$PROFILE_FILE"
-    trap - EXIT
+  if [ -s "$PROFILE_TMP" ]; then
+    mv "$PROFILE_TMP" "$PROFILE_FILE"
+    PROFILE_TMP=""
     "$SCRIPT_DIR/gstack-brain-enqueue" "developer-profile.json" 2>/dev/null &
   else
-    rm -f "$TMPOUT"
-    trap - EXIT
+    rm -f "$PROFILE_TMP"
+    PROFILE_TMP=""
   fi
 }
 
@@ -314,7 +423,7 @@ do_reconcile() {
 # -----------------------------------------------------------------------
 do_read() {
   ensure_profile
-  cat "$PROFILE_FILE" | bun -e "
+  cat "$PROFILE_FILE" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     const p = JSON.parse(await Bun.stdin.text());
     const sessions = p.sessions || [];
 
@@ -380,6 +489,18 @@ do_read() {
 # -----------------------------------------------------------------------
 do_profile() {
   ensure_profile
+  local PARSE_ERR
+  if ! PARSE_ERR=$(PROFILE_FILE_PATH="$PROFILE_FILE" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
+    const text = require('fs').readFileSync(process.env.PROFILE_FILE_PATH, 'utf-8');
+    try { JSON.parse(text); } catch (e) {
+      const markers = /^(<{7}|={7}|>{7})( |\$)/m.test(text) ? ' (it holds git conflict markers from a merge)' : '';
+      console.log(e.message + markers);
+      process.exit(1);
+    }
+  " 2>&1); then
+    echo "gstack-developer-profile: $PROFILE_FILE is not valid JSON: $PARSE_ERR; repair the file or restore it from git -C $GSTACK_HOME log -- developer-profile.json" >&2
+    return 1
+  fi
   cat "$PROFILE_FILE"
 }
 
@@ -388,25 +509,107 @@ do_profile() {
 # -----------------------------------------------------------------------
 do_gap() {
   ensure_profile
-  cat "$PROFILE_FILE" | bun -e "
+  cat "$PROFILE_FILE" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     const p = JSON.parse(await Bun.stdin.text());
     const declared = p.declared || {};
     const inferred = (p.inferred && p.inferred.values) || {};
+    const contributing = p.inferred && p.inferred.contributing_events;
     const dims = ['scope_appetite','risk_tolerance','detail_preference','autonomy','architecture_care'];
     const gap = {};
+    const low_evidence = {};
     for (const d of dims) {
-      if (declared[d] !== undefined && inferred[d] !== undefined) {
-        gap[d] = +(Math.abs(declared[d] - inferred[d])).toFixed(3);
+      if (declared[d] === undefined || inferred[d] === undefined) continue;
+      if (contributing && (contributing[d] || 0) < $MIN_EVIDENCE) {
+        low_evidence[d] = contributing[d] || 0;
+        continue;
       }
+      gap[d] = +(Math.abs(declared[d] - inferred[d])).toFixed(3);
     }
-    console.log(JSON.stringify({ declared, inferred, gap }, null, 2));
+    console.log(JSON.stringify({ declared, inferred, gap, low_evidence }, null, 2));
   "
 }
+
+# -----------------------------------------------------------------------
+# Signal accumulation shared by --derive and --trace, so the trace always
+# explains exactly the value derive wrote. Each row's SIGNAL_MAP deltas are
+# summed per (UTC day, dimension) and each day's sum is clamped to ±cap,
+# where cap is the largest single delta in SIGNAL_MAP: one day moves a
+# dimension at most as far as one strong answer. Without the bound a single
+# /plan-eng-review (about five answers) moved a dimension by 0.25 and about
+# eight reviews pinned it at 1.0 (#2623). The bound keys on the row's ts,
+# not its session_id: writers log different ids for one review (the
+# PostToolUse hook logs the host conversation, the agent the preamble run)
+# and an unsubstituted placeholder such as SESSION_ID would merge or split
+# reviews. Only an ISO 8601 date or date-time counts as dated; a time
+# without a zone is read as UTC. Every other row shares one undated bucket,
+# so junk timestamps cannot escape the bound (Date alone parses strings
+# like "junk 1" as real days). diversity.days_span counts the same days.
+# The body is a single-quoted bash string: its JS must not contain a single
+# quote (use double quotes or backticks), or the assignment ends early and
+# every subcommand fails to parse.
+# -----------------------------------------------------------------------
+ACCUMULATE_SIGNALS_JS='
+function accumulateSignals(lines, QUESTIONS, SIGNAL_MAP, dims) {
+  let cap = 0;
+  for (const byChoice of Object.values(SIGNAL_MAP)) {
+    for (const deltas of Object.values(byChoice)) {
+      for (const d of deltas) cap = Math.max(cap, Math.abs(d.delta));
+    }
+  }
+  const contributing = Object.fromEntries(dims.map((d) => [d, 0]));
+  const buckets = new Map();
+  const rows = [];
+  const skills = new Set();
+  const qids = new Set();
+  const days = new Set();
+  let count = 0;
+  let signalEvents = 0;
+  let hintedEvents = 0;
+  for (const line of lines) {
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (!e || typeof e !== "object" || typeof e.question_id !== "string" || typeof e.user_choice !== "string" || !e.question_id || !e.user_choice) continue;
+    count++;
+    skills.add(e.skill);
+    qids.add(e.question_id);
+    const m = typeof e.ts === "string" ? /^(\d{4}-\d\d-\d\d)(?:[Tt ](\d\d:\d\d(?::\d\d(?:\.\d+)?)?)(Z|z|[+-]\d\d:\d\d)?)?$/.exec(e.ts) : null;
+    const when = m ? new Date(m[2] ? m[1] + "T" + m[2] + (m[3] || "Z").toUpperCase() : m[1]) : null;
+    const day = when && !Number.isNaN(when.getTime()) ? when.toISOString().slice(0, 10) : null;
+    if (day) days.add(day);
+    const def = Object.hasOwn(QUESTIONS, e.question_id) ? QUESTIONS[e.question_id] : undefined;
+    const hinted = !def && typeof e.signal_key === "string" && Object.hasOwn(SIGNAL_MAP, e.signal_key);
+    const byChoice = def && def.signal_key && Object.hasOwn(SIGNAL_MAP, def.signal_key) ? SIGNAL_MAP[def.signal_key] : hinted ? SIGNAL_MAP[e.signal_key] : {};
+    const deltas = Object.hasOwn(byChoice, e.user_choice) ? byChoice[e.user_choice] : [];
+    if (!Array.isArray(deltas) || deltas.length === 0) continue;
+    signalEvents++;
+    if (hinted) hintedEvents++;
+    const key = day || "undated";
+    const sums = buckets.get(key) || {};
+    buckets.set(key, sums);
+    for (const d of deltas) {
+      sums[d.dim] = (sums[d.dim] || 0) + d.delta;
+      rows.push({ ts: e.ts, question_id: e.question_id, choice: e.user_choice, dim: d.dim, delta: d.delta, hinted });
+    }
+    for (const dim of new Set(deltas.map((d) => d.dim))) contributing[dim] = (contributing[dim] ?? 0) + 1;
+  }
+  const totals = Object.fromEntries(dims.map((d) => [d, 0]));
+  const capped = [];
+  for (const [day, sums] of buckets) {
+    for (const [dim, sum] of Object.entries(sums)) {
+      const bounded = Math.max(-cap, Math.min(cap, sum));
+      if (Math.abs(sum - bounded) > 1e-9) capped.push({ day, dim, sum, bounded });
+      totals[dim] = (totals[dim] ?? 0) + bounded;
+    }
+  }
+  return { cap, totals, contributing, rows, capped, count, signalEvents, hintedEvents, skills, qids, days };
+}
+'
 
 # -----------------------------------------------------------------------
 # Derive: recompute inferred dimensions from question-events.jsonl
 # -----------------------------------------------------------------------
 do_derive() {
+  acquire_lock
   ensure_profile
   local EVENTS="$GSTACK_HOME/projects/$SLUG/question-log.jsonl"
   local REGISTRY="$ROOT_DIR/scripts/question-registry.ts"
@@ -416,13 +619,15 @@ do_derive() {
     exit 1
   fi
 
+  PROFILE_TMP=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
   cd "$ROOT_DIR"
-  PROFILE_FILE_PATH="$PROFILE_FILE" EVENTS_PATH="$EVENTS" bun -e "
+  PROFILE_FILE_PATH="$PROFILE_FILE" EVENTS_PATH="$EVENTS" TMPOUT_PATH="$PROFILE_TMP" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     import('./scripts/question-registry.ts').then(async (regmod) => {
       const sigmod = await import('./scripts/psychographic-signals.ts');
       const fs = require('fs');
       const { QUESTIONS } = regmod;
-      const { SIGNAL_MAP, applySignal, newDimensionTotals, normalizeToDimensionValue } = sigmod;
+      const { SIGNAL_MAP, ALL_DIMENSIONS, normalizeToDimensionValue } = sigmod;
+      $ACCUMULATE_SIGNALS_JS
 
       const profilePath = process.env.PROFILE_FILE_PATH;
       const eventsPath = process.env.EVENTS_PATH;
@@ -433,25 +638,8 @@ do_derive() {
         lines = fs.readFileSync(eventsPath, 'utf-8').trim().split('\n').filter(Boolean);
       }
 
-      const totals = newDimensionTotals();
-      const skills = new Set();
-      const qids = new Set();
-      const days = new Set();
-      let count = 0;
-      let signalEvents = 0;
-      for (const line of lines) {
-        let e;
-        try { e = JSON.parse(line); } catch { continue; }
-        if (!e.question_id || !e.user_choice) continue;
-        count++;
-        skills.add(e.skill);
-        qids.add(e.question_id);
-        if (e.ts) days.add(String(e.ts).slice(0,10));
-        const def = QUESTIONS[e.question_id];
-        if (def && def.signal_key && applySignal(totals, def.signal_key, e.user_choice).length > 0) {
-          signalEvents++;
-        }
-      }
+      const { totals, contributing, count, signalEvents, hintedEvents, skills, qids, days } =
+        accumulateSignals(lines, QUESTIONS, SIGNAL_MAP, ALL_DIMENSIONS);
 
       const values = {};
       for (const [dim, total] of Object.entries(totals)) {
@@ -464,6 +652,12 @@ do_derive() {
         // Events that actually moved a dimension (B10): sample_size counts every
         // logged answer, most of which match no signal and leave the 0.5 seed.
         signal_events: signalEvents,
+        // Unique rows that moved each dimension (#2625). Distinguishes 'no
+        // evidence' from 'balanced evidence': both print 0.5, which is how
+        // five 0.5s sat beside sample_size 1286 (#2623).
+        contributing_events: contributing,
+        // Signal events that came from an unregistered id's signal hint (#3442).
+        hinted_events: hintedEvents,
         diversity: {
           skills_covered: skills.size,
           question_ids_covered: qids.size,
@@ -474,6 +668,7 @@ do_derive() {
       // Recompute gap.
       const gap = {};
       for (const d of Object.keys(values)) {
+        if ((contributing[d] || 0) < $MIN_EVIDENCE) continue;
         if (profile.declared && profile.declared[d] !== undefined) {
           gap[d] = +(Math.abs(profile.declared[d] - values[d])).toFixed(3);
         }
@@ -481,12 +676,12 @@ do_derive() {
       profile.gap = gap;
       profile.derived_at = new Date().toISOString();
 
-      const tmp = profilePath + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(profile, null, 2));
-      fs.renameSync(tmp, profilePath);
+      fs.writeFileSync(process.env.TMPOUT_PATH, JSON.stringify(profile, null, 2));
       console.log('DERIVE: ok — ' + count + ' events, ' + skills.size + ' skills, ' + qids.size + ' questions');
     }).catch(err => { console.error('DERIVE:', err.message); process.exit(1); });
   "
+  mv "$PROFILE_TMP" "$PROFILE_FILE"
+  PROFILE_TMP=""
 }
 
 # -----------------------------------------------------------------------
@@ -504,34 +699,31 @@ do_trace() {
     return 0
   fi
   cd "$ROOT_DIR"
-  EVENTS_PATH="$EVENTS" TRACE_DIM="$DIM" bun -e "
+  EVENTS_PATH="$EVENTS" TRACE_DIM="$DIM" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     import('./scripts/question-registry.ts').then(async (regmod) => {
       const sigmod = await import('./scripts/psychographic-signals.ts');
       const fs = require('fs');
       const { QUESTIONS } = regmod;
-      const { SIGNAL_MAP } = sigmod;
+      const { SIGNAL_MAP, ALL_DIMENSIONS, normalizeToDimensionValue } = sigmod;
+      $ACCUMULATE_SIGNALS_JS
       const target = process.env.TRACE_DIM;
       const lines = fs.readFileSync(process.env.EVENTS_PATH, 'utf-8').trim().split('\n').filter(Boolean);
-      const rows = [];
-      for (const line of lines) {
-        let e;
-        try { e = JSON.parse(line); } catch { continue; }
-        const def = QUESTIONS[e.question_id];
-        if (!def || !def.signal_key) continue;
-        const deltas = SIGNAL_MAP[def.signal_key]?.[e.user_choice] || [];
-        for (const d of deltas) {
-          if (d.dim === target) {
-            rows.push({ ts: e.ts, question_id: e.question_id, choice: e.user_choice, delta: d.delta });
-          }
-        }
-      }
+      const acc = accumulateSignals(lines, QUESTIONS, SIGNAL_MAP, ALL_DIMENSIONS);
+      const rows = acc.rows.filter((r) => r.dim === target);
+      const signed = (n, digits) => (n > 0 ? '+' : '') + (digits === undefined ? String(n) : n.toFixed(digits));
+      const clean = (s) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '?');
       if (rows.length === 0) {
         console.log('TRACE: no events contribute to ' + target);
       } else {
         console.log('TRACE: ' + rows.length + ' events for ' + target);
         for (const r of rows) {
-          console.log('  ' + (r.ts || '').slice(0,19) + '  ' + r.question_id + '  → ' + r.choice + '  (' + (r.delta > 0 ? '+' : '') + r.delta + ')');
+          console.log('  ' + clean(r.ts).slice(0,19) + '  ' + clean(r.question_id) + '  → ' + clean(r.choice) + '  (' + signed(r.delta) + ')' + (r.hinted ? ' (hinted)' : ''));
         }
+        for (const c of acc.capped.filter((c) => c.dim === target)) {
+          console.log('  day ' + clean(c.day) + ': ' + signed(c.sum, 3) + ' capped to ' + signed(c.bounded, 3));
+        }
+        const total = acc.totals[target] ?? 0;
+        console.log('TOTAL: ' + signed(total, 3) + ' (each UTC day capped at ±' + acc.cap + ') → ' + normalizeToDimensionValue(total).toFixed(3));
       }
     });
   "
@@ -542,14 +734,13 @@ do_trace() {
 # -----------------------------------------------------------------------
 do_check_mismatch() {
   ensure_profile
-  cat "$PROFILE_FILE" | bun -e "
+  cat "$PROFILE_FILE" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     const p = JSON.parse(await Bun.stdin.text());
     const declared = p.declared || {};
     const inferred = (p.inferred && p.inferred.values) || {};
     const sampleSize = (p.inferred && p.inferred.sample_size) || 0;
-    const diversity = (p.inferred && p.inferred.diversity) || {};
+    const contributing = p.inferred && p.inferred.contributing_events;
 
-    // Require enough data before reporting mismatch.
     if (sampleSize < 10) {
       console.log('MISMATCH: not enough data (' + sampleSize + ' events; need 10+)');
       process.exit(0);
@@ -557,8 +748,14 @@ do_check_mismatch() {
 
     const THRESHOLD = 0.3;
     const flagged = [];
+    const thin = [];
     for (const d of Object.keys(declared)) {
       if (inferred[d] === undefined) continue;
+      const n = contributing ? (contributing[d] || 0) : undefined;
+      if (n !== undefined && n < $MIN_EVIDENCE) {
+        thin.push('  ' + d + ': ' + (n === 0 ? 'no observed evidence' : 'too little evidence (' + n + ' of $MIN_EVIDENCE events)'));
+        continue;
+      }
       const gap = Math.abs(declared[d] - inferred[d]);
       if (gap > THRESHOLD) {
         flagged.push({ dim: d, declared: declared[d], inferred: inferred[d], gap: +gap.toFixed(3) });
@@ -573,6 +770,7 @@ do_check_mismatch() {
         console.log('  ' + f.dim + ': declared ' + f.declared + ' vs inferred ' + f.inferred + ' (gap ' + f.gap + ')');
       }
     }
+    for (const line of thin) console.log(line);
   "
 }
 
@@ -586,7 +784,7 @@ do_narrative() {
 do_vibe() {
   ensure_profile
   cd "$ROOT_DIR"
-  cat "$PROFILE_FILE" | PROFILE_DATA="$(cat "$PROFILE_FILE")" bun -e "
+  cat "$PROFILE_FILE" | PROFILE_DATA="$(cat "$PROFILE_FILE")" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     import('./scripts/archetypes.ts').then(async (mod) => {
       const p = JSON.parse(process.env.PROFILE_DATA);
       const dims = (p.inferred && p.inferred.values) || {

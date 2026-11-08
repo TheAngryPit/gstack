@@ -181,7 +181,7 @@ test('ambient routing and cwd cannot override the explicit host binding',()=>{
   expect(probes.length).toBeGreaterThan(0);
   expect(dispatches.map(call=>call.args[0])).toEqual(['search']);
   for(const call of probes) {
-    const expectedCwd=call.args[0]==='sources' ? join(temp,'brain','.gbrain') : join(temp,'brain');
+    const expectedCwd=['sources','doctor'].includes(call.args[0]) ? join(temp,'brain','.gbrain') : join(temp,'brain');
     expect(call.cwd, `${call.args.join(' ')} cwd=${call.cwd}`).toBe(realpathSync(expectedCwd));
   }
   for(const call of dispatches) {

@@ -124,7 +124,7 @@ Write DESIGN.md and CLAUDE.md (or update it) in the working directory.`,
       timeout: CAPTURE_LONG_MS,
       testName: 'design-consultation-core',
       runId,
-      model: 'claude-opus-4-7',
+      model: resolveEvalModel('capture'),
     });
 
     logCost('/design-consultation core', result);
@@ -298,7 +298,7 @@ Run Phase 0's DESIGN.md format check exactly as written (the gstack bin director
       timeout: CAPTURE_LONG_MS,
       testName: 'design-consultation-existing',
       runId,
-      model: 'claude-opus-4-7',
+      model: resolveEvalModel('capture'),
     });
 
     logCost('/design-consultation existing', result);
@@ -1316,8 +1316,8 @@ describeIfSelected('Design HTML slop gate E2E', ['design-html-slop-gate'], () =>
   testConcurrentIfSelected('design-html-slop-gate', async () => {
     const result = await runSkillTest({
       prompt: `Read design-html-gate.md: the /design-html detector probe block and its "Slop Gate (bounded, never a loop)" step.
-finalized.html in this directory is the finished page. Run the probe (--host claude), then the slop gate on finalized.html exactly as written: one surgical fix pass over the non-advisory findings, one rescan, then stop.
-Write ${workDir}/gate-output.md listing what you fixed and every remaining finding as accepted-with-reason, each tagged with its [rule-id]. Do not take screenshots, do not run npx, do not scan more than twice.`,
+finalized.html in this directory is the finished page. Run the probe (--host claude), then the slop gate on finalized.html exactly as written: one surgical fix pass over the non-advisory findings, one rescan. Then the design lint line that follows it, the same way, then stop.
+Write ${workDir}/gate-output.md listing what you fixed and every remaining finding as accepted-with-reason, each tagged with its [rule-id] or lint rule id. Do not take screenshots, do not run npx, do not run either check more than twice.`,
       workingDirectory: workDir,
       maxTurns: 20,
       timeout: CAPTURE_MS,
@@ -1332,10 +1332,97 @@ Write ${workDir}/gate-output.md listing what you fixed and every remaining findi
     const scans = result.toolCalls.filter(c => c.tool === 'Bash' && /gstack-design-detect\.ts scan /.test(String(c.input?.command ?? '')));
     expect(scans.length).toBeGreaterThanOrEqual(1);
     expect(scans.length).toBeLessThanOrEqual(2);
+    const lintRuns = result.toolCalls.filter(c => c.tool === 'Bash' && /gstack-design-lint['"]?\s+[^\s;|&]*\.html\b/.test(String(c.input?.command ?? '')));
+    expect(lintRuns.length).toBeGreaterThanOrEqual(1);
+    expect(lintRuns.length).toBeLessThanOrEqual(2);
     const outPath = path.join(workDir, 'gate-output.md');
     expect(fs.existsSync(outPath)).toBe(true);
     const out = fs.readFileSync(outPath, 'utf-8').toLowerCase();
     expect(out).toContain('ai-color-palette');
     expect(out).toContain('accepted');
   }, CAPTURE_MS);
+});
+
+describeIfSelected('Design motion showcase E2E', ['design-motion-showcase'], () => {
+  let workDir: string;
+  let gstackHome: string;
+
+  beforeAll(() => {
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-motion-'));
+    gstackHome = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-motion-home-'));
+    const run = (cmd: string, args: string[]) => spawnSync(cmd, args, { cwd: workDir, stdio: 'pipe', timeout: 5000 });
+    run('git', ['init', '-b', 'main']);
+    run('git', ['config', 'user.email', 'test@test.com']);
+    run('git', ['config', 'user.name', 'Test']);
+    fs.copyFileSync(path.join(ROOT, 'test', 'fixtures', 'design-motion-finalized.html'), path.join(workDir, 'finalized.html'));
+    run('git', ['add', '.']);
+    run('git', ['commit', '-m', 'finalized page']);
+    const full = fs.readFileSync(path.join(ROOT, 'design-motion', 'SKILL.md'), 'utf-8');
+    const text = full.slice(full.indexOf('# /design-motion:'))
+      .replaceAll('$HOME/.claude/skills/gstack', ROOT).replaceAll('~/.claude/skills/gstack', ROOT);
+    fs.writeFileSync(path.join(workDir, 'design-motion.md'), text);
+  });
+
+  afterAll(() => {
+    for (const d of [workDir, gstackHome]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+  });
+
+  testConcurrentIfSelected('design-motion-showcase', async () => {
+    const result = await runSkillTest({
+      prompt: `Read design-motion.md: the /design-motion skill. Run it on finalized.html in this directory, the user's /design-html page, as the source.
+Settled answers, so do not use AskUserQuestion: showcase context; separate cards (the two .card sections); stories: the bars breathe and settle on the design heights, a soft highlight steps down the invoice rows; no camera; a 6 second cycle instead of 12 (scale the phases to it); name "ledgerline"; the frame is 640x400.
+Read each section the skill points to before its step. Build page.html with the capture contract, verify the still, capture with a mask on the cards, run the motion checks, fix and recheck until they pass, then export. Do not open a browser window and do not install anything.
+Finally write ${workDir}/motion-report.md with every MOTION_CHECK line, the MOTION_RESULT line, and each EXPORT_OK line exactly as printed.`,
+      workingDirectory: workDir,
+      maxTurns: 60,
+      timeout: CAPTURE_LONG_MS,
+      testName: 'design-motion-showcase',
+      runId,
+      env: { GSTACK_HOME: gstackHome },
+    });
+
+    logCost('/design-motion showcase', result);
+    recordE2E(evalCollector, '/design-motion showcase', 'Design motion showcase E2E', result);
+    expect(result.exitReason).toBe('success');
+    const sectionRead = (name: string) => {
+      if (result.toolCalls.some(c => c.tool === 'Read' && String(c.input?.file_path ?? '').endsWith(`/design-motion/sections/${name}`))) return true;
+      const printed = result.toolCalls
+        .filter(c => c.tool === 'Bash' && String(c.input?.command ?? '').includes(`design-motion/sections/${name}`))
+        .map(c => String(c.output ?? '')).join('\n');
+      const lines = fs.readFileSync(path.join(ROOT, 'design-motion', 'sections', name), 'utf-8').split('\n').map(l => l.trimEnd()).filter(Boolean);
+      return lines.every(line => printed.includes(line));
+    };
+    expect(sectionRead('fidelity.md')).toBe(true);
+    expect(sectionRead('motion.md')).toBe(true);
+    const commands = result.toolCalls.filter(c => c.tool === 'Bash').map(c => String(c.input?.command ?? '')).join('\n');
+    const after = (re: RegExp, from: number) => { const i = commands.slice(from).search(re); return i < 0 ? -1 : from + i; };
+    const capture = after(/gstack-motion-capture\.ts\b[^\n]*--out\b/, 0);
+    expect(capture).toBeGreaterThanOrEqual(0);
+    const check = after(/gstack-motion-encode['"]?\s+check\b/, capture);
+    expect(check).toBeGreaterThan(capture);
+    expect(after(/gstack-motion-encode['"]?\s+export\b/, check)).toBeGreaterThan(check);
+
+    const designs = path.join(gstackHome, 'projects');
+    const motionDirs = fs.existsSync(designs)
+      ? fs.readdirSync(designs).flatMap(slug => {
+        const d = path.join(designs, slug, 'designs');
+        return fs.existsSync(d) ? fs.readdirSync(d).filter(n => n.includes('-motion-')).map(n => path.join(d, n)) : [];
+      })
+      : [];
+    expect(motionDirs.length).toBe(1);
+    const page = fs.readFileSync(path.join(motionDirs[0]!, 'page.html'), 'utf-8');
+    expect(page).toContain('__start');
+    expect(page).toContain('__tick');
+    const manifest = JSON.parse(fs.readFileSync(path.join(motionDirs[0]!, 'cap', 'capture.json'), 'utf-8'));
+    expect(manifest.windowFrames).toBe(360);
+    expect(manifest.mask).toBe('mask.png');
+
+    const report = fs.readFileSync(path.join(workDir, 'motion-report.md'), 'utf-8');
+    for (const id of ['seam', 'empty-beat', 'rest', 'overflow']) expect(report).toContain(`MOTION_CHECK: ${id} pass`);
+    expect(report).toContain('MOTION_RESULT: clean');
+    for (const file of ['ledgerline-x.mp4', 'ledgerline-loop.gif', 'ledgerline-800x500.gif']) {
+      expect(report).toContain(file);
+      expect(fs.statSync(path.join(motionDirs[0]!, 'cap', file)).size).toBeGreaterThan(10_000);
+    }
+  }, CAPTURE_LONG_MS);
 });

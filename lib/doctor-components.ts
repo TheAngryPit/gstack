@@ -11,10 +11,17 @@
  *
  * Row semantics (printed as `PASS | FAIL | SKIP <id>`):
  *   core      always evaluated and always required (runtime, pins, state root,
- *             privacy, cores, revision, wrapper). `pins`, `state-root` and
- *             `wrapper` SKIP with a reason when they cannot be evaluated; a
- *             SKIP never fails a run. `wrapper` WARNs (an owner action, never
- *             a failure) for a stale Capy skill copy the run did not use.
+ *             privacy, cores, revision, floor, wrapper). `pins`, `state-root`,
+ *             `floor` and `wrapper` SKIP with a reason when they cannot be
+ *             evaluated; a SKIP never fails a run. WARN never fails a run
+ *             either: `wrapper` WARNs (an owner action) for a stale Capy skill
+ *             copy the run did not use; `floor` WARNs when the installed gstack
+ *             is below the floor the project declares (`min_gstack_version` in
+ *             its .gstack/ship-policy.json), with the upgrade as the fix; `pins`
+ *             WARNs when only the project's Node pin is unmet (the Node on PATH
+ *             differs from the pin; Bun pins stay FAIL, because gstack runs on
+ *             Bun). Only the security floor (`--min-revision`, capy/support.env
+ *             GSTACK_MIN_REVISION) fails a session for being old.
  *   host      a host profile. Required when `--for`/`--require` names it, or by
  *             default when it is installed from this checkout. With no flag and
  *             no host installed, `claude` (setup's default host) is required so
@@ -26,7 +33,8 @@
  *
  * Install profiles (INSTALL_PROFILES) are SKILL_REQUIREMENTS rows that name an
  * install shape instead of a skill directory. `--for review-voice` is the one
- * today: a dispatched reviewer's machine gets a clone or fast-forward and Bun
+ * today: a dispatched reviewer's machine gets a clone when absent (an existing
+ * checkout is used as is unless it is below the supported minimum) and Bun
  * at gstack's own minimum (the project's pins are never applied, so `pins`
  * SKIPs), no ./setup and no host profiles, and the trailer certifies only the
  * read-only helpers (`helpers`). Its verdict covers no host, so admission
@@ -34,6 +42,7 @@
  */
 
 import { RESULT_CODES } from './result-codes';
+import { SHIP_POLICY_PATH } from './ship-policy';
 
 export type ComponentKind = 'core' | 'host' | 'component' | 'optional';
 
@@ -58,6 +67,7 @@ export const DOCTOR_COMPONENTS: readonly DoctorComponent[] = [
   { id: 'privacy', title: 'privacy', kind: 'core' },
   { id: 'cores', title: 'cores', kind: 'core' },
   { id: 'revision', title: 'revision', kind: 'core' },
+  { id: 'floor', title: "the project's gstack floor (min_gstack_version in .gstack/ship-policy.json)", kind: 'core' },
   { id: 'wrapper', title: 'Capy skill copy (bootstrapper revision)', kind: 'core' },
 ] as const;
 
@@ -78,6 +88,22 @@ const REVIEW_VOICE: SkillRequirement = { requires: ['helpers'], optional: [] };
 
 /** SKILL_REQUIREMENTS rows that are install profiles, not skill directories (see the header). */
 export const INSTALL_PROFILES: readonly string[] = ['review-voice'];
+
+/**
+ * `--for none`: the session runs no gstack workflow on this machine (a
+ * coordinator or liaison thread). The check certifies nothing and installs
+ * nothing; its trailer is `gstack: ok not-needed for=none (<notes>)`, exit 0,
+ * which admits no workflow (no install verdict is written, so admission still
+ * refuses with a `--for <skill>` fix). The bootstrapper, the session wrapper
+ * and the installer all honour it, so a machine without a checkout gets the
+ * same outcome as one with a checkout.
+ */
+export const NOT_NEEDED_PROFILE = 'none';
+export const NOT_NEEDED_REVISION = 'not-needed';
+
+/** The project file and key the `floor` row reads (the same key gstack-ship-queue validates). */
+export const PROJECT_FLOOR_FILE = SHIP_POLICY_PATH;
+export const PROJECT_FLOOR_FIELD = 'min_gstack_version';
 
 /** The read-only helpers the `helpers` row launches (`<bin> --help` loads each module graph with the launch Bun). */
 export const REVIEW_VOICE_HELPERS: readonly string[] = ['gstack-pregate', 'gstack-plan-reality', 'gstack-artifact', 'gstack-autoplan'];
@@ -125,6 +151,7 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   'design-review': BROWSER,
   'design-consultation': BROWSER,
   'design-html': BROWSER,
+  'design-motion': BROWSER,
   'devex-review': BROWSER,
   scrape: BROWSER,
   skillify: BROWSER,
@@ -138,6 +165,7 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   'connect-chrome': BROWSER,
   'land-and-deploy': BROWSER,
   'benchmark-models': CLAUDE_ONLY,
+  captain: CLAUDE_ONLY,
   careful: CLAUDE_ONLY,
   'claude-code': CLAUDE_ONLY,
   'context-restore': CLAUDE_ONLY,
@@ -158,12 +186,17 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   'ios-sync': CLAUDE_ONLY,
   'landing-report': CLAUDE_ONLY,
   learn: CLAUDE_ONLY,
+  'write-skill': CLAUDE_ONLY,
+  modernize: CLAUDE_ONLY,
   retro: CLAUDE_ONLY,
+  'runaway-stopper': CLAUDE_ONLY,
   'setup-deploy': CLAUDE_ONLY,
   'setup-gbrain': CLAUDE_ONLY,
   'sync-gbrain': CLAUDE_ONLY,
   'test-audit': CLAUDE_ONLY,
+  ubicloud: CLAUDE_ONLY,
   unfreeze: CLAUDE_ONLY,
+  verify: CLAUDE_ONLY,
   'review-voice': REVIEW_VOICE,
 };
 
@@ -215,6 +248,10 @@ export function renderDoctorComponentsSh(): string {
     `GSTACK_DOCTOR_SKILLS="${Object.keys(SKILL_REQUIREMENTS).join(' ')}"`,
     `GSTACK_BROWSER_LAZY_REASON="${BROWSER_LAZY_REASON}"`,
     `GSTACK_DOCTOR_HELPERS="${REVIEW_VOICE_HELPERS.join(' ')}"`,
+    `GSTACK_DOCTOR_NOT_NEEDED="${NOT_NEEDED_PROFILE}"`,
+    `GSTACK_DOCTOR_NOT_NEEDED_REVISION="${NOT_NEEDED_REVISION}"`,
+    `GSTACK_PROJECT_FLOOR_FILE="${PROJECT_FLOOR_FILE}"`,
+    `GSTACK_PROJECT_FLOOR_FIELD="${PROJECT_FLOOR_FIELD}"`,
     '',
     '# gstack_doctor_component_title ID — the human title; returns 1 for an unknown id.',
     'gstack_doctor_component_title() {',

@@ -84,3 +84,80 @@ describe('gstack-team-init required: PreToolUse hook schema (#2413)', () => {
     expect(JSON.parse(stdout.trim())).toEqual({});
   });
 });
+
+// #3319: when the launcher itself cannot run, the hook prints nothing and exits
+// with neither 0 nor 2, which Claude Code treats as a non-blocking error. The
+// handler is registered with onFailure: block (Claude Code 2.1.295+) so those
+// failures block the Skill call instead of letting it through.
+describe('gstack-team-init required: the hook fails closed (#3319)', () => {
+  let repo: string;
+  let home: string;
+  let noNodeBin: string;
+
+  beforeEach(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-team-init-closed-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-team-init-closed-home-'));
+    noNodeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-team-init-no-node-'));
+  });
+
+  afterEach(() => {
+    for (const dir of [repo, home, noNodeBin]) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const init = () => execFileSync(TEAM_INIT, ['required'], { cwd: repo, encoding: 'utf-8', timeout: 30_000 });
+  const settingsPath = () => path.join(repo, '.claude', 'settings.json');
+  const ourHandlers = () => JSON.parse(fs.readFileSync(settingsPath(), 'utf-8')).hooks.PreToolUse
+    .flatMap((e: { hooks: { command: string }[] }) => e.hooks)
+    .filter((h: { command: string }) => h.command.includes('check-gstack'));
+
+  function runRegistered(pathEnv: string): { status: number; stdout: string } {
+    const [{ command }] = ourHandlers();
+    try {
+      const stdout = execSync(command, {
+        env: { PATH: pathEnv, HOME: home, CLAUDE_PROJECT_DIR: repo },
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 30_000,
+      });
+      return { status: 0, stdout };
+    } catch (err) {
+      const e = err as { status: number; stdout: string };
+      return { status: e.status, stdout: e.stdout };
+    }
+  }
+
+  test('the check-gstack handler is registered with onFailure: block', () => {
+    init();
+    const handlers = ourHandlers();
+    expect(handlers).toHaveLength(1);
+    expect(handlers[0]).toEqual({ type: 'command', command: handlers[0].command, onFailure: 'block' });
+  });
+
+  test('node missing from PATH: no output and exit 127, a failure only onFailure turns into a block', () => {
+    init();
+    const { status, stdout } = runRegistered(noNodeBin);
+    expect(status).toBe(127);
+    expect(stdout).toBe('');
+  });
+
+  test('check-gstack.cjs missing: no output and exit 1, a failure only onFailure turns into a block', () => {
+    init();
+    fs.rmSync(path.join(repo, '.claude', 'hooks', 'check-gstack.cjs'));
+    const { status, stdout } = runRegistered(process.env.PATH!);
+    expect(status).toBe(1);
+    expect(stdout).toBe('');
+  });
+
+  test('re-running upgrades a handler registered without onFailure, keeping one handler', () => {
+    init();
+    const settings = JSON.parse(fs.readFileSync(settingsPath(), 'utf-8'));
+    const [{ command }] = ourHandlers();
+    settings.hooks.PreToolUse = [{ matcher: 'Skill|skill', hooks: [{ type: 'command', command }] }];
+    fs.writeFileSync(settingsPath(), JSON.stringify(settings));
+
+    const out = init();
+    expect(ourHandlers()).toEqual([{ type: 'command', command, onFailure: 'block' }]);
+    expect(out).toContain('Claude Code 2.1.295 or later');
+  });
+});

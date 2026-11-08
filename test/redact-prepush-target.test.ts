@@ -4,13 +4,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scan } from "../lib/redact-engine";
+import { gitEnv } from "./helpers/git-env";
 
 const REDACT = path.resolve(import.meta.dir, "../bin/gstack-redact");
 const roots: string[] = [];
 const key = ["AKIA", "1234567890ABCDEF"].join("");
 
 function git(cwd: string, ...args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30_000 });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30_000, env: gitEnv() });
   if (result.status !== 0) throw new Error(`git ${args[0]} failed: ${result.stderr}`);
   return result.stdout.trim();
 }
@@ -35,7 +36,7 @@ function fixture(initialSecret = true, sha256 = false): { repo: string; origin: 
   git(repo, "remote", "add", "origin", origin);
   git(repo, "push", "-q", "-u", "origin", "main");
   git(repo, "remote", "add", "publish", publish);
-  const install = spawnSync("bun", [REDACT, "install-prepush-hook"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+  const install = spawnSync("bun", [REDACT, "install-prepush-hook"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
   expect(install.status).toBe(0);
   return { repo, origin, publish, head };
 }
@@ -58,11 +59,49 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
+describe("fixture installs ignore the developer's hook config (#3353)", () => {
+  test("a global, system or environment core.hooksPath is neither rewritten nor run", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "prepush-target-global-"));
+    roots.push(root);
+    const hooks = path.join(root, "global-hooks");
+    fs.mkdirSync(hooks);
+    const original = "#!/bin/sh\necho developer-hook >&2\nexit 1\n";
+    fs.writeFileSync(path.join(hooks, "pre-push"), original, { mode: 0o755 });
+    const config = path.join(root, "gitconfig");
+    fs.writeFileSync(config, `[core]\n\thooksPath = ${JSON.stringify(hooks)}\n`);
+    const keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT",
+      "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS"] as const;
+    const prev = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+    try {
+      process.env.GIT_CONFIG_GLOBAL = config;
+      process.env.GIT_CONFIG_SYSTEM = config;
+      delete process.env.GIT_CONFIG_NOSYSTEM;
+      process.env.GIT_CONFIG_COUNT = "1";
+      process.env.GIT_CONFIG_KEY_0 = "core.hooksPath";
+      process.env.GIT_CONFIG_VALUE_0 = hooks;
+      process.env.GIT_CONFIG_PARAMETERS = `'core.hooksPath=${hooks}'`;
+      const { repo } = fixture(false);
+      expect(fs.readdirSync(hooks)).toEqual(["pre-push"]);
+      expect(fs.readFileSync(path.join(hooks, "pre-push"), "utf8")).toBe(original);
+      const installed = git(repo, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push");
+      expect(fs.readFileSync(installed, "utf8")).toContain("gstack-redact pre-push (managed)");
+      const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
+      expect(push.status, push.stderr).toBe(0);
+      expect(push.stderr).not.toContain("developer-hook");
+    } finally {
+      for (const [key, value] of Object.entries(prev)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});
+
 describe("installed pre-push guard uses the actual destination", () => {
   test("origin tracking at HEAD cannot excuse the same credential on first push to publish", () => {
     const { repo, publish, head } = fixture();
     expect(git(repo, "rev-parse", "origin/main")).toBe(head);
-    const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.access_key");
     expect(git(publish, "for-each-ref", "--format=%(refname)")).toBe("");
@@ -71,7 +110,7 @@ describe("installed pre-push guard uses the actual destination", () => {
   test("a configured remote's different push URL cannot reuse its fetch tracking tip", () => {
     const { repo, publish } = fixture();
     git(repo, "remote", "set-url", "--push", "origin", publish);
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.access_key");
     expect(git(publish, "for-each-ref", "--format=%(refname)")).toBe("");
@@ -92,7 +131,7 @@ describe("installed pre-push guard uses the actual destination", () => {
       git(repo, "update-ref", "refs/heads/publish/main", tip);
       expect(git(repo, "rev-parse", "publish/main")).toBe(tip);
       expect(git(repo, "rev-parse", "refs/remotes/publish/main")).toBe(base);
-      const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+      const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
       expect(push.status).toBe(1);
       expect(push.stderr).toContain("aws.access_key");
       expect(git(publish, "for-each-ref", "--format=%(refname)")).toBe("");
@@ -108,7 +147,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     expect(git(repo, "rev-parse", "refs/remotes/publish/main")).toBe(git(repo, "rev-parse", "HEAD"));
     git(repo, "remote", "set-url", "--add", "publish", second);
     expect(git(repo, "remote", "get-url", "publish")).toBe(publish);
-    const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.access_key");
     expect(git(second, "for-each-ref", "--format=%(refname)")).toBe("");
@@ -116,7 +155,7 @@ describe("installed pre-push guard uses the actual destination", () => {
 
   test("direct URL push cannot borrow origin's tracking history", () => {
     const { repo, publish } = fixture();
-    const push = spawnSync("git", ["push", publish, "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", publish, "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.access_key");
     expect(git(publish, "for-each-ref", "--format=%(refname)")).toBe("");
@@ -125,8 +164,8 @@ describe("installed pre-push guard uses the actual destination", () => {
   test("an advertised remote tip absent from local objects cannot justify a guessed base", () => {
     const { repo, publish } = fixture();
     const remoteTip = seedIndependentRemote(repo, publish);
-    expect(spawnSync("git", ["cat-file", "-e", remoteTip], { cwd: repo, timeout: 30_000 }).status).not.toBe(0);
-    const push = spawnSync("git", ["push", "--force", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    expect(spawnSync("git", ["cat-file", "-e", remoteTip], { cwd: repo, timeout: 30_000, env: gitEnv() }).status).not.toBe(0);
+    const push = spawnSync("git", ["push", "--force", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.access_key");
     expect(git(publish, "rev-parse", "refs/heads/main")).toBe(remoteTip);
@@ -135,21 +174,21 @@ describe("installed pre-push guard uses the actual destination", () => {
   test("an absent advertised tip permits a clean forced update after conservative scanning", () => {
     const { repo, publish, head } = fixture(false);
     const remoteTip = seedIndependentRemote(repo, publish);
-    expect(spawnSync("git", ["cat-file", "-e", remoteTip], { cwd: repo, timeout: 30_000 }).status).not.toBe(0);
-    const push = spawnSync("git", ["push", "--force", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    expect(spawnSync("git", ["cat-file", "-e", remoteTip], { cwd: repo, timeout: 30_000, env: gitEnv() }).status).not.toBe(0);
+    const push = spawnSync("git", ["push", "--force", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(git(publish, "rev-parse", "refs/heads/main")).toBe(head);
   });
 
   test("new SHA-256 branch scans the correct empty tree and allows a clean push", () => {
     const { repo, publish } = fixture(false, true);
-    const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "publish", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(git(publish, "rev-parse", "refs/heads/main")).toHaveLength(64);
     fs.writeFileSync(path.join(repo, "leak.txt"), `key ${key}\n`);
     git(repo, "add", "leak.txt");
     git(repo, "commit", "-qm", "new secret");
-    const blocked = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const blocked = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(blocked.status).toBe(1);
     expect(blocked.stderr).toContain("aws.access_key");
   });
@@ -164,7 +203,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "clean.txt"), "safe update\n");
     git(repo, "add", "clean.txt");
     git(repo, "commit", "-qm", "clean branch");
-    const push = spawnSync("git", ["push", "origin", "main", "leak"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main", "leak"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.access_key");
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(head);
@@ -183,7 +222,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     git(repo, "add", "clean.txt");
     git(repo, "commit", "-qm", "clean update");
     const head = git(repo, "rev-parse", "HEAD");
-    const push = spawnSync("git", ["push", "origin", "main", ":disposable"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main", ":disposable"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(head);
     expect(git(origin, "for-each-ref", "--format=%(refname)", "refs/heads/disposable")).toBe("");
@@ -193,7 +232,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     const { repo, origin, head } = fixture(false);
     const hook = git(repo, "rev-parse", "--git-path", "hooks/pre-push");
     const result = spawnSync("bash", [hook, "origin", origin], {
-      cwd: repo, input: "refs/heads/main malformed\n", encoding: "utf8", timeout: 30_000,
+      cwd: repo, input: "refs/heads/main malformed\n", encoding: "utf8", timeout: 30_000, env: gitEnv(),
     });
     expect(result.status, result.stderr || result.error?.message).toBe(1);
     expect(result.stderr).toContain("could not parse a pre-push ref line");
@@ -208,7 +247,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "near seam");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.secret_key");
   });
@@ -221,7 +260,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "unlabeled seam");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(push.stderr).not.toContain("aws.secret_key");
   });
@@ -232,7 +271,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "one finding at seam");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr.match(/HIGH  aws\.access_key/g)).toHaveLength(1);
   });
@@ -247,7 +286,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "supplementary normalization seam");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr.match(/HIGH  aws\.access_key/g)).toHaveLength(1);
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(head);
@@ -264,7 +303,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "mid-line control");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(push.stderr).not.toContain("MEDIUM finding");
   });
@@ -277,7 +316,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "embedded key control");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(push.stderr).not.toContain("aws.access_key");
     expect(git(origin, "rev-parse", "refs/heads/main")).not.toBe(head);
@@ -294,7 +333,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "long bearer advisory");
     const tip = git(repo, "rev-parse", "HEAD");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(push.stderr).toContain("MEDIUM finding");
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(tip);
@@ -308,7 +347,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "invisible seam");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.secret_key");
   });
@@ -320,7 +359,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "payload.txt"), payload);
     git(repo, "add", "payload.txt");
     git(repo, "commit", "-qm", "unscannable context");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("engine.input_too_large");
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(head);
@@ -339,7 +378,7 @@ describe("installed pre-push guard uses the actual destination", () => {
       fs.writeFileSync(path.join(repo, "payload.txt"), payload);
       git(repo, "add", "payload.txt");
       git(repo, "commit", "-qm", "normalization seam");
-      const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+      const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
       expect(push.status).toBe(expected ? 1 : 0);
       expect(push.stderr.includes("aws.secret_key")).toBe(expected);
     });
@@ -350,19 +389,19 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "large.txt"), "ordinary content\n".repeat(160_000));
     git(repo, "add", "large.txt");
     git(repo, "commit", "-qm", "large clean diff");
-    let push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 60_000 });
+    let push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 60_000, env: gitEnv() });
     expect(push.status).toBe(0);
     fs.writeFileSync(path.join(repo, "long.txt"), "x".repeat(900_000) + "\n");
     git(repo, "add", "long.txt");
     git(repo, "commit", "-qm", "long clean line");
-    push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 60_000 });
+    push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 60_000, env: gitEnv() });
     expect(push.status).toBe(0);
     const priorTip = git(origin, "rev-parse", "refs/heads/main");
     expect(priorTip).not.toBe(head);
     fs.writeFileSync(path.join(repo, "too-long.txt"), "x".repeat(1_100_000) + "\n");
     git(repo, "add", "too-long.txt");
     git(repo, "commit", "-qm", "over cap line");
-    push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 60_000 });
+    push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 60_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("engine.input_too_large");
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(priorTip);
@@ -373,7 +412,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     fs.writeFileSync(path.join(repo, "long.txt"), `${"x".repeat(900_000)} key ${key}\n`);
     git(repo, "add", "long.txt");
     git(repo, "commit", "-qm", "long line with key");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(1);
     expect(push.stderr).toContain("aws.access_key");
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(head);
@@ -385,7 +424,7 @@ describe("installed pre-push guard uses the actual destination", () => {
     git(repo, "add", "long.txt");
     git(repo, "commit", "-qm", "neighboring long lines");
     const tip = git(repo, "rev-parse", "HEAD");
-    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    const push = spawnSync("git", ["push", "origin", "main"], { cwd: repo, encoding: "utf8", timeout: 30_000, env: gitEnv() });
     expect(push.status).toBe(0);
     expect(push.stderr).not.toContain("engine.input_too_large");
     expect(git(origin, "rev-parse", "refs/heads/main")).toBe(tip);

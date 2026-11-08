@@ -118,7 +118,7 @@ describe('setup: host accept-list ↔ hosts/index.ts registry cross-check (#2361
     expect(res.stdout).not.toMatch(/Installing|bun install|Building/);
   });
 
-  test.each(['slate', 'openclaw', 'hermes', 'gbrain'])('%s finishes before installation preflight commands', (host) => {
+  test.each(['slate', 'gbrain'])('%s finishes before installation preflight commands', (host) => {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'setup-info-preflight-'));
     const startup = path.join(temporary, 'startup.bash');
     fs.writeFileSync(startup, `command() { echo 'unexpected installation preflight' >&2; return 97; }
@@ -134,9 +134,6 @@ date() { echo 'unexpected backup timestamp' >&2; return 97; }
       expect(res.status).toBe(0);
       expect(res.stderr).toBe('');
       expect(res.stdout).not.toMatch(/Installing|bun install|Building/);
-      if (host === 'openclaw' || host === 'hermes') {
-        expect(res.stdout.replaceAll('\\', '/')).toContain('/agents-digest/gstack-AGENTS.md');
-      }
     } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
   });
 

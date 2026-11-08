@@ -168,17 +168,14 @@ describe('tier lane skip (B5)', () => {
     for (const tier of ['gate', 'periodic'] as const) expect(tierSkipReason('test/skill-e2e-diagram.test.ts', source, tier)).toBeNull();
   });
 
-  test('the weekly gate census alone drops the LLM judges, with the reason in the manifest', () => {
-    const census = buildRunManifest({ tier: 'gate', sliceCount: 7, evalsAll: true, skipJudges: true, env: { EVALS_ALL: '1' } });
-    const judge = census.entries.find(entry => entry.file === 'test/skill-llm-eval.test.ts');
-    expect(judge).toMatchObject({ status: 'excluded', reason: 'skipped: LLM judges run in the periodic census and PR gate lanes' });
-    for (const tier of ['gate', 'periodic'] as const) {
-      const lane = buildRunManifest({ tier, sliceCount: 7, evalsAll: true, env: { EVALS_ALL: '1' } });
-      expect(lane.entries.find(entry => entry.file === 'test/skill-llm-eval.test.ts')?.status).toBe('planned');
-    }
+  test('the weekly gate census passes --skip-judges, which plans the same files now that no standalone judge file exists', () => {
+    const planned = (skipJudges: boolean) => buildRunManifest({ tier: 'gate', sliceCount: 7, evalsAll: true, skipJudges, env: { EVALS_ALL: '1' } })
+      .entries.filter(entry => entry.status === 'planned').map(entry => entry.file).sort();
+    expect(planned(true)).toEqual(planned(false));
+    expect(planned(false).some(file => file.startsWith('test/skill-llm-eval'))).toBe(false);
     const workflow = fs.readFileSync(path.join(ROOT, '.github/workflows/evals-periodic.yml'), 'utf8');
     expect(workflow.match(/--skip-judges/g)).toHaveLength(1);
-    expect(workflow).toMatch(/--tier gate --emit-plan \/tmp\/gate-census-plan\/manifest\.json --slice-budget 420 --jobs 2 --skip-judges/);
+    expect(workflow).toMatch(/--tier gate --emit-plan "\/tmp\/gate-census-plan\/\$arm\/manifest\.json" --slice-budget 420 --jobs 2 --skip-judges/);
   });
 });
 
@@ -811,7 +808,9 @@ console.log("Ran 1 tests across 1 files. [1ms]"); process.exit(${fail ? 1 : 0});
     // The report's after-a-repair command selects exactly one case: --case when it resolves, else that shard's file.
     expect(afterRepairCommand('gate', 'plan-mode-no-op', 'test/skill-e2e-plan-mode-no-op.test.ts')).toBe('bun run scripts/test-paid-shards.ts --tier gate --case plan-mode-no-op');
     expect(afterRepairCommand('periodic', 'carve-section-loading', 'test/carve-section-loading-qa.test.ts')).toBe('EVALS=1 EVALS_TIER=periodic bun test test/carve-section-loading-qa.test.ts');
-  });
+  // caseSelection parses every paid file once per registered id; the loop took 4.97 s
+  // on a 4-core machine at main (2026-10-26), so the default 5 s budget is not a measurement of anything.
+  }, 30_000);
 
   test('B4: --list prints the selection; an unknown id exits non-zero before any process starts', () => {
     const run = (args: string[]) => spawnSync(process.execPath, [path.join(ROOT, 'scripts/test-paid-shards.ts'), ...args], { encoding: 'utf8', timeout: 60_000, cwd: ROOT });

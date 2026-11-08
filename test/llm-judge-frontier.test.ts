@@ -218,6 +218,22 @@ describe('frontier Claude judge compatibility', () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
+  // Train-4 gate 40173759210 slice 4 attempt 1: Sonnet's free-form cookie workflow judgment left the quotes around "one `--domain` per run" unescaped.
+  const COOKIE_GATE_UNESCAPED_REPLY = "{\"clarity\": 4, \"completeness\": 4, \"actionability\": 4, \"reasoning\": \"The workflow is well ordered: Aside check, then consent questions before any `$B` command, then daemon prep, import, and an honest three-line report. It states the boundaries precisely: profile directory vs display name, `--all` exclusions, Chromium-only reset with its non-rollback caveat, and the rule that copied cookies, counts, and HTTP 200 never prove sign-in. The error and failure-reason tables cover recovery and platform limits. Gaps and ambiguities remain. (1) Step 3.1 sets env vars and runs `$B stop` before `$B status` and `goto`, which is workable but slightly awkward. (2) Step 2 says to ask everything before any `$B` command, yet it also needs the Aside probe, which comes earlier in step 1 and so is an implicit exception. (3) It is unclear how the picker or direct import maps the receipt's states to the three report lines, such as `Imported: <count>` for partial or failed results, or the storage-reset line when the picker is used. (4) The `--all` flow is not given a command example or a step. (5) For the multiple-domain case the instruction is \"one `--domain` per run\", but it does not say how to handle the target tab or the receipt across runs. (6) `decryption_failed` says to close the source browser, which sits in tension with the Chrome 136+ note, though it is not contradictory. (7) The `handoff` path requires a display, and the fallback when none is available is not defined beyond 'offer only with a display'. (8) The Windows example's `$B reload` without verification is fine, but the unverified case is not tied to the report. Overall it is strong with a few minor missing decisions.\"}";
+
+  test('the captured cookie judge reply fails closed and names the judge output, stop reason and retained text', async () => {
+    create.mockResolvedValue({ id: 'msg_011CgNbBNCNcZ2C6WJDCmjgU', model: 'claude-sonnet-5-5', stop_reason: 'end_turn',
+      content: [{ type: 'text', text: COOKIE_GATE_UNESCAPED_REPLY }], usage: { input_tokens: 4521, output_tokens: 572 } } as never);
+    let failure: unknown;
+    try { await callJudge('score the workflow', 'claude-sonnet-5-5'); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(SyntaxError);
+    expect((failure as Error).message).toStartWith(`Judge response is not valid JSON (stop_reason=end_turn, ${COOKIE_GATE_UNESCAPED_REPLY.length} chars; full text in llm-judge-response-parse-error): `);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(diagnostics.mock.calls[0][0])).toMatchObject({ type: 'llm-judge-response-parse-error', stopReason: 'end_turn',
+      textBlocks: [COOKIE_GATE_UNESCAPED_REPLY], error: { name: 'SyntaxError', message: (failure as Error).message } });
+  });
+
   test('a weak structured score still fails the substance bar', async () => {
     create.mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text',
       text: JSON.stringify({ reason_substance: 1, reasoning: 'Boilerplate.' }) }] } as never);

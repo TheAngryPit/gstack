@@ -99,7 +99,7 @@ through CDP before `goto`, as the cookbook does), and no `file://` navigation.
 | `/scrape` | Prototype the extraction with `aside repl`, hand back the table, list, or prices as structured data. Read-only. |
 | `/devex-review` | Walk the real onboarding flow and time it, carrying the cookbook inline. |
 | `/ship`, `/spec`, `/land-and-deploy`, `/setup-deploy`, `/office-hours` | Third-party web actions (vendor dashboards, API keys, webhooks) offered as an Aside drive across your real sessions, with the one-question consent gate for anything mutating. |
-| `/plan-ceo-review`, `/plan-eng-review`, `/plan-devex-review`, `/design-consultation`, `/review`, `/investigate`, `/cso`, `/office-hours` | Web research runs through `aside exec` in your real browser (`{{ASIDE_RESEARCH}}`), one read-only request per question, answers treated as untrusted content. No Aside → the same queries go to the host's WebSearch tool; no WebSearch either → "Search unavailable" once and the skill proceeds on in-distribution knowledge. |
+| `/plan-ceo-review`, `/plan-eng-review`, `/plan-devex-review`, `/design-consultation`, `/review`, `/cso`, `/office-hours` | Web research runs through `aside exec` in your real browser (`{{ASIDE_RESEARCH}}`), one read-only request per question, answers treated as untrusted content. No Aside → the same queries go to the host's WebSearch tool; no WebSearch either → "Search unavailable" once and the skill proceeds on in-distribution knowledge. |
 
 ### Local-HTML rendering
 
@@ -218,7 +218,7 @@ What changes when the fallback is active:
 
 | On Aside | On the fallback engine |
 |---|---|
-| Your sessions are already there | `/setup-browser-cookies` copies selected cookies from Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, or macOS-only Comet, Arc, and Dia; verify sign-in separately, or log in once in headed mode |
+| Your sessions are already there | `/setup-browser-cookies` copies selected cookies from Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, or macOS-only Comet and Arc; verify sign-in separately, or log in once in headed mode |
 | You watch the tabs the agent opens in Aside | `/open-gstack-browser` (or `$B connect`) shows the headed GStack Browser with the side panel |
 | Sign-in wall: sign in inside Aside, say "done" | `$B handoff` opens a visible Chrome at the same page; `$B resume` continues |
 | One `aside repl` script per flow, fresh session each time | Persistent daemon: cookies, tabs, and localStorage carry over between `$B` calls |
@@ -267,7 +267,7 @@ flow, and a layered prompt-injection defense — all behind a compiled CLI that
 prints plain text to stdout. ~100-200ms per call. Zero context-token overhead.
 It runs whenever the probe above does not print `READY`, and `$B` is a
 legitimate tool in that context; on a Mac with Aside open the skills never
-reach for it.
+reach for it. Its HTTPS trust has a known gap: see [TLS trust](#tls-trust-the-bundled-chromiums-root-store).
 
 ---
 
@@ -275,7 +275,7 @@ reach for it.
 
 ```bash
 # One-time: build the binary (browse/dist/browse, ~58MB)
-bun install && bun run build
+bun install --production --frozen-lockfile && bun run build
 
 # Set $B once and forget about it
 B=./browse/dist/browse           # or ~/.claude/skills/gstack/browse/dist/browse
@@ -311,7 +311,7 @@ $B connect                       # headed Chromium + Side Panel extension
 9. [Side Panel + sidebar agent](#side-panel--sidebar-agent)
 10. [Pair-agent — remote agents over an ngrok tunnel](#pair-agent)
 11. [Authentication + tokens](#authentication)
-12. [Prompt-injection security stack (L1–L6)](#security-stack)
+12. [Prompt-injection security stack (L1–L6)](#security-stack) — including [TLS trust: the bundled Chromium's root store](#tls-trust-the-bundled-chromiums-root-store)
 13. [Screenshots, PDFs, visual inspection](#screenshots-pdfs-visual)
 14. [Local HTML — `goto file://` vs `load-html`](#local-html)
 15. [Batch endpoint](#batch-endpoint)
@@ -562,13 +562,13 @@ from `snapshot`, or `@c` refs from `snapshot -C`. Full table:
 |---------|-------------|
 | `cookie <name>=<value>` | Set cookie on current page domain |
 | `cookie-import <json>` | Import cookies from JSON file |
-| `cookie-import-browser [browser] [--domain d] [--profile p] [--all] [--clear-storage] [--verify-auth]` | Copy selected browser cookies; picker by default, explicit scoped or all-domain import, optional storage reset and sign-in assertion |
+| `cookie-import-browser [browser] [--domain d] [--profile p] [--all] [--clear-storage] [--verify-auth]` | Copy selected browser cookies; picker by default, explicit scoped or all-domain import, optional storage reset and sign-in assertion. The imported session rides on the fallback browser's root store ([TLS trust](#tls-trust-the-bundled-chromiums-root-store)) |
 | `header <name>:<value>` | Set custom request header (sensitive values auto-redacted) |
 | `useragent <string>` | Set user agent (triggers context recreation, invalidates refs) |
 
 #### Choosing a source and checking sign-in
 
-Select the source browser and account/profile explicitly. The picker recognizes Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, and macOS-only Comet, Arc, and Dia. It shows current profile names from `Local State`, falling back to Preferences and then the directory name, with directory labels to distinguish duplicate names. `--profile` takes that directory (`Default`, `Profile 2`), not its display name. Without it, only a sole relevant profile is selected; ambiguity or unreadable profiles require a choice. The omitted-browser default remains `comet` for CLI compatibility, not as a recommendation. The picker opening link is one-use and expires after five minutes.
+Select the source browser and account/profile explicitly. The picker recognizes Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, and macOS-only Comet and Arc. It shows current profile names from `Local State`, falling back to Preferences and then the directory name, with directory labels to distinguish duplicate names. `--profile` takes that directory (`Default`, `Profile 2`), not its display name. Without it, only a sole relevant profile is selected; ambiguity or unreadable profiles require a choice. The omitted-browser default remains `comet` for CLI compatibility, not as a recommendation. The picker opening link is one-use and expires after five minutes.
 
 For direct import, first navigate to a page matching `--domain`. Example after choosing Chrome's `Profile 2`:
 
@@ -584,7 +584,7 @@ SITE=app.example.com
 DOMAIN=example.com
 $B goto "https://$SITE"
 $B cookie-import-browser opera-gx --domain "$DOMAIN" --profile Default   # or: opera
-$B reload                                                               # confirm the intended account
+$B reload                                                               # view the page; only --verify-auth proves sign-in
 ```
 
 Run `$B cookie-import-browser` with no flags to see which browsers were detected. `--profile` can be omitted when only one profile has cookies for the domain. If the receipt reports App-Bound Encryption, run `$B handoff`, sign in to the intended account in the window that opens, then `$B resume` (needs a display).
@@ -619,12 +619,41 @@ Storage stays intact by default. With explicit approval on a Chromium target, `-
 
 | Command | Description |
 |---------|-------------|
-| `tabs` | List open tabs |
+| `tabs` | List open tabs, with each owned tab's owner (a pair-agent client or `session:<name>`) |
 | `tab <id>` | Switch to tab |
 | `newtab [url] [--json]` | Open new tab; `--json` returns `{tabId, url}` for programmatic use |
 | `closetab [id]` | Close tab |
 | `tab-each <command> [args...]` | Fan out a command across every open tab; returns JSON |
 | `frame <sel\|@ref\|--name n\|--url pattern\|main>` | Switch to iframe context (or back to main); clears refs |
+
+**A busy tab is not a busy daemon.** `/health` `status` is daemon liveness
+(Chromium connected); the active tab's main thread is reported separately as
+`activeTab: { id, responsive }`, probed for at most 1s. While one page is stuck
+in a long script, `status`, `tabs`, `tab <id>`, `newtab`, `closetab`,
+`state save` and `stop` keep working, and `status` and `tabs` mark the tab as
+not responding. A command that needs the stuck tab times out after 30s and
+names it, so you can switch away or close it without `--force-restart`.
+
+**Sessions keep parallel agents on their own tabs (#1961).** A call from a
+known agent harness (Claude Code, Codex and others) gets a session named after
+that agent process; its first command opens the session's own tab and later
+commands stay there without moving the shared active tab. Name one with
+`--session <name>` or `BROWSE_SESSION=<name>`; `BROWSE_SESSION=` turns it off.
+`--tab-id` and `BROWSE_TAB` win over a session and no longer move the active
+tab either. Sessions isolate tabs, not cookies or storage, and only the local
+root token can name one.
+
+### Phone emulation + touch
+
+This is Chromium emulating a phone on one tab, not Safari; a real device still goes through `/ios-qa`.
+
+| Command | Description |
+|---------|-------------|
+| `device [<name> [--landscape] \| off \| --list]` | Emulate a phone on the current tab only (size, pixel ratio, touch, `pointer: coarse`, user agent) from Playwright's devices table; other tabs stay desktop. `off` restores; `viewport` and `responsive` refuse while a device is active |
+| `tap <@ref\|sel\|x y> [--hold <ms>]` | Touch and release at an element's center or at x y. Needs `device` first |
+| `swipe <@ref\|sel\|x y> <up\|down\|left\|right> [--distance <px>] [--ms <n>]` | One-finger swipe (default 300px over 300ms). Needs `device` first |
+| `pinch <@ref\|sel\|x y> <scale>` | Two-finger pinch; scale above 1 zooms in, below 1 zooms out. Needs `device` first |
+| `touch [down\|move <finger 0-9> <x> <y> \| up <finger> \| cancel]` | Hold, move and lift numbered fingers for multi-finger flows; no action lists held fingers. Needs `device` first |
 
 ### Extraction
 
@@ -665,7 +694,7 @@ pass `--force-restart` to replace it explicitly (see "Daemon lifecycle" above).
 
 | Command | Description |
 |---------|-------------|
-| `handoff [reason]` | Open visible Chrome at current page for user takeover (CAPTCHA, MFA, complex auth) |
+| `handoff [reason]` | Open visible Chrome at current page for user takeover (CAPTCHA, MFA, complex auth). What you type there trusts the bundled Chromium's root store ([TLS trust](#tls-trust-the-bundled-chromiums-root-store)) |
 | `resume` | Re-snapshot after user takeover, return control to AI |
 
 ### Meta + chains
@@ -962,9 +991,47 @@ first one set wins:
 3. `HTTPS_PROXY`, then `https_proxy`
 4. `HTTP_PROXY`, then `http_proxy`
 5. `ALL_PROXY`, then `all_proxy`
-6. no proxy (a direct connection)
+6. no proxy configured by `$B` (a direct connection on Linux; the system proxy
+   settings on macOS and Windows)
+
+Whatever `$B` resolves is what Chromium gets, explicitly: a proxy is passed
+as `--proxy-server=<url>`, and a direct connection as
+`--proxy-server=direct://`. On Linux, Chromium launched without a proxy
+switch reads `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` itself, so every
+direct connection there carries the switch: with `BROWSE_PROXY_URL=direct`
+(or an unparseable variable, below) a set variable is ignored, and to use
+one, name it through steps 1-5. Earlier releases left Chromium to read those
+variables in the direct case (#3440), so a session that reported a direct
+connection could still route through a proxy. Chromium on macOS and Windows
+never reads those variables; it follows the system proxy settings (PAC and
+WPAD included), and step 6 leaves it to them, so GStack Browser.app behind a
+corporate proxy keeps working. `BROWSE_PROXY_URL=direct` bypasses the system
+settings too, on every platform; on macOS and Windows it is part of the
+daemon's settings, so a running daemon started without it is not reused (for
+a headless daemon the refusal below names `BROWSE_PROXY_URL`; a `connect`
+daemon gets the generic flags refusal) and a crash restart keeps it. The
+daemon log (`browse-daemon.log` next to the state file) records the
+effective mode each time the daemon starts, as `[proxy] using <url> from
+<source>`, `[proxy] none: direct connection (--proxy-server=direct://;
+ignoring HTTPS_PROXY)` (on macOS and Windows, `ignoring the system proxy
+settings`), or `[proxy] none: system proxy settings` (an authenticated
+`socks5://` upstream logs its `[proxy] upstream test ok` and `[proxy] bridge
+listening on 127.0.0.1:<port>` lines instead). A managed Chromium
+proxy policy (`ProxyMode`/`ProxySettings`) still overrides the switch; `$B`
+cannot see it, so on a managed machine the log line describes what `$B`
+asked for, not what the policy enforces.
 
 Values from the environment follow the same credential policy as `--proxy`.
+A variable without a scheme (curl-style `host:port` or `user:pass@host:port`)
+is read as `http://host:port` (port 80 when none is given). For `host:port`
+that is what Chromium's own environment reader took it as, so a value
+Chromium on Linux used to pick up by itself now reaches the same proxy
+through `$B`; `user:pass@host:port` follows curl's reading and is newly
+proxied, because Chromium rejects any proxy spec with a userinfo. On macOS and
+Windows such a value is now a configured proxy too, where it used to be
+ignored with a warning in favour of the system proxy settings. `--proxy` and
+`BROWSE_PROXY_URL` still require the scheme.
+
 `socks5h://` is treated as `socks5://`, because Chromium's SOCKS5 already
 resolves names through the proxy. `NO_PROXY` (or `no_proxy`) is translated to
 Chromium's bypass list: `example.com` and `.example.com` cover the domain and
@@ -974,10 +1041,19 @@ proxy source. When a server starts, `$B` prints one line naming the proxy and
 where it came from, with credentials redacted.
 
 - **`warning: HTTPS_PROXY is not a proxy URL browse can use (...)`.** The
-  variable doesn't parse as `scheme://host:port`: a curl-style `host:port`, an
-  unsupported scheme, or a bad port. `$B` connects directly instead of failing
+  variable doesn't parse even as `http://` plus the value: an unsupported
+  scheme (`ftp://`), a bad port, a missing host, a path other than a bare
+  `/`, a query or a fragment (where a `DOMAIN\user` login or a `/` in a
+  password ends up after URL parsing, so such values are refused for every
+  source rather than printed unredacted; percent-encode `/ ? #` in
+  credentials for every scheme, and `\` in `http://` and `https://`
+  credentials), or credentials that are not valid percent-encoding. A
+  credential-free value with a path (`http://proxy.corp:3128/pac`) is refused
+  the same way, where it used to be read with the path dropped. `$B` connects directly (on Linux,
+  Chromium is told so and does not read the variable itself) instead of failing
   every command. Fix: `export HTTPS_PROXY=http://host:port` (or `socks5://`),
-  or set `BROWSE_PROXY_URL=direct` to silence the warning. A bad `--proxy` or
+  or set `BROWSE_PROXY_URL=direct` to silence the warning (on macOS and
+  Windows that also makes Chromium bypass the system proxy settings). A bad `--proxy` or
   `BROWSE_PROXY_URL` is still an error, because those are explicit browse
   settings and a silent direct connection could expose your real IP address.
 - **`the running browse daemon was started with different proxy settings (<VAR> differs), so it was not reused.`**
@@ -986,7 +1062,10 @@ where it came from, with credentials redacted.
   silently reuse a daemon that routes differently. The refusal prints the
   daemon's settings and this session's. Fix: run `browse stop` to restart the
   daemon with this session's settings (stop works whatever the proxy settings
-  are), or set `BROWSE_PROXY_URL=direct` when the running daemon has no proxy.
+  are), or match the daemon: unset the variable that differs, or on Linux set
+  `BROWSE_PROXY_URL=direct` when the running daemon has no proxy (on macOS and
+  Windows that opt-out is itself part of the daemon settings, so it only
+  matches a daemon started with it).
 
 **Stealth scope (Layer C, always on).** Every context — headless `launch`,
 `--headed`/`--proxy`, `handoff`, and the `useragent`/`viewport --scale`
@@ -1288,6 +1367,39 @@ only writer when the chat-path agent was removed, so they reported stale or
 empty data. The live defenses report through their own call sites. See
 ARCHITECTURE.md § "Prompt injection defense" for the full threat model.
 
+### TLS trust: the bundled Chromium's root store
+
+The fallback engine checks HTTPS certificates against the root store built into
+its bundled Playwright Chromium. Its default headless browser launches with
+Playwright's `--disable-component-update`, so it never receives the CRLSet
+revocation updates Chrome pushes to running browsers. Aside uses your own
+browser's trust store and updates.
+
+**The compromised eMudhra intermediates
+([#3338](https://github.com/garrytan/gstack/issues/3338)).** Chrome blocked
+eight eMudhra intermediate CAs by CRLSet on 2026-10-17, the day their key
+compromise was reported, and removed their root, emSign ECC Root CA - G3, from
+the Chrome Root Store. Playwright 1.64.1 (Chromium 156) still trusted that root,
+so gstack's headless browser accepted certificates those intermediates issued.
+gstack now pins Playwright 1.65.0, whose Chromium 158.0.8127.18 no longer
+carries the root, so the headless shell and the full Chromium both refuse those
+certificates. `./setup` downloads that Chromium on an upgraded install. A
+`GSTACK_CHROMIUM_PATH` build older than 158.0.8115.0, the first Chrome for
+Testing build measured to refuse them, still trusts the root.
+
+To check a build, run it on a network that does not inspect TLS, because a
+captive portal or an intercepting proxy can fail some or all sites with the
+same error. Run `$B stop`, confirm in the default headless mode that a
+known-good HTTPS site such as `$B goto https://example.com/` loads, then run
+`$B goto https://dv-g3b-emudhra.we-have-a-problem.com/`. Only
+`ERR_CERT_AUTHORITY_INVALID` there means the root store no longer trusts them.
+Any other error proves nothing.
+
+Caveats that depend on your environment (proxy variables, headed and
+per-project profiles, `GSTACK_CHROMIUM_PATH` and `BROWSE_EXTENSIONS_DIR`
+builds, and CRLSet timing in headed mode and `handoff`) are tracked in
+[#3440](https://github.com/garrytan/gstack/issues/3440).
+
 ---
 
 ## Screenshots, PDFs, visual
@@ -1423,6 +1535,19 @@ capacity each), flushed to disk asynchronously via `Bun.write()`:
 - Console: `.gstack/browse-console.log`
 - Network: `.gstack/browse-network.log`
 - Dialog: `.gstack/browse-dialog.log`
+
+The console, network, dialog and startup-error logs start empty at each daemon
+start and can grow while one daemon runs; `browse-daemon.log` and the
+`browse-audit.jsonl` command audit build up across restarts, and codex scratch
+files collect in `.gstack/tmp/`.
+Run `gstack-clean` in the repository to see what it would reclaim, then
+`gstack-clean --apply` to do it: it cuts these logs to their last 256 KB
+once they pass 1 MB, removes `tmp/codex-*` files older than 7 days, and
+trims the audit log only when you pass `--audit-days N`. It never touches
+`browse.json`, `session-state.json`, `chromium-profile/`, `browser-skills/`
+or `browse-states/`, and it skips the browse files while the daemon runs.
+Deleting the whole `.gstack/` folder instead also deletes your cookies and
+browser skills.
 
 The `console`, `network`, and `dialog` commands read from the in-memory
 buffers (not disk) so capture is real-time even when disk is slow.
@@ -1641,6 +1766,9 @@ the global `~/.gstack/browser-skills/foo/` only inside project-a.
 | `BROWSE_HEADLESS_SKIP` | 0 | Skip Chromium launch entirely (test harness only) |
 | `BROWSE_TUNNEL` | 0 | Activate the dual-listener tunnel architecture (requires `NGROK_AUTHTOKEN`) |
 | `BROWSE_TUNNEL_LOCAL_ONLY` | 0 | Test-only — bind both listeners locally without ngrok |
+| `BROWSE_SESSION` | unset (agent harness calls get `agent-<pid>`) | CLI side: this caller's session name; empty or `off` turns sessions off |
+| `BROWSE_SESSION_IDLE_MINUTES` | 120 | Daemon side: close (headless) or release (headed) a session's tabs after this many idle minutes; 0 keeps them |
+| `BROWSE_MAX_SESSIONS` | 16 | Daemon side: most sessions at once; the least recently used idle one is closed to make room |
 | `CHROMIUM_PROFILE` | unset | Explicit headed Chromium profile directory (used by gbrowser's gbd per-workspace); honored by headed launch and profile-lock cleanup, not used by headless sessions |
 | `GSTACK_DISABLE_GPU` | unset | On macOS, headless Chromium starts with a GPU-taming flag set (it stops runaway GPU-process spin) that also disables WebGL: `getContext('webgl')`/`'webgl2'` return `null`, so WebGL pages (three.js, Mapbox GL, sigma.js) show their fallback. Set `GSTACK_DISABLE_GPU=off` to enable WebGL (`off` is the only recognized value). |
 | `GSTACK_BROWSE_MAX_HTML_BYTES` | 52428800 (50MB) | `load-html` size cap |
@@ -1664,7 +1792,7 @@ browse/
 │   ├── port-allocator.ts        # Fixed 10000-49151 scan range for every long-lived listener (never port:0)
 │   ├── xprotect-heal.ts         # macOS XProtect launch-kill classify + quarantine-clear + bounded reinstall
 │   ├── socks-bridge.ts          # Local 127.0.0.1 SOCKS5 bridge that handles auth handshakes Chromium can't speak
-│   ├── proxy-config.ts          # --proxy URL parsing + cred resolution (URL vs env, fail-fast on both)
+│   ├── proxy-config.ts          # --proxy URL parsing + cred resolution (URL vs env, fail-fast on both); direct:// launch switch + proxy-mode log line
 │   ├── proxy-redact.ts          # Cred-redaction helper for any proxy URL surfaced to logs/errors
 │   ├── xvfb.ts                  # Xvfb auto-spawn + orphan cleanup with PID + start-time validation
 │   ├── stealth.ts               # Layer C: webdriver mask + window.chrome.* + Notification/Permissions + per-install hardware + toString proxy + automation-global sweep; buildGStackLaunchArgs (GSTACK_* cmdline switches); GSTACK_STEALTH=extended opt-in
@@ -1685,7 +1813,11 @@ browse/
 │   ├── cdp-inspector.ts         # $B inspect — persistent CDP session per page
 │   ├── activity.ts              # ActivityEntry, CircularBuffer, SSE subscribers, privacy filtering
 │   ├── buffers.ts               # Console/network/dialog circular buffers (O(1) ring)
-│   ├── tab-session.ts           # Per-tab session state (load-html replay, ref map scope)
+│   ├── tab-session.ts           # Per-tab session state (load-html replay, ref map scope, device profile, held fingers)
+│   ├── session-name.ts          # CLI: which session a call belongs to (--session, BROWSE_SESSION, agent harness pid)
+│   ├── session-tabs.ts          # Daemon: per-session and per-tab-id request scopes, idle sweep, session cap
+│   ├── device-emulation.ts      # $B device: per-tab phone emulation over the tab's own CDP session
+│   ├── touch-commands.ts        # $B tap/swipe/pinch/touch via Input.dispatchTouchEvent
 │   ├── token-registry.ts        # Mint/validate/revoke for root + setup keys + scoped tokens
 │   ├── sse-session-cookie.ts    # 30-min HttpOnly cookie for /activity/stream + /inspector/events
 │   ├── pty-session-cookie.ts    # Separate scope: live Claude PTY auth

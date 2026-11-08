@@ -20,7 +20,7 @@ export const EVIDENCE_KERNEL_HEADING = '## Claims Need Evidence';
 export const EVIDENCE_KERNEL_BULLETS = [
   'A claimed limitation ("the API can\'t", "X needs a credential") needs the verbatim error, documented statement or live probe; probe before asking or blocking.',
   'A claimed execution ran and you saw its result: name the command and the revision or content fingerprint; never cite a command whose stderr was silenced.',
-  'State the evidence kind (static read, unit test, fixture/replay, live run, production) and never pass one off as another: a mock is not a live check. Reuse rules: Step 16.',
+  'State the evidence kind (static read, unit test, fixture/replay, live run, production) and never pass one off as another: a mock is not a live check.',
   'Disclose any failure or missing coverage that would change the reader\'s conclusion; "done, unverified" is not "done".',
   'A checked null result ("ran X, found nothing material") is a success; an unsupported positive claim is worse than silence. Agreeing agents, or repeated reads of one source, are one datum.',
 ] as const;

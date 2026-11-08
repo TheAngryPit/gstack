@@ -1,12 +1,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { DOC_PATH, docsSnapshotArgv, gitAt, gitBlobId, fixtureDocs, repoSnapshot, type DocsCandidateRecord } from './docsync-fixture';
+import type { fixtureDocs } from './docsync-fixture';
+import { DOC_PATH, docsSnapshotArgv, gitAt, gitBlobId, repoContents, repoInventory, type DocsCandidateRecord } from './docsync-repo';
 import { extractDocsDispatch } from './docsync-contract';
-import { docsNativeInterface } from './docsync-observer';
-import { redactFindingSpans } from '../../lib/redact-engine';
+import { docsNativeInterface } from './docsync-interface';
 
 export const DOCS_CHECKPOINT_MARKER = '<!-- DOCSYNC_CHECKPOINT -->';
 
@@ -65,8 +64,12 @@ class SnapshotFailure extends Error {
   constructor(readonly reason: SnapshotFailureReason, readonly status: string, readonly stderr: string) { super(reason); }
 }
 
-/** The tail of the helper's stderr with secrets redacted and the fixture root replaced by <HOME>, at most SNAPSHOT_STDERR_LIMIT characters. */
+/**
+ * The tail of the helper's stderr with secrets redacted and the fixture root replaced by <HOME>, at most SNAPSHOT_STDERR_LIMIT characters.
+ * The redaction engine loads only here, on a failed snapshot, so hook and CLI spawns skip its import.
+ */
 function stderrExcerpt(root: string, stderr: string): string {
+  const { redactFindingSpans } = require('../../lib/redact-engine') as typeof import('../../lib/redact-engine');
   const redacted = redactFindingSpans(stderr.replaceAll(root, '<HOME>').trim());
   if (redacted === null) return '[stderr omitted: unredactable secret]';
   return redacted.length > SNAPSHOT_STDERR_LIMIT ? '…' + redacted.slice(-(SNAPSHOT_STDERR_LIMIT - 1)) : redacted;
@@ -90,7 +93,7 @@ function installedSnapshot(s: DocsActorState, auditId: string, out: string): { r
   let record: DocsCandidateRecord;
   try { record = JSON.parse(fs.readFileSync(out, 'utf8')) as DocsCandidateRecord; }
   catch (error) { throw new SnapshotFailure('snapshot_invalid_record', `exit 0, unreadable record: ${(error as Error).message}`, stderr); }
-  if (record.schema_version !== 1 || record.audit_id !== auditId || record.mode !== 'edit' || record.base !== gitAt(repo, 'rev-parse', 'main')
+  if (record.schema_version !== 1 || record.audit_id !== auditId || record.mode !== 'edit' || record.base !== argv[argv.indexOf('--base') + 1]
       || !Array.isArray(record.index) || !record.hashes || typeof record.hashes !== 'object') throw new SnapshotFailure('snapshot_invalid_record', 'exit 0, invalid record', stderr);
   return { record, command: argv.map(shellWord).join(' ') };
 }
@@ -172,8 +175,8 @@ export function docsActorCommand(file: string, action: string, args: Record<stri
         const candidate = fs.readFileSync(owned(s.root, args.candidate));
         if (!prompt.includes('document-release') || !prompt.includes('files_updated') || !prompt.includes(args.audit_id)) throw Error('dispatch did not carry the actual workflow prompt');
         const task = { id: s.scenario === 'launch-failure' ? null : `fixture-child-${s.tasks.length + 1}`, audit_id: args.audit_id, settled: true, stopRequested: false, elapsed_ms: 0,
-          prompt, candidate: candidate.toString('utf8'), prompt_sha256: createHash('sha256').update(prompt).digest('hex'),
-          candidate_sha256: createHash('sha256').update(candidate).digest('hex'),
+          prompt, candidate: candidate.toString('utf8'), prompt_sha256: new Bun.CryptoHasher('sha256').update(prompt).digest('hex'),
+          candidate_sha256: new Bun.CryptoHasher('sha256').update(candidate).digest('hex'),
           observed_candidate: observeCandidate(s, args.audit_id) };
         s.events.push({ action, audit_id: args.audit_id, ...(task.id === null ? {} : { task_id: task.id }) });
         if (s.scenario === 'missing-asset') throw Error('missing installed asset must block before dispatch');
@@ -219,26 +222,25 @@ export function docsActorCommand(file: string, action: string, args: Record<stri
         if (Object.keys(args).length) throw Error('inspect takes no arguments');
         if (s.armed) changeCandidate(s);
         const repo = path.join(s.root, 'repo');
-        const inventory = [...new Set(gitAt(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
-          .split('\0').filter(Boolean))].sort();
+        const inventory = repoInventory(repo);
         if (inventory.length > 64) throw Error('inspect inventory exceeds the bound');
-        const snapshot = repoSnapshot(repo);
-        const base = gitAt(repo, 'rev-parse', 'main');
+        const contents = repoContents(repo, inventory);
+        const [head, base] = gitAt(repo, 'rev-parse', 'HEAD', 'main').split('\n');
         const files = Object.fromEntries(inventory.map(rel => {
-          const bytes = snapshot.contents[rel];
+          const bytes = contents[rel];
           if (bytes === undefined) return [rel, { exists: false }];
           const buffer = Buffer.from(bytes, 'base64');
           return [rel, { exists: true, hash: gitBlobId(buffer), content: buffer.toString('utf8') }];
         }));
         text = JSON.stringify({
-          operation: 'inspect', base, head: snapshot.head,
+          operation: 'inspect', base, head,
           branch: gitAt(repo, 'branch', '--show-current'), index: gitAt(repo, 'ls-files', '-s', '-z').split('\0').filter(Boolean),
           pre_existing_dirty: gitAt(repo, 'status', '--porcelain', '-z'),
           diff_committed: gitAt(repo, 'diff', base, 'HEAD'),
           diff_cached: gitAt(repo, 'diff', '--cached'), diff_worktree: gitAt(repo, 'diff'),
           inventory, files,
         });
-        s.events.push({ action, detail: createHash('sha256').update(text).digest('hex') });
+        s.events.push({ action, detail: new Bun.CryptoHasher('sha256').update(text).digest('hex') });
       } else if (action === 'status') {
         const task = last();
         task.elapsed_ms += task.stopRequested ? 300_001 : 600_001;
@@ -333,7 +335,7 @@ export function seedDocsFirstAttempt(fixture: ReturnType<typeof fixtureDocs>, fi
   const assets = DOCS_CHILD_ASSETS.map(relative => {
     const asset = path.join(fixture.skills, relative);
     if (!fs.existsSync(asset)) throw Error(`seeded attempt requires installed ${relative}`);
-    return { asset, sha256: createHash('sha256').update(fs.readFileSync(asset)).digest('hex') };
+    return { asset, sha256: new Bun.CryptoHasher('sha256').update(fs.readFileSync(asset)).digest('hex') };
   });
   const prepared = docsActorCommand(file, 'prepare', { audit_id: DOCS_SEEDED_AUDIT_ID });
   if (prepared.exit) throw Error(`seeded prepare failed: ${prepared.text}`);

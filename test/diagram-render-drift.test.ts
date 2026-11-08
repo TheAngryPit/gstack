@@ -17,9 +17,13 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve(import.meta.dir, "..", "lib", "diagram-render");
-const DIST_HTML = path.join(ROOT, "dist", "diagram-render.html");
-const BUILD_INFO = path.join(ROOT, "dist", "BUILD_INFO.json");
+// Repo-relative segment runs, so the pre-gate's import graph sees that this
+// test owns the committed bundle, its BUILD_INFO and the build script.
+const REPO = path.resolve(import.meta.dir, "..");
+const ROOT = path.join(REPO, "lib", "diagram-render");
+const DIST_HTML = path.join(REPO, "lib", "diagram-render", "dist", "diagram-render.html");
+const BUILD_INFO = path.join(REPO, "lib", "diagram-render", "dist", "BUILD_INFO.json");
+const BUILD_SCRIPT = path.join(REPO, "lib", "diagram-render", "scripts", "build.ts");
 
 describe("diagram-render bundle drift", () => {
   test("dist hash matches BUILD_INFO (tamper check)", async () => {
@@ -36,6 +40,20 @@ describe("diagram-render bundle drift", () => {
     expect(info.deps).toEqual(pkg.dependencies);
   });
 
+  test("the bundled DOMPurify is the package.json override, and no other version", async () => {
+    const html = await Bun.file(DIST_HTML).text();
+    const pkg = await Bun.file(path.join(ROOT, "package.json")).json();
+    const versions = [...html.matchAll(/@license DOMPurify (\d+\.\d+\.\d+)/g)].map(m => m[1]);
+    expect(versions).toEqual([pkg.overrides.dompurify]);
+    expect(html).toContain(`version="${pkg.overrides.dompurify}"`);
+  });
+
+  test("the bundle carries no Google API key: excalidraw's Firebase config literal is emptied", async () => {
+    const html = await Bun.file(DIST_HTML).text();
+    expect(html).not.toMatch(/AIza[0-9A-Za-z_-]{35}/);
+    expect(html).toContain("VITE_APP_FIREBASE_CONFIG:'{}'");
+  });
+
   test("BUILD_INFO srcSha256 matches src on disk (edited-src-forgot-rebuild guard)", async () => {
     // The deep rebuild check below needs node_modules, which CI doesn't
     // install for this nested package — this tier-1.5 fingerprint catches a
@@ -43,7 +61,7 @@ describe("diagram-render bundle drift", () => {
     const info = await Bun.file(BUILD_INFO).json();
     const srcSha = createHash("sha256")
       .update(await Bun.file(path.join(ROOT, "src", "entry.ts")).text())
-      .update(await Bun.file(path.join(ROOT, "scripts", "build.ts")).text())
+      .update(await Bun.file(BUILD_SCRIPT).text())
       .digest("hex");
     expect(srcSha).toBe(info.srcSha256);
   });

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * Stop hook: close dangling "started" timeline entries (#2553).
  *
@@ -54,10 +54,13 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { runBin } from './spawn-bin';
 import { resolveStateRoot } from '../../../lib/state-root';
+import { bunIsolationArgs } from '../../../lib/bun-isolation';
 import { readVersionedSlugCache } from '../../../lib/bin-context';
 import { logHookError as sharedLogHookError } from './hook-log';
 
 const DEADLINE_MS = 2000;
+/** A host may keep stdin open after its payload (#3628); never wait for EOF past this. */
+const STDIN_DEADLINE_MS = 500;
 const REPAIR_SLUG_TIMEOUT_MS = 30_000;
 const LOCK_TTL_MS = 60_000;
 const MISS_TTL_MS = 5 * 60_000;
@@ -160,9 +163,35 @@ function slugOverride(): string | undefined {
   return slug && slug !== '.' && slug !== '..' ? slug : undefined;
 }
 
-function readStopCwd(): string {
+/** The Stop payload: returns at EOF, at the first complete JSON object, or at the deadline. */
+function readStdinBounded(ms: number): Promise<string> {
+  return new Promise((resolve) => {
+    let buf = '';
+    const done = () => {
+      clearTimeout(timer);
+      process.stdin.removeAllListeners('data');
+      process.stdin.destroy();
+      resolve(buf);
+    };
+    const timer = setTimeout(done, ms);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk: string) => {
+      buf += chunk;
+      try {
+        JSON.parse(buf);
+        done();
+      } catch {
+        // incomplete payload: keep reading until EOF or the deadline
+      }
+    });
+    process.stdin.on('end', done);
+    process.stdin.on('error', done);
+  });
+}
+
+async function readStopCwd(): Promise<string> {
   try {
-    const stdin = fs.readFileSync(0, 'utf8');
+    const stdin = await readStdinBounded(STDIN_DEADLINE_MS);
     if (stdin.trim()) {
       const payload = JSON.parse(stdin) as { cwd?: string };
       if (payload.cwd && fs.existsSync(payload.cwd)) return payload.cwd;
@@ -185,7 +214,7 @@ function spawnRepair(cwd: string): void {
   if (isFresh(marker, MISS_TTL_MS)) return;
   fs.mkdirSync(path.dirname(marker), { recursive: true });
   fs.writeFileSync(marker, `${cwd}\n`);
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--repair', cwd], {
+  const child = spawn(process.execPath, [...bunIsolationArgs(), fileURLToPath(import.meta.url), '--repair', cwd], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
@@ -208,12 +237,12 @@ function backgroundRepair(cwd: string): void {
   });
 }
 
-function main(): void {
+async function main(): Promise<void> {
   if (process.argv[2] === '--repair' && process.argv[3]) {
     backgroundRepair(process.argv[3]);
     return;
   }
-  const cwd = readStopCwd();
+  const cwd = await readStopCwd();
   const slug = slugOverride() ?? readVersionedSlugCache(resolveStateRoot(), cwd);
   if (!slug) {
     spawnRepair(cwd);
@@ -317,9 +346,6 @@ function repairTimeline(slug: string, deadline: number): void {
   }
 }
 
-try {
-  main();
-} catch (err) {
-  logHookError(`unexpected: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-}
-process.exit(0);
+main()
+  .catch((err) => logHookError(`unexpected: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`))
+  .finally(() => process.exit(0));

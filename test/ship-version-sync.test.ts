@@ -265,7 +265,7 @@ test("rendered /ship handles every version-source outcome the classifier emits",
   const prBody = readFileSync(join(import.meta.dir, "../ship/sections/pr-body.md"), "utf8");
   const step18 = prBody.slice(prBody.indexOf("### Prepare the title (Step 18)"), prBody.indexOf("## Step 19:")).replace(/\s+/g, " ");
   expect(step18.length).toBeGreaterThan(0);
-  const classifyCmd = step12.match(/bun run \S+gstack-version-bump classify --base <base>/);
+  const classifyCmd = step12.match(/bun --no-env-file --config=\/dev\/null run \S+gstack-version-bump classify --base <base>/);
   expect(classifyCmd).not.toBeNull();
   const bin = join(import.meta.dir, "../bin/gstack-version-bump");
   const fixtures: Record<string, Record<string, string>> = {
@@ -308,3 +308,44 @@ test("rendered /ship handles every version-source outcome the classifier emits",
   expect(step18).toMatch(/NO_VERSION[^.]*replaces items 1-3/);
   expect(step18).toContain("no version prefix");
 });
+
+// GSTA-70: next-version marks a pick provisional with `complete:false` when
+// open PRs' VERSION claims could not be read. Step 12 used to print the
+// warning and write the pick as if it were a verified slot.
+test("rendered Step 12 reruns, then asks, on an incomplete queue instead of treating it as verified", () => {
+  const ship = readFileSync(join(import.meta.dir, "../ship/SKILL.md"), "utf8");
+  const nextVersion = readFileSync(join(import.meta.dir, "../bin/gstack-next-version"), "utf8");
+  expect(nextVersion).toMatch(/unknown_claims: unknownClaims,\s+complete,/);
+  const qualifyAt = ship.indexOf("**Qualify first:**");
+  const incompleteAt = ship.indexOf("**Incomplete** (`complete:false`)");
+  const usableAt = ship.indexOf("**Usable candidate:**");
+  expect(incompleteAt).toBeGreaterThan(qualifyAt);
+  expect(usableAt).toBeGreaterThan(incompleteAt);
+  const incomplete = ship.slice(incompleteAt, usableAt).replace(/\s+/g, " ");
+  expect(incomplete).toContain("`unknown_claims`");
+  expect(incomplete).toContain("may collide");
+  expect(incomplete).toContain("Rerun item 3 once");
+  expect(incomplete).toMatch(/still incomplete, AskUserQuestion: use it \(recommended[^)]*\) or stop/);
+});
+
+// GSTA-70: the rendered Step 12 write command, run verbatim against the real
+// CLI, re-heads the branch's [Unreleased] entry under NEW_VERSION.
+test("rendered Step 12 write re-heads an existing [Unreleased] entry and leaves released entries alone", () => {
+  const ship = readFileSync(join(import.meta.dir, "../ship/SKILL.md"), "utf8");
+  const step12 = ship.slice(ship.indexOf("## Step 12:"), ship.indexOf("## Step 14:"));
+  const cmd = step12.match(/bun --no-env-file --config=\/dev\/null run \S+\/bin\/gstack-version-bump write [^\n]+/)?.[0];
+  expect(cmd).toContain("--changelog CHANGELOG.md");
+  const bin = join(import.meta.dir, "../bin");
+  const runnable = cmd!.replace(/\S+\/bin\/gstack-version-bump/, join(bin, "gstack-version-bump"));
+  const released = "## [1.0.0.0] - 2026-10-01\n\n- first\n";
+  writeFiles({ VERSION: "1.0.0.0\n", "CHANGELOG.md": `# Changelog\n\n## [Unreleased]\n\n- branch change\n\n${released}` });
+  execSync(runnable, { cwd: dir, shell: "/bin/bash", env: { ...process.env, NEW_VERSION: "1.0.1.0" }, stdio: "pipe", timeout: 30_000 });
+  const changelog = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
+  expect(changelog).toMatch(/^# Changelog\n\n## \[1\.0\.1\.0\] - \d{4}-\d{2}-\d{2}\n\n- branch change\n\n/);
+  expect(changelog.endsWith(released)).toBe(true);
+  expect(changelog).not.toContain("[Unreleased]");
+  writeFiles({ VERSION: "1.0.1.0\n", "CHANGELOG.md": `# Changelog\n\n${released}` });
+  execSync(runnable, { cwd: dir, shell: "/bin/bash", env: { ...process.env, NEW_VERSION: "1.0.2.0" }, stdio: "pipe", timeout: 30_000 });
+  expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toBe(`# Changelog\n\n${released}`);
+});
+

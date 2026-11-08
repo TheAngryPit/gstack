@@ -8,20 +8,34 @@
 # shares them.
 #
 # Usage:
-#   gstack-lease touch [--root <checkout>] [--pid <p> | --from <pid>]
-#       write <git dir>/gstack-leases/<pid> holding the pid's start identity;
+#   gstack-lease touch [--root <checkout>] [--pid <p> | --from <pid>] [--run <id>]
+#       write <git dir>/gstack-leases/<pid> holding the pid's start identity
+#       and the open run <id> (gstack-skill-start's SESSION_ID); without --run
+#       it records a hold no release closes; a run counts 120 min from its
+#       start and a hold 120 min from its last renewal;
 #       pid defaults to the harness pid behind this call
 #       (bin/gstack-harness-pid.sh, the same derivation the session marker
 #       uses), or behind --from (a caller whose own parent is short-lived
 #       passes its parent pid); leases older than 120 min are pruned. Exits 3
-#       and writes nothing when a live process holds the directory lock
-#   gstack-lease live [--root <checkout>] [--exclude-ancestry-of <pid>]
+#       and writes nothing when a live process holds the directory lock or
+#       the lock cannot be taken
+#   gstack-lease live [--root <checkout>] [--exclude-ancestry-of <pid>] [--count-shared-harness]
 #       print `<pid> <age>m <command>` per lease held by a live process that
 #       is neither the given pid nor one of its ancestors (the caller's own
 #       session); exit 0 when any live lease exists, 1 when none. A stale lease
-#       is reclaimed (deleted, one `gstack-lease: reclaimed …` line on stderr)
+#       is reclaimed (deleted, one `gstack-lease: reclaimed …` line on stderr).
+#       --count-shared-harness (bin/gstack-upgrade only) still prints an
+#       ancestor that is a shared harness (capy-server: every session on the
+#       machine runs under it) while its lease is under 120 minutes old
+#   gstack-lease release --pid <p> --run <id> [--root <checkout>]
+#       close run <id> on <pid>'s lease (gstack-skill-end); once every run it
+#       recorded is closed the lease is idle and live skips it (GST-1205)
+#   gstack-lease open --run <id> [--pid <p> | --from <pid>] [--root <checkout>]
+#       exit 0 while run <id> on a lease (<pid>'s, the harness's behind
+#       --from, or any) is open (not released, under 120 minutes) and its
+#       holder alive; 1 otherwise
 #   gstack-lease list [--root <checkout>]
-#       print `<pid> <age>m alive|dead|stale` for every lease
+#       print `<pid> <age>m alive|idle|dead|stale` for every lease
 # A pid alone is not a holder: pids are reused after a reboot or a machine
 # wake. A lease records its process's start identity (Linux: boot id and
 # /proc start time; elsewhere `ps -o lstart`), and a lease whose pid now
@@ -31,29 +45,34 @@
 # runtime root's .source-path, else ../). A root that is not a git checkout
 # exits 2 and writes nothing. GSTACK_LEASE_DIR overrides the lease directory
 # (hermetic tests; a dev checkout's own tests must not lease it). Bash 3.2
-# plus git, ps, find, ln, readlink.
+# plus git, ps, find, stat, date, head, mkdir, mv, readlink.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd -P)"
 # shellcheck source=bin/gstack-install-verdict.sh
 . "$BIN/gstack-install-verdict.sh" 2>/dev/null || gstack_source_root() { (cd "$1/.." && pwd -P); }
 # shellcheck source=bin/gstack-harness-pid.sh
-. "$BIN/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
+. "$BIN/gstack-harness-pid.sh" 2>/dev/null || {
+  gstack_harness_pid() { printf '%s\n' "$1"; }
+  gstack_shared_harness() { [ "$(ps -o comm= -p "$1" 2>/dev/null | head -1 | sed 's|.*/||; s/^-//')" = capy-server ]; }
+}
 
 VERB="${1:-}"; [ $# -gt 0 ] && shift
-ROOT="" PID="" EXCLUDE="" FROM=""
+ROOT="" PID="" EXCLUDE="" FROM="" SHARED=0 RUN=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT="${2:-}"; shift ;;
     --pid) PID="${2:-}"; shift ;;
     --from) FROM="${2:-}"; shift ;;
+    --run) RUN="${2:-}"; shift ;;
     --exclude-ancestry-of) EXCLUDE="${2:-}"; shift ;;
+    --count-shared-harness) SHARED=1 ;;
     *) echo "gstack-lease: unknown argument '$1'" >&2; exit 2 ;;
   esac
   shift
 done
 case "$VERB" in
-  touch|live|list) ;;
-  -h|--help|'') sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  touch|live|list|release|open) ;;
+  -h|--help|'') sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "gstack-lease: unknown verb '$VERB'" >&2; exit 2 ;;
 esac
 [ -n "$ROOT" ] || ROOT=$(gstack_source_root "$BIN")
@@ -99,43 +118,139 @@ state() {
 }
 # The lease directory's lock: touch's publish and prune, and reclaim's
 # reread-and-delete, run under it, so a reclaim never deletes a renewal and a
-# lease never disappears while it is live. The lock is a symlink whose target
-# names its holder (`<pid> <start identity>`): ln -s creates it and its owner
-# in one atomic step. It is broken only when that holder is dead or its pid
-# now belongs to another process, never by age, and unlock removes only the
-# caller's own lock. A live holder makes lock() give up after
-# GSTACK_LEASE_LOCK_TRIES tries 0.1 s apart (default 300).
+# lease never disappears while it is live. The lock is a directory, .lock,
+# whose owner file names its holder (`<pid> <start identity>`); mkdir is
+# atomic everywhere gstack runs, Git Bash on Windows included, where ln -s to a
+# target that does not exist always fails (#3330). A taker publishes its token
+# as a claim (.lock.claim.<pid>) before its mkdir and renames the claim into
+# the lock as its owner after, so a lock without an owner is either being
+# taken by a live claimant or orphaned by a dead one. A lock is broken only
+# when its holder is dead or its pid now belongs to another process, never by
+# age, and unlock removes only the caller's own lock. An ownerless lock is
+# broken once no claimant lives and it is at least 2 s old (and unchanged
+# while it was checked), so a taker between its mkdir and its owner rename is
+# never taken for a crash, even when its claim landed after the claims were
+# read. A claim is honored while its claimant lives; one that records no
+# start identity (so a reused pid cannot be told apart) is abandoned after 2
+# minutes, since a live taker holds one for milliseconds. Known limit: on such
+# a host a taker stalled over 2 minutes between its mkdir and its owner rename
+# can be broken and then publish into its successor's lock. An owner whose
+# pid is 0, zero-padded or not a number counts as a dead holder, and a lock
+# whose owner file exists but cannot be read is never treated as ownerless. A symlink .lock left by an older
+# gstack names its holder the same way and excludes a directory lock at the
+# same path. Known limit: the reverse does not hold, since an older gstack's
+# ln -s onto a directory lock links inside it and succeeds; only a process
+# that started before an upgrade of this checkout can run that code. A live holder
+# makes lock() give up after GSTACK_LEASE_LOCK_TRIES tries 0.1 s apart
+# (default 300) or 30 s, whichever comes first.
 LOCK="$DIR/.lock" TOKEN=""
+# take PATH — create the lock PATH owned by TOKEN; 1 when it exists.
+take() {
+  if [ -e "$1" ] || [ -L "$1" ]; then return 1; fi
+  { printf '%s\n' "$TOKEN" > "$1.claim.$$"; } 2>/dev/null || { rm -f "$1.claim.$$"; return 1; }
+  if mkdir "$1" 2>/dev/null; then
+    [ ! -e "$1/owner" ] && mv -f "$1.claim.$$" "$1/owner" && return 0
+    [ -e "$1/owner" ] || rm -rf "$1"
+  fi
+  rm -f "$1.claim.$$"
+  return 1
+}
+# owner_of PATH — the token the lock PATH names, empty when it names none.
+owner_of() { if [ -L "$1" ]; then readlink "$1" 2>/dev/null; else head -1 "$1/owner" 2>/dev/null; fi; }
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+# orphaned PATH — PATH is a lock (not a legacy symlink) whose owner file is
+# missing or readable and empty, has no live claimant, is at least 2 s old and kept
+# its mtime throughout. The clock is read before the first mtime, so a pause
+# only makes the lock look younger, and a lock made since (a new generation)
+# has a newer mtime. Claims are read before the owner, so a taker that renames
+# its claim in between is seen as the owner. An empty claim is a taker that
+# has not reached its mkdir, so it never made this lock. An mtime a minute or
+# more in the future (clock skew) counts as old.
+orphaned() {
+  _oclock=$(date +%s)
+  [ -e "$1" ] && [ ! -L "$1" ] || return 1
+  _om=$(mtime "$1") || return 1
+  for _c in "$1".claim.*; do
+    _t=$(head -1 "$_c" 2>/dev/null)
+    abandoned "$_c" "$_t" && continue
+    [ -n "$_t" ] && ! holder_gone "$_t" && return 1
+  done
+  if [ -d "$1" ] && [ -e "$1/owner" ]; then
+    _o=$(head -1 "$1/owner" 2>/dev/null) || return 1
+    [ -z "$_o" ] || return 1
+  fi
+  [ "$(mtime "$1")" = "$_om" ] || return 1
+  _oage=$((_oclock - _om))
+  [ "$_oage" -ge 2 ] || [ "$_oage" -le -60 ]
+}
+# drop PATH — remove a lock in one step: a directory is renamed aside first,
+# so nobody sees it ownerless on the way out. Once renamed the lock is
+# released, whether or not the renamed copy can be deleted (touch prunes it).
+drop() {
+  if [ -L "$1" ]; then rm -f "$1"; return; fi
+  mv "$1" "$1.gone.$$" 2>/dev/null || return 1
+  rm -rf "$1.gone.$$" 2>/dev/null
+  return 0
+}
 lock() {
   [ -n "$TOKEN" ] || TOKEN="$$ $(identity $$)"
-  _tries=0
-  until ln -s "$TOKEN" "$LOCK" 2>/dev/null; do
-    _tries=$((_tries + 1))
-    LOCK_OWNER=$(readlink "$LOCK" 2>/dev/null)
-    [ -n "$LOCK_OWNER" ] && holder_gone "$LOCK_OWNER" && break_lock "$LOCK_OWNER" && continue
-    [ "$_tries" -ge "${GSTACK_LEASE_LOCK_TRIES:-300}" ] && return 1
+  _tries=0 _gone=0 _max=${GSTACK_LEASE_LOCK_TRIES:-300} _start=$SECONDS
+  case "$_max" in ''|*[!0-9]*) _max=300 ;; esac
+  until take "$LOCK"; do
+    LOCK_OWNER=$(owner_of "$LOCK")
+    if [ ! -e "$LOCK" ] && [ ! -L "$LOCK" ]; then
+      # Released since take, or take itself cannot work here: never wait out
+      # the tries for a lock nobody holds.
+      _gone=$((_gone + 1))
+      [ "$_gone" -ge 10 ] && return 1
+      continue
+    fi
+    _gone=0 _tries=$((_tries + 1))
+    if [ -n "$LOCK_OWNER" ]; then holder_gone "$LOCK_OWNER" && break_lock "$LOCK_OWNER" && continue
+    elif orphaned "$LOCK"; then break_lock "" && continue
+    fi
+    [ "$_tries" -ge "$_max" ] && return 1
+    [ $((SECONDS - _start)) -ge 30 ] && return 1
     sleep 0.1
   done
 }
-holder_gone() { case "$(state "${1%% *}" "${1#* }" 0)" in dead|stale) return 0 ;; esac; return 1; }
-# break_lock OWNER — remove the lock only if it still names OWNER. Breakers
-# take a second symlink, .lock.break, and reread the lock under it, so a lock
-# taken since the verdict is never removed; a .lock.break whose holder is gone
-# is cleared. Returns 1 when another breaker holds .lock.break. Known limit:
-# that clear is not atomic, so two gstack-lease processes killed in a row (one
-# holding .lock, the next inside this function) can let a reclaim delete a
-# renewal; one crash is always safe.
+# abandoned CLAIM TOKEN — the claim records no start identity and is over 2
+# minutes old.
+abandoned() { [ -z "${2#* }" ] && [ -z "$(find "$1" -mmin -2 2>/dev/null)" ]; }
+holder_gone() {
+  case "${1%% *}" in ''|*[!0-9]*|0*) return 0 ;; esac
+  case "$(state "${1%% *}" "${1#* }" 0)" in dead|stale) return 0 ;; esac; return 1
+}
+# break_lock OWNER — remove the lock only if it still names OWNER (empty: is
+# still orphaned). Breakers take a second lock, .lock.break, and reread the
+# lock under it, so a lock taken since the verdict is never removed; a
+# .lock.break whose holder is gone is cleared. A lock that cannot be renamed
+# aside is removed in place (other breakers wait on .lock.break meanwhile).
+# Returns 1 when another breaker holds .lock.break or the lock could not be
+# removed, so lock() counts the try instead of spinning. Known limit: that
+# clear is check-then-remove, so a breaker killed while holding .lock.break,
+# followed by two live breakers clearing it at once, can let both break and a
+# reclaim delete a renewal.
 break_lock() {
-  if ! ln -s "$TOKEN" "$LOCK.break" 2>/dev/null; then
-    _b=$(readlink "$LOCK.break" 2>/dev/null)
-    [ -n "$_b" ] && holder_gone "$_b" && [ "$(readlink "$LOCK.break" 2>/dev/null)" = "$_b" ] && rm -f "$LOCK.break"
+  if ! take "$LOCK.break"; then
+    _b=$(owner_of "$LOCK.break")
+    if [ -n "$_b" ]; then
+      holder_gone "$_b" && [ "$(owner_of "$LOCK.break")" = "$_b" ] && drop "$LOCK.break"
+    else
+      orphaned "$LOCK.break" && drop "$LOCK.break"
+    fi
     return 1
   fi
-  [ "$(readlink "$LOCK" 2>/dev/null)" = "$1" ] && rm -f "$LOCK"
-  rm -f "$LOCK.break"
-  return 0
+  _kept=0
+  if [ -n "$1" ]; then
+    [ "$(owner_of "$LOCK")" = "$1" ] && { drop "$LOCK" || rm -rf "$LOCK" || _kept=1; }
+  else
+    orphaned "$LOCK" && { drop "$LOCK" || rm -rf "$LOCK" || _kept=1; }
+  fi
+  drop "$LOCK.break"
+  return $_kept
 }
-unlock() { [ "$(readlink "$LOCK" 2>/dev/null)" = "$TOKEN" ] && rm -f "$LOCK"; return 0; }
+unlock() { [ "$(owner_of "$LOCK")" = "$TOKEN" ] && { drop "$LOCK" || rm -rf "$LOCK"; }; return 0; }
 # reclaim FILE RECORD — delete a stale lease only if, under the lock, it still
 # holds the record judged stale; a renewal since then keeps it.
 reclaim() {
@@ -144,6 +259,15 @@ reclaim() {
   unlock
   return 1
 }
+# Run entries (GST-1205), lines after the identity: `run <id> <epoch>` per
+# open run, `hold <epoch>` for a holder that opened none, `idle` once every
+# run closed. An entry older than 120 minutes no longer counts.
+# fresh FILE [DROP] — the entries under 120 minutes old, minus the line whose
+# first two fields are DROP ("run <id>" or "hold").
+fresh() { sed -n '2,$p' "$1" 2>/dev/null | awk -v now="$(date +%s)" -v drop="${2:-}" '($1 == "run" && NF == 3 && now - $3 < 7200 && $1 " " $2 != drop) || ($1 == "hold" && NF == 2 && now - $2 < 7200 && $1 != drop)'; }
+# idle FILE — the lease records entries and none of them still counts. A lease
+# with no entries (written without --run, or by an older gstack) is never idle.
+idle() { [ -n "$(sed -n '2,$p' "$1" 2>/dev/null | grep -v '^$')" ] && [ -z "$(fresh "$1")" ]; }
 age_min() { # FILE — minutes since its mtime
   _m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0)
   echo $(( ( $(date +%s) - _m ) / 60 ))
@@ -153,18 +277,69 @@ case "$VERB" in
   touch)
     [ -n "$PID" ] || PID=$(gstack_harness_pid "${FROM:-$PPID}")
     mkdir -p "$DIR" || exit 2
-    lock || { echo "gstack-lease: the lease directory is locked by live process ${LOCK_OWNER%% *}; lease $PID not renewed" >&2; exit 3; }
+    lock || {
+      if [ -n "${LOCK_OWNER:-}" ] && ! holder_gone "$LOCK_OWNER"; then echo "gstack-lease: the lease directory is locked by live process ${LOCK_OWNER%% *}; lease $PID not renewed" >&2
+      else echo "gstack-lease: cannot take the lease directory lock $LOCK; lease $PID not renewed" >&2
+      fi
+      exit 3
+    }
     _tmp="$DIR/.$PID.$$"
-    identity "$PID" > "$_tmp" && mv -f "$_tmp" "$DIR/$PID" || { rm -f "$_tmp"; unlock; exit 2; }
-    find "$DIR" -mmin +120 -type f -exec rm -f {} + 2>/dev/null
+    _id=$(identity "$PID") _keep="" _held=0 _now=$(date +%s)
+    if [ -f "$DIR/$PID" ] && [ "$(head -1 "$DIR/$PID" 2>/dev/null)" = "$_id" ]; then
+      if [ -n "$RUN" ]; then _keep=$(fresh "$DIR/$PID" "run $RUN"); else _keep=$(fresh "$DIR/$PID" hold); fi
+      [ -z "$(sed -n '2,$p' "$DIR/$PID" 2>/dev/null | grep -v '^$')" ] && _held=1
+    fi
+    {
+      printf '%s\n' "$_id"
+      [ -z "$_keep" ] || printf '%s\n' "$_keep"
+      if [ -n "$RUN" ]; then
+        [ "$_held" -eq 1 ] && echo "hold $(stat -c %Y "$DIR/$PID" 2>/dev/null || stat -f %m "$DIR/$PID" 2>/dev/null || echo "$_now")"
+        echo "run $RUN $_now"
+      elif [ -n "$_keep" ]; then echo "hold $_now"
+      fi
+    } > "$_tmp" && mv -f "$_tmp" "$DIR/$PID" || { rm -f "$_tmp"; unlock; exit 2; }
+    find "$DIR" -maxdepth 1 -mmin +120 -type f ! -name '.lock*' -exec rm -f {} + 2>/dev/null
+    for _c in "$DIR"/.lock*.claim.*; do
+      [ -f "$_c" ] || continue
+      _t=$(head -1 "$_c" 2>/dev/null)
+      [ -n "$(find "$_c" -mmin +2 2>/dev/null)" ] && { abandoned "$_c" "$_t" || holder_gone "$_t"; } && rm -f "$_c"
+    done
+    rm -rf "$DIR"/.lock*.gone.* 2>/dev/null
     unlock
     exit 0 ;;
+  release)
+    case "$PID" in ''|*[!0-9]*) echo "gstack-lease: release needs --pid <number> and --run <id>" >&2; exit 2 ;; esac
+    [ -n "$RUN" ] && [ "$RUN" != - ] || { echo "gstack-lease: release needs --pid <number> and --run <id>" >&2; exit 2; }
+    [ -f "$DIR/$PID" ] || exit 0
+    lock || exit 3
+    f="$DIR/$PID" _tmp="$DIR/.$PID.$$"
+    if sed -n '2,$p' "$f" | awk -v id="$RUN" '$1 == "run" && $2 == id { found = 1 } END { exit !found }'; then
+      _keep=$(fresh "$f" "run $RUN")
+      {
+        head -1 "$f"
+        if [ -n "$_keep" ]; then printf '%s\n' "$_keep"; else echo idle; fi
+      } > "$_tmp" && touch -r "$f" "$_tmp" && mv -f "$_tmp" "$f" || { rm -f "$_tmp"; unlock; exit 2; }
+    fi
+    unlock
+    exit 0 ;;
+  open)
+    [ -z "$FROM" ] || PID=$(gstack_harness_pid "$FROM")
+    case "$PID" in *[!0-9]*) echo "gstack-lease: open needs --run <id> and an optional --pid <number>" >&2; exit 2 ;; esac
+    [ -n "$RUN" ] || { echo "gstack-lease: open needs --run <id> and an optional --pid <number>" >&2; exit 2; }
+    for f in "$DIR"/${PID:-*}; do
+      [ -f "$f" ] || continue
+      [ "$(state "${f##*/}" "$(head -1 "$f" 2>/dev/null)" "$(age_min "$f")")" = alive ] || continue
+      fresh "$f" | awk -v id="$RUN" '$1 == "run" && $2 == id { found = 1 } END { exit !found }' && exit 0
+    done
+    exit 1 ;;
   list)
     for f in "$DIR"/*; do
       [ -f "$f" ] || continue
       p=${f##*/}
       _age=$(age_min "$f")
-      echo "$p ${_age}m $(state "$p" "$(head -1 "$f" 2>/dev/null)" "$_age")"
+      _st=$(state "$p" "$(head -1 "$f" 2>/dev/null)" "$_age")
+      [ "$_st" = alive ] && idle "$f" && _st=idle
+      echo "$p ${_age}m $_st"
     done
     exit 0 ;;
 esac
@@ -181,9 +356,11 @@ done
 FOUND=1
 for f in "$DIR"/*; do
   [ -f "$f" ] || continue
+  idle "$f" && continue
   p=${f##*/}
-  case "$ANCESTRY" in *" $p "*) continue ;; esac
-  _rec=$(head -1 "$f" 2>/dev/null) _age=$(age_min "$f")
+  _age=$(age_min "$f")
+  case "$ANCESTRY" in *" $p "*) [ "$SHARED" -eq 1 ] && [ "$_age" -lt 120 ] && gstack_shared_harness "$p" || continue ;; esac
+  _rec=$(head -1 "$f" 2>/dev/null)
   case "$(state "$p" "$_rec" "$_age")" in
     dead) continue ;;
     stale)

@@ -10,6 +10,7 @@
 # Allowlist file: ~/.gstack/ios-qa-allowlist.json (mode 0600).
 
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GSTACK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -25,4 +26,4 @@ if ! command -v bun >/dev/null 2>&1; then
   exit 1
 fi
 
-exec bun run "$ENTRY" "$@"
+exec bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" run "$ENTRY" "$@"

@@ -1,3 +1,4 @@
+import { upstreamCondition } from './helpers/fork-paid-workflow';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -5,7 +6,7 @@ import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { buildRunManifest, collectPaidTestFiles, shardCaseId, shardTrial, type PaidRunManifest, type SliceResult } from '../scripts/test-paid-shards';
 import { STRICT_RETRY_CASE_BUDGETS } from './helpers/eval-budgets';
-import { approvedCookieWorkflowSource, manualReviewFixture } from './helpers/manual-judge-review-fixture';
+import { manualReviewFixture } from './helpers/manual-judge-review-fixture';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 type Step = { uses?: string; run?: string; if?: string; with?: Record<string, unknown> };
@@ -75,9 +76,9 @@ describe('paid CI coordination stays off the eval image', () => {
     test(`${name}: planning is independent of image startup and has no dependency install`, () => {
       const planner = jobs['plan-slices'];
       if (name === 'evals.yml') {
-        // The PR lane plans after its two tiny coordination jobs (readiness, base-ref receipt recovery), never after the image.
-        expect(planner.needs).toEqual(['readiness', 'recover-receipts']);
-        for (const id of ['readiness', 'recover-receipts']) {
+        // The PR lane plans after its three tiny coordination jobs (route, readiness, base-ref receipt recovery), never after the image.
+        expect(planner.needs).toEqual(['readiness', 'recover-receipts', 'route']);
+        for (const id of ['readiness', 'recover-receipts', 'route']) {
           const job = jobs[id] as Job & { 'runs-on'?: string };
           expect(job.container, id).toBeUndefined();
           expect(job['runs-on'], id).toBe('ubuntu-24.04');
@@ -111,9 +112,10 @@ describe('paid CI coordination stays off the eval image', () => {
       expect(JSON.stringify(executor.container)).toContain('needs.build-image.outputs.image-tag');
       if (name === 'evals.yml') {
         // A confirmed verdict reuse (R2a/R2) is the one PR run that executes no slice.
-        expect(executor.if).toBe("${{ !cancelled() && needs.build-image.result == 'success' && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true' }}");
+        expect(upstreamCondition(executor.if)).toBe(upstreamCondition("${{ !cancelled() && needs.build-image.result == 'success' && needs.plan-slices.result == 'success' && needs.plan-slices.outputs.gate_reuse != 'true' }}"));
       } else {
-        expect(executor.if).toBe("github.repository == 'garrytan/gstack'");
+        // A census-only run (monthly cron or census_arms dispatch) executes no periodic slice.
+        expect(upstreamCondition(executor.if)).toBe(upstreamCondition("${{ needs.plan-slices.outputs.periodic_lane == 'true' }}"));
       }
       expect(executor.steps.some(step => step.run === 'bun run build')).toBe(true);
       expect(executor.steps.some(step => step.uses === './.github/actions/restore-deps')).toBe(true);
@@ -124,9 +126,7 @@ describe('paid CI coordination stays off the eval image', () => {
       expect(report.container).toBeUndefined();
       expect(report.needs).toContain('plan-slices');
       expect(report.needs).toContain('eval-slices');
-      expect(report.if).toBe(name === 'evals.yml'
-        ? "${{ !cancelled() && needs.plan-slices.result == 'success' }}"
-        : "${{ github.repository == 'garrytan/gstack' && !cancelled() && needs.plan-slices.result == 'success' }}");
+      expect(upstreamCondition(report.if)).toBe("!cancelled() && needs.plan-slices.result == 'success'");
       expect(JSON.stringify(report.steps)).not.toMatch(/restore-deps|bun install/);
       expect(report.steps.find(step => step.run?.includes('--report'))?.run).toContain('bun --no-install run');
       if (name === 'evals.yml') expect(report.permissions).toEqual({ contents: 'read' });
@@ -136,7 +136,7 @@ describe('paid CI coordination stays off the eval image', () => {
       const logs = jobs['eval-slices'].steps.find(step => step.with?.name === 'paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}');
       expect(logs?.uses).toStartWith('actions/upload-artifact@');
       // A failed trial no longer reds its runner; its log is still the evidence.
-      expect(logs?.if).toBe('always()');
+      expect(upstreamCondition(logs?.if)).toBe(upstreamCondition('always()'));
       expect(logs?.with?.['include-hidden-files']).toBe(true);
       expect(String(logs?.with?.path).trim().split('\n')).toEqual([
         '/home/runner/.cache/gstack-paid-shard-*.log',
@@ -146,9 +146,10 @@ describe('paid CI coordination stays off the eval image', () => {
       const captures = hiddenUploads.filter(step => step.with?.name === 'native-captures-${{ env.EVALS_RUN_ID }}');
       // evals-periodic's host-run Codex job mounts $RUNNER_TEMP/eval-home as the container's HOME.
       const hostHome = (pattern: string) => pattern.replace('${{ runner.temp }}/eval-home/', '~/');
-      expect(captures).toHaveLength(name === 'evals.yml' ? 1 : name === 'evals-periodic.yml' ? 3 : 2);
+      // evals.yml: eval-slices, the rule-16 eval-rerun and train-bisect (GSTA-49 T1b), each under its own EVALS_RUN_ID.
+      expect(captures).toHaveLength(name === 'evals.yml' ? 3 : name === 'evals-periodic.yml' ? 3 : 2);
       for (const capture of captures) {
-        expect(capture.if).toBe('always()');
+        expect(upstreamCondition(capture.if)).toBe(upstreamCondition('always()'));
         expect(String(capture.with?.path).trim().split('\n').map(hostHome)).toEqual([
           '~/.gstack/projects/*/e2e-runs', '~/.gstack/projects/*/evals/qa-callers',
           '~/.gstack-dev/e2e-runs', '~/.gstack-dev/evals/qa-callers',
@@ -157,11 +158,19 @@ describe('paid CI coordination stays off the eval image', () => {
       const codexLogs = name === 'evals-periodic.yml'
         ? jobs['eval-codex-slices'].steps.find(step => step.with?.name === 'paid-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}') : undefined;
       if (codexLogs) {
-        expect(codexLogs.if).toBe('always()');
+        expect(upstreamCondition(codexLogs.if)).toBe(upstreamCondition('always()'));
         // The container sets TMPDIR under HOME, so shard logs land in the mounted HOME's cache.
         expect(String(codexLogs.with?.path).trim().split('\n').map(hostHome)).toEqual(['~/.cache/gstack-paid-shard-*.log']);
       }
-      expect(hiddenUploads.filter(step => !captures.includes(step))).toEqual(codexLogs ? [logs!, codexLogs] : [logs!]);
+      // GSTA-49 T1b: train-bisect keeps the same shard-log upload under its own name.
+      const bisectLogs = name === 'evals.yml'
+        ? jobs['train-bisect'].steps.find(step => step.with?.name === 'train-bisect-logs-${{ matrix.slice }}-a${{ github.run_attempt }}') : undefined;
+      if (name === 'evals.yml') expect(String(bisectLogs?.with?.path)).toBe(String(logs?.with?.path));
+      // F1: the rule-16 eval-rerun keeps the same shard-log upload under its own name.
+      const rerunLogs = name === 'evals.yml'
+        ? jobs['eval-rerun'].steps.find(step => step.with?.name === 'rerun-logs-${{ matrix.slice }}-a${{ github.run_attempt }}') : undefined;
+      if (name === 'evals.yml') expect(String(rerunLogs?.with?.path)).toBe(String(logs?.with?.path));
+      expect(hiddenUploads.filter(step => !captures.includes(step))).toEqual([logs!, ...(codexLogs ? [codexLogs] : []), ...(rerunLogs ? [rerunLogs] : []), ...(bisectLogs ? [bisectLogs] : [])]);
     });
   }
 
@@ -170,7 +179,9 @@ describe('paid CI coordination stays off the eval image', () => {
     const trust = "github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)";
     // !cancelled() lets planning proceed when readiness was skipped (dispatch) or recovery was skipped or failed (reuse is then off);
     // a readiness failure (Free Tests red on this head) or a superseded head plans nothing; the trust clause still gates it.
-    expect(jobs['plan-slices'].if).toBe(`\${{ github.repository == 'garrytan/gstack' && !cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && ${trust} }}`);
+    // GSTA-49 T1b: the route job must have succeeded and named a planned mode (pr, screen, train, dispatch); a superseded screen plans nothing.
+    const route = "needs.route.result == 'success' && needs.route.outputs.superseded != 'true' && contains(fromJSON('[\"pr\",\"screen\",\"train\",\"dispatch\"]'), needs.route.outputs.mode)";
+    expect(upstreamCondition(jobs['plan-slices'].if)).toBe(upstreamCondition(`\${{ !cancelled() && (needs.readiness.result == 'success' || needs.readiness.result == 'skipped') && needs.readiness.outputs.superseded != 'true' && ${route} && ${trust} }}`));
     // The coordination jobs never run for Dependabot or for a fork PR either (recovery also serves an explicit pr_receipts dispatch).
     expect(jobs.readiness.if).toContain("github.actor != 'dependabot[bot]'");
     expect(jobs.readiness.if).toContain("github.event_name == 'pull_request'");
@@ -199,11 +210,6 @@ describe('dependency-free CI planner and report execution', () => {
       .toBe(fs.readFileSync(path.join(ROOT, 'test/helpers/llm-judge.ts'), 'utf8'));
     fs.cpSync(path.join(ROOT, 'lib'), path.join(fixture, 'lib'), sourceOnly);
     expect(fs.existsSync(path.join(fixture, 'lib/diagram-render/node_modules'))).toBe(false);
-    fs.mkdirSync(path.join(fixture, '.github'), { recursive: true });
-    for (const file of ['.github/cookie-workflow-manual-review.json', 'setup-browser-cookies/SKILL.md', 'BROWSER.md']) {
-      fs.mkdirSync(path.dirname(path.join(fixture, file)), { recursive: true });
-      fs.copyFileSync(path.join(ROOT, file), path.join(fixture, file));
-    }
     for (const file of collectPaidTestFiles()) {
       fs.copyFileSync(path.join(ROOT, file), path.join(fixture, file));
     }
@@ -305,12 +311,7 @@ describe('dependency-free CI planner and report execution', () => {
     });
   }
 
-  test('report verifies every manual claim against current source, preserves attempts, and never masks a failed shard', () => {
-    const skillPath = path.join(fixture, 'setup-browser-cookies/SKILL.md');
-    const currentSkill = fs.readFileSync(skillPath, 'utf8');
-    fs.writeFileSync(skillPath, approvedCookieWorkflowSource(currentSkill));
-    const approvedBrowserPath = path.join(fixture, 'BROWSER.md');
-    fs.writeFileSync(approvedBrowserPath, approvedCookieWorkflowSource(fs.readFileSync(approvedBrowserPath, 'utf8')));
+  test('report rejects every manual-review claim, preserves attempts, and never masks a failed shard', () => {
     const reportDir = path.join(fixture, 'manual-report');
     const manifestPath = path.join(reportDir, 'manifest.json');
     const planned = run(['--emit-plan', manifestPath, '--slices', '1'], 'gate');
@@ -327,89 +328,53 @@ describe('dependency-free CI planner and report execution', () => {
     const slicePath = path.join(reportDir, 'slice-1.json');
     const collectorPath = path.join(reportDir, 'judge-results.json');
     const summaryPath = path.join(reportDir, 'collector-outcomes.json');
-    const receipt = manualReviewFixture(fixture);
+    const receipt = manualReviewFixture();
+    const executed = { name: 'executed', suite: 'other', passed: true, execution: 'executed' };
+    const reused = { name: 'automated', suite: 'other', passed: true, execution: 'reused' };
     const write = (tests: unknown[]) => fs.writeFileSync(collectorPath, JSON.stringify({
       total_tests: tests.length, tier: 'llm-judge', shard: 1, total_cost_usd: 0,
-      tests, flaky_retries: [{ name: receipt.name, attempts: tests.length }],
+      tests, flaky_retries: [{ name: executed.name, attempts: tests.length }],
     }));
     fs.writeFileSync(slicePath, JSON.stringify(slice));
-    write([{ ...receipt, passed: true }, receipt]);
-    const historical = run(['--report', reportDir], 'gate');
-    expect(historical.status).toBe(1);
-    expect(historical.stderr).toContain('attempt 1: Malformed manual-review claim');
+    write([receipt, reused]);
+    const retired = run(['--report', reportDir], 'gate');
+    expect(retired.status).toBe(1);
+    expect(retired.stderr).toContain('attempt 1: manual-review claims were retired with the workflow judges');
     expect(fs.existsSync(summaryPath)).toBe(false);
 
-    write([{ ...receipt, manual_review: { ...receipt.manual_review, refusal: {
-      ...receipt.manual_review!.refusal, response_id: '',
-    } } }, receipt]);
-    const malformed = run(['--report', reportDir], 'gate');
-    expect(malformed.status).toBe(1);
-    expect(malformed.stderr).toContain('attempt 1: Malformed manual-review claim');
-
-    write([{ ...receipt, manual_review: undefined, passed: false }, receipt]);
-    const forgedFirstAttempt = run(['--report', reportDir], 'gate');
-    expect(forgedFirstAttempt.status).toBe(1);
-    expect(forgedFirstAttempt.stderr).toContain('attempt 2: manual review is only valid on the first case attempt');
-    expect(fs.existsSync(summaryPath)).toBe(false);
-    write([receipt, { ...receipt, attempt: 2 }]);
-    const retriedManual = run(['--report', reportDir], 'gate');
-    expect(retriedManual.status).toBe(1);
-    expect(retriedManual.stderr).toContain('attempt 2: Malformed manual-review claim');
+    write([executed, { ...receipt, passed: true }]);
+    const forgedPass = run(['--report', reportDir], 'gate');
+    expect(forgedPass.status).toBe(1);
+    expect(forgedPass.stderr).toContain('attempt 2: manual-review claims were retired with the workflow judges');
     expect(fs.existsSync(summaryPath)).toBe(false);
 
-    write([receipt]);
-    const secondCollector = path.join(reportDir, 'other-results.json');
-    fs.writeFileSync(secondCollector, JSON.stringify({ total_tests: 1, tests: [receipt] }));
-    const duplicateCollector = run(['--report', reportDir], 'gate');
-    expect(duplicateCollector.status).toBe(1);
-    expect(duplicateCollector.stderr).toContain('duplicate manual-review claim');
-    expect(fs.existsSync(summaryPath)).toBe(false);
-    fs.rmSync(secondCollector);
-
-    write([receipt, { name: 'automated', suite: 'other', passed: true, execution: 'reused' }]);
+    write([executed, reused]);
     const clean = run(['--report', reportDir], 'gate');
     expect(clean.status, clean.stderr).toBe(0);
-    expect(clean.stdout).toContain('1 passed, 0 failed, 1 manual accepted (unscored; no score-cache credit) (2 attempt records');
+    expect(clean.stdout).toContain('2 passed, 0 failed, 0 manual accepted (unscored; no score-cache credit) (2 attempt records');
     const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
-    expect(summary.totals).toEqual({ executed: 1, reused: 1, passed: 1, failed: 0,
-      manual_accepted: 1, attempts: 2, total: 2, flaky: 1 });
-    expect(summary.files[0]).toMatchObject({ file: 'judge-results.json', total: 2, manual_accepted: 1, passed: 1 });
-    expect(JSON.parse(fs.readFileSync(collectorPath, 'utf8')).tests[0]).toEqual(receipt);
+    expect(summary.totals).toEqual({ executed: 1, reused: 1, passed: 2, failed: 0,
+      manual_accepted: 0, attempts: 2, total: 2, flaky: 1 });
+    expect(summary.files[0]).toMatchObject({ file: 'judge-results.json', total: 2, manual_accepted: 0, passed: 2 });
 
-    fs.writeFileSync(skillPath, currentSkill);
-    const obsoleteApproval = run(['--report', reportDir], 'gate');
-    expect(obsoleteApproval.status).toBe(1);
-    expect(obsoleteApproval.stderr).toContain('does not match current source and approval');
-    fs.writeFileSync(skillPath, approvedCookieWorkflowSource(currentSkill));
-
-    const browserPath = path.join(fixture, 'BROWSER.md');
-    const browserSource = fs.readFileSync(browserPath, 'utf8');
-    fs.writeFileSync(browserPath, browserSource.replace('#### Choosing a source and checking sign-in',
-      '#### Choosing a source and checking sign-in\nchanged approved source'));
-    const sourceDrift = run(['--report', reportDir], 'gate');
-    expect(sourceDrift.status).toBe(1);
-    expect(sourceDrift.stderr).toContain('does not match current source and approval');
-    expect(fs.existsSync(summaryPath)).toBe(false);
-    fs.writeFileSync(browserPath, browserSource);
-
-    write([receipt, { name: 'unapproved', passed: false, execution: 'executed' }]);
+    write([executed, { name: 'unapproved', passed: false, execution: 'executed' }]);
     const failedCollector = run(['--report', reportDir], 'gate');
     expect(failedCollector.status).toBe(1);
     expect(failedCollector.stderr).toContain('1 unapproved final collector failure(s)');
-    expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8')).totals).toMatchObject({ failed: 1, manual_accepted: 1 });
+    expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8')).totals).toMatchObject({ failed: 1, passed: 1 });
 
-    write([receipt, { passed: true }]);
+    write([executed, { passed: true }]);
     const missingName = run(['--report', reportDir], 'gate');
     expect(missingName.status).toBe(1);
     expect(missingName.stderr).toContain('attempt 2: malformed collector entry (name/passed required)');
     expect(fs.existsSync(summaryPath)).toBe(false);
-    write([receipt, { name: 'malformed', passed: 'true' }]);
+    write([executed, { name: 'malformed', passed: 'true' }]);
     const malformedPassed = run(['--report', reportDir], 'gate');
     expect(malformedPassed.status).toBe(1);
     expect(malformedPassed.stderr).toContain('attempt 2: malformed collector entry (name/passed required)');
     expect(fs.existsSync(summaryPath)).toBe(false);
 
-    write([receipt, { name: 'automated', suite: 'other', passed: true, execution: 'reused' }]);
+    write([executed, reused]);
 
     slice.outcomes[0].status = 'failed';
     slice.outcomes[0].exitCode = 1;
@@ -417,14 +382,6 @@ describe('dependency-free CI planner and report execution', () => {
     const failedShard = run(['--report', reportDir], 'gate');
     expect(failedShard.status).toBe(1);
     expect(failedShard.stderr).toContain(`${slice.outcomes[0].files[0]}: failed`);
-    expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8')).totals.manual_accepted).toBe(1);
-
-    const stale = structuredClone(receipt);
-    stale.manual_review!.approval.prompt_sha256 = '0'.repeat(64);
-    write([stale]);
-    const mismatched = run(['--report', reportDir], 'gate');
-    expect(mismatched.status).toBe(1);
-    expect(mismatched.stderr).toContain('attempt 1: Malformed manual-review claim');
-    expect(fs.existsSync(summaryPath)).toBe(false);
+    expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8')).totals.passed).toBe(2);
   });
 });

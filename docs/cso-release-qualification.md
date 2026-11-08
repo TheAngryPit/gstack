@@ -26,11 +26,12 @@ The dedicated Windows CI job checks startup, argument forwarding, and runtime
 injection separately from static audit and private-state support. POSIX
 watchdog execution remains unavailable there.
 
-No qualified runtime or scanner image exists yet, so contained runtime and
-scanner execution is unavailable and setup preloads nothing: the scanner
-catalog is empty while its build inputs await review, and the runtime catalog's
-profiles stay unqualified until a private evaluator, still being built, can
-qualify them.
+Both catalogs are qualified. The scanner catalog
+(`lib/cso/scanner-images/catalog.json`) lists twelve scanner images: six
+scanners, each on linux/amd64 and linux/arm64. The runtime catalog
+(`lib/cso/runtime-catalog.json`) lists ten runtime images: Node, Bun, Python,
+Rails and PostgreSQL, each on both platforms. The private evaluator qualified
+them, and `cso-runtime-promote.yml` promoted them (described below).
 
 Every successful fresh install or upgrade asks the trusted launcher to preload
 the current host platform's qualified runtime and scanner images. This is the
@@ -144,8 +145,11 @@ archive bytes, not a verified response URL.
 Image publication starts with the committed
 [`build-inputs.json`](../lib/cso/images/build-inputs.json). Its reviewed revision
 pins distinct native manifests for every stack and the SBOM generator. Each
-profile records the inspected source tag and immutable index for provenance,
-then `baseImages` keyed by `linux/amd64` and `linux/arm64`; Python additionally
+profile records the inspected source tag and immutable index for provenance.
+Every source tag (each base, Python's uv and the SBOM generator) must name an exact release (`<major>.<minor>.<patch>`, or
+`<major>.<minor>` for PostgreSQL); a floating major or minor tag, `latest` or
+another alias fails matrix generation with `FLOATING_<FAMILY>_SOURCE`. Each profile then records
+`baseImages` keyed by `linux/amd64` and `linux/arm64`; Python additionally
 records native uv manifests. CI fails if a source tag no longer resolves to the
 reviewed index, a platform manifest is absent from that index, its image
 configuration names another architecture, or an executable reports a different
@@ -280,12 +284,19 @@ policy (`ISOLATION_POLICY_HASH`, which covers the `cso-isolation-v1` policy
 version and every limit), `preparationSha256` (a digest of every source byte
 compiled or copied into a runtime image: the import closure of the image's
 verifier and preparation helpers plus the image build context), and the
-`build-inputs.json` revision. The staging run's `reviewed-inputs` job records
+`build-inputs.json` revision. Each helper entrypoint's leading `#!` line is
+hashed as absent: it is compiled into the binary as an unused string and never
+runs inside the image. Every other byte of the helpers counts, and so does
+every byte of every other file, shebang lines included. The staging run's `reviewed-inputs` job records
 these values for its source commit as the `cso-requalification-triggers`
 artifact. The ingress downloads that artifact from the verified staging run
 into the evidence, and the promotion generator writes it into
-`promotion.requalification`. Generation refuses triggers that differ from the
-promoting checkout, so a trigger that changed between staging and promotion
+`promotion.requalification`. When a recorded `preparationSha256` differs from
+the promoting checkout's, generation re-measures it at the staged commit from
+the checkout's git history. The record must match that commit under either the
+current rule or the earlier rule that also hashed the helpers' `#!` lines, and
+the current-rule value is what gets compared and recorded. Generation refuses
+triggers that differ from the promoting checkout, so a trigger that changed between staging and promotion
 requires a new staging run. The free suite's
 [`cso-requalification.test.ts`](../test/cso-requalification.test.ts) compares
 the committed catalog's recorded triggers with the current source and fails

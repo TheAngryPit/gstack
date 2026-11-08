@@ -7,6 +7,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { currentFilePermissionTarget, currentBashPermissionCard, currentReadPermissionCard, currentWebFetchPermissionCard, hasCurrentBashPermissionHeading, hasCurrentReadPermissionHeading, hasCurrentWebFetchPermissionHeading } from '../plan-skill-questions';
 import { createRequire } from 'node:module';
+import { CREDENTIAL_REJECTION } from '../session-ledger';
 
 /** The existing xterm package ships this headless source beside its browser bundle. */
 let terminalConstructor: Promise<any> | undefined;
@@ -413,7 +414,7 @@ export function isNumberedOptionListVisible(visible: string): boolean {
 }
 
 /** Start of the CLI's public "API Error:" panel. The native AUQ capture reads the same panel. */
-export const API_ERROR_PANEL = /(?:^|\n)[\t │┃]*(?:[⎿●⏺]\s*)?API Error:/i;
+export const API_ERROR_PANEL = /(?:^|\n)[\t │┃]*(?:[⎿●⏺]\s*)?(?:API Error:|Invalid API key\s*·)/i;
 
 /** Session-ledger end from the last idle turn's public error panel: a safeguards panel is a refusal, any other an API error. */
 export function idlePanelEnd(visible: string): { end: 'refusal' | 'api_error'; evidence: string } | null {
@@ -422,10 +423,18 @@ export function idlePanelEnd(visible: string): { end: 'refusal' | 'api_error'; e
   return { end: /safeguards flagged|can't respond to this message/i.test(panel) ? 'refusal' : 'api_error', evidence: panel };
 }
 
+/** The last idle turn's error panel, else the CLI's rejected-credentials line anywhere on screen: after one the
+ *  CLI can sit at a footer the idle check does not know (manual mode), and no turn can run. */
+export function screenPanelEnd(visible: string): { end: 'refusal' | 'api_error'; evidence: string } | null {
+  const credential = visible.split(/\r\n?|\n/).reverse().find(line => CREDENTIAL_REJECTION.test(line))?.trim();
+  return idlePanelEnd(visible) ?? (credential ? { end: 'api_error', evidence: credential } : null);
+}
+
 /** The CLI's end-of-turn line, e.g. "✻ Cooked for 24s · done 12:46 AM" (spaces may collapse in the PTY text). */
 const TURN_DONE_RE = /✻[ \t]*\p{L}[\p{L}'’-]*[ \t]*for[ \t]*(?=\d)(?:\d+h[ \t]*)?(?:\d+m[ \t]*)?(?:\d+s)?[ \t]*·[ \t]*done[^\n]*/gu;
-/** An empty input prompt and its known idle footers, nothing else. */
-const IDLE_PROMPT_RE = /^[\s─]*❯[\s─]*(?:(?:←[ \t]*for[ \t]*agents|\?[ \t]*for[ \t]*shortcuts)[\s─]*)*$/;
+/** An empty input prompt and its known idle footers, nothing else. The plan-mode footer is idle only
+ *  without its running "esc to interrupt" segment (run 40851840940, plan-devex-finding-floor). */
+const IDLE_PROMPT_RE = /^[\s─]*❯[\s─]*(?:(?:(?:⏸[ \t]*plan[ \t]*mode[ \t]*on[ \t]*\(shift\+tab[ \t]*to[ \t]*cycle\)[ \t]*·[ \t]*)?←[ \t]*for[ \t]*agents|\?[ \t]*for[ \t]*shortcuts)[\s─]*)*$/;
 
 /**
  * The CLI ended its turn and sits at an empty prompt: the last end-of-turn

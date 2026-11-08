@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# gstack-worktree-audit — read-only audit of every git worktree beside the main
+# one: size, age of its last commit, whether its head is merged into the base,
+# tracked edits vs untracked scratch, remote state, the PR on its branch, the
+# newest Claude Code chat that ran in it, and a suggested bucket. One TSV row
+# per worktree, largest first. It never deletes, prunes, checks out or edits a
+# worktree or a branch; its one write is the best-effort fetch of the base ref
+# (skip it with --no-fetch). In a fork workflow, where origin is your fork and
+# gh resolves the upstream, every PR is cross-repository and the PR column is -. Removing a worktree stays a step a person takes
+# after reading the table.
+#
+# Ported from pstack's poteto-mode/scripts/worktree-audit.sh (Copyright Lauren
+# Tan, MIT; https://github.com/cursor/plugins, pstack/skills/poteto-mode at
+# 99b609a7). Changes from the source: the PR column comes from gh alone through
+# its own --jq (no jq binary) and ignores fork PRs, LAST_CHAT reads Claude
+# Code's per-worktree transcript directory instead of Cursor's, worktree paths
+# may contain spaces, a registered worktree whose directory is gone gets a
+# `prunable` row, `safe` also requires a clean tree with nothing unpushed, and
+# --no-fetch is new. License
+# text: licenses/MIT-pstack.txt; NOTICE.md carries the entry.
+#
+# Usage: gstack-worktree-audit [-b|--base <ref>] [--no-fetch] [repo-path]
+#   repo-path defaults to the repository the current directory is in.
+#   -b sets the ref the MERGED column checks against (origin/integration, say).
+#      Without it the base is origin/HEAD, then origin/main, then origin/master,
+#      and a warn line says which one was picked: origin/HEAD is the remote's
+#      default branch, not necessarily the branch PRs merge into.
+#   --no-fetch skips the best-effort fetch of the base before the merge check.
+#
+# Columns: SIZE AGE MERGED DIRTY REMOTE PR LAST_CHAT BUCKET WORKTREE
+#   MERGED    YES when the worktree's head is an ancestor of the base. A
+#             squash-merged branch is never an ancestor, so read PR with it.
+#   DIRTY     clean | clean,ignored:<n> (only gitignored entries: .env, build
+#             output; the bucket ignores them, removing the worktree would not) |
+#             wip:<n> (tracked edits) | scratch:<n> (untracked only) |
+#             missing (registered, directory gone) | broken (the worktree's own
+#             .git link is gone, so git reads describe another repository) |
+#             unknown (git status failed)
+#   REMOTE    pushed | ahead<n> | no-remote | detached, against the local
+#             origin/<branch> tracking ref as last fetched
+#   PR        #<n>/<state> from gh (open, merged, closed; an open PR wins when a
+#             branch name has several, fork PRs are ignored), or - without gh
+#   LAST_CHAT date of the newest Claude Code transcript under
+#             ${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<worktree slug>/, or -
+#   BUCKET    prunable (directory gone and not locked) > review for a locked or
+#             broken entry > hold-wip (tracked edits) >
+#             hold-open-pr > verify-recent-chat (a chat in the last 4 days) >
+#             safe (clean tree, and either merged into the base or its PR is
+#             closed or merged with every commit pushed) > review (anything
+#             else: unpushed commits, untracked files, nothing says it is done)
+set -u
+
+base=""
+fetch=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+  -b|--base) [ $# -ge 2 ] || { echo "gstack-worktree-audit: $1 needs a ref" >&2; exit 2; }; base="$2"; shift 2 ;;
+  --no-fetch) fetch=0; shift ;;
+  -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+  -*) echo "gstack-worktree-audit: unknown option: $1" >&2; exit 2 ;;
+  *) break ;;
+  esac
+done
+
+repo="${1:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+[ -z "$repo" ] && { echo "gstack-worktree-audit: not in a git repository; pass a repo path" >&2; exit 1; }
+cd "$repo" || exit 1
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "gstack-worktree-audit: not a git repository: $repo" >&2; exit 1; }
+
+# The main worktree is the first entry; every other one is a candidate.
+main_wt=$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -1)
+
+if [ -z "$base" ]; then
+  for cand in "$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)" origin/main origin/master; do
+    [ -n "$cand" ] && git rev-parse --verify --quiet "$cand^{commit}" >/dev/null && { base="$cand"; break; }
+  done
+  [ -z "$base" ] && { echo "gstack-worktree-audit: no base ref (origin/HEAD, origin/main, origin/master all missing); pass -b <ref>" >&2; exit 1; }
+  echo "warn: no -b given; MERGED checks against $base" >&2
+fi
+
+# A stale base only makes MERGED conservative, so the fetch is best-effort. The
+# explicit refspec creates the remote ref even in a single-branch clone.
+if [ "$fetch" = 1 ]; then
+  case "$base" in
+  origin/*) GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" git fetch origin "+refs/heads/${base#origin/}:refs/remotes/$base" --quiet 2>/dev/null \
+    || echo "warn: could not fetch $base; MERGED may be stale" >&2 ;;
+  esac
+fi
+git rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1 || { echo "gstack-worktree-audit: base ref not found: $base" >&2; exit 1; }
+
+# GNU coreutils reads `stat -f` as file-system status and `date -r` as a file,
+# so pick the stat and date spellings once.
+if stat -c %Y / >/dev/null 2>&1; then
+  stat_fmt=(-c '%Y %n'); fmt_day() { date -u -d "@$1" '+%Y-%m-%d'; }
+else
+  stat_fmt=(-f '%m %N'); fmt_day() { date -u -r "$1" '+%Y-%m-%d'; }
+fi
+
+# PR state per branch, read once as "<branch>\t<number>\t<state>" lines through
+# gh's own --jq; a fork's PR says nothing about a local branch of the same name,
+# so cross-repository PRs are dropped. Empty when gh is missing or cannot read
+# this repository.
+prs=$(mktemp)
+trap 'rm -f "$prs"' EXIT
+if command -v gh >/dev/null 2>&1; then
+  gh pr list --state all --limit 1000 --json number,state,headRefName,isCrossRepository \
+    --jq '.[] | select(.isCrossRepository | not) | [.headRefName, (.number|tostring), (.state|ascii_downcase)] | @tsv' > "$prs" 2>/dev/null \
+    || { : > "$prs"; echo "warn: gh could not list this repository's PRs; PR column is -" >&2; }
+else
+  echo "warn: gh not on PATH; PR column is -" >&2
+fi
+
+projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+now=$(date +%s)
+
+echo "# base: $base"
+printf 'SIZE\tAGE\tMERGED\tDIRTY\tREMOTE\tPR\tLAST_CHAT\tBUCKET\tWORKTREE\n'
+
+# One porcelain block per worktree: the path, then flag lines (locked, prunable).
+# IFS is a tab so a path keeps its leading and trailing spaces; a path with a
+# newline in it cannot be read from this format and is not supported.
+git worktree list --porcelain | awk 'BEGIN { RS=""; FS="\n" } {
+  flags = "-"
+  for (i = 2; i <= NF; i++) { if ($i ~ /^locked/) flags = flags "L"; if ($i ~ /^prunable/) flags = flags "P" }
+  print flags "\t" substr($1, 10)
+}' | while IFS=$'\t' read -r flags wt; do
+  [ "$wt" = "$main_wt" ] && continue
+  # Directory gone: prunable, unless git holds the entry locked (an unmounted
+  # volume, say), in which case prune would not touch it and the branch's
+  # unpushed work may still exist elsewhere.
+  if [ ! -d "$wt" ]; then
+    case "$flags" in *L*) bucket=review ;; *) bucket=prunable ;; esac
+    printf '0\t?\t?\tmissing\t?\t-\t-\t%s\t%s\n' "$bucket" "$wt"
+    continue
+  fi
+  # A worktree whose .git file is gone (git marks it prunable) makes every
+  # git -C read describe whichever repository contains the directory, so its
+  # own files would be invisible: report it broken, never safe.
+  case "$flags" in *P*) printf '%s\t?\t?\tbroken\t?\t-\t-\treview\t%s\n' "$(du -sh "$wt" 2>/dev/null | awk '{print $1}')" "$wt"; continue ;; esac
+  # --show-cdup is empty only when the directory is itself a toplevel; a path
+  # comparison would misfire where git and the shell spell one path differently.
+  if [ ! -e "$wt/.git" ] || [ -n "$(git -C "$wt" rev-parse --show-cdup 2>/dev/null || echo broken)" ]; then
+    printf '%s\t?\t?\tbroken\t?\t-\t-\treview\t%s\n' "$(du -sh "$wt" 2>/dev/null | awk '{print $1}')" "$wt"
+    continue
+  fi
+
+  size=$(du -sh "$wt" 2>/dev/null | awk '{print $1}')
+  head=$(git -C "$wt" rev-parse HEAD 2>/dev/null)
+  head_ts=$(git -C "$wt" log -1 --format='%ct' HEAD 2>/dev/null || echo 0)
+  age=$([ "$head_ts" -gt 0 ] 2>/dev/null && echo "$(( (now - head_ts) / 86400 ))d" || echo "?")
+
+  git merge-base --is-ancestor "$head" "$base" 2>/dev/null && merged=YES || merged=no
+
+  # Tracked edits are work in progress; untracked files alone are scratch. A
+  # clean tree still names its ignored entries (.env, build output): they do
+  # not change the bucket, but they are what removing the worktree would lose.
+  # The flags pin what status reports: a status.showUntrackedFiles=no config
+  # would otherwise hide untracked files and let a worktree holding them read clean.
+  if porcelain=$(git -C "$wt" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null); then
+    if [ -z "$porcelain" ]; then
+      ignored=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null | grep -c .)
+      [ "$ignored" -gt 0 ] && dirty="clean,ignored:$ignored" || dirty=clean
+    elif printf '%s\n' "$porcelain" | grep -qv '^??'; then
+      dirty="wip:$(printf '%s\n' "$porcelain" | grep -cv '^??')"
+    else dirty="scratch:$(printf '%s\n' "$porcelain" | grep -c '^??')"; fi
+  else dirty=unknown; fi
+
+  # refs/heads/ is stripped by hand: --short prints heads/<name> when a tag
+  # shares the branch's name, and then nothing downstream would match.
+  branch=$(git -C "$wt" symbolic-ref --quiet HEAD 2>/dev/null | sed 's#^refs/heads/##')
+  if [ -z "$branch" ]; then remote=detached
+  elif git -C "$wt" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    [ "$(git -C "$wt" rev-parse "origin/$branch" 2>/dev/null)" = "$head" ] \
+      && remote=pushed \
+      || remote="ahead$(git -C "$wt" rev-list --count "origin/$branch..HEAD" 2>/dev/null)"
+  else remote=no-remote; fi
+
+  # Several PRs can share a branch name over time; an open one describes the
+  # branch as it is now, so it wins over a closed or merged one.
+  pr="-"
+  [ -n "$branch" ] && [ -s "$prs" ] && pr=$(awk -F'\t' -v b="$branch" \
+    '$1==b { if ($3=="open" || $3=="draft") { print "#" $2 "/" $3; exit } if (first=="") first="#" $2 "/" $3 } END { if (first!="") print first }' "$prs" | head -1)
+  [ -z "$pr" ] && pr="-"
+
+  # Newest transcript in this worktree's own Claude Code project directory
+  # (the path with every non-alphanumeric byte replaced by -, as Claude names it).
+  last="-"; last_ts=0
+  chat_dir="$projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
+  if [ -d "$chat_dir" ]; then
+    f=$(find "$chat_dir" -type f -print0 2>/dev/null | xargs -0 stat "${stat_fmt[@]}" 2>/dev/null | sort -rn | head -1)
+    if [ -n "$f" ]; then last_ts=$(echo "$f" | awk '{print $1}'); last=$(fmt_day "$last_ts" 2>/dev/null); fi
+  fi
+  recent=$([ "$last_ts" -gt 0 ] 2>/dev/null && [ $(( (now - last_ts) / 86400 )) -le 4 ] && echo yes || echo no)
+
+  # safe means nothing in the worktree exists only there: a clean tree whose
+  # head is in the base, or whose PR is closed or merged with every commit
+  # pushed. Unpushed commits or untracked files on a merged branch are review.
+  case "$dirty" in wip:*) bucket=hold-wip ;; *)
+    case "$pr" in */open|*/draft) bucket=hold-open-pr ;; *)
+      if [ "$recent" = yes ]; then bucket=verify-recent-chat
+      elif [ "${dirty%%,*}" = clean ] && { [ "$merged" = YES ] || { [ "$pr" != "-" ] && [ "$remote" = pushed ]; }; }; then bucket=safe
+      else bucket=review; fi ;;
+    esac ;;
+  esac
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$size" "$age" "$merged" "$dirty" "$remote" "$pr" "$last" "$bucket" "$wt"
+done | sort -t"$(printf '\t')" -k1,1 -rh

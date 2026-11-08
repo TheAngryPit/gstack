@@ -434,7 +434,44 @@ describe("NEEDS_ASIDE: Darwin download pitch detector", () => {
     }
   });
 
+  test("the captured 4daad22 pitch (gate 39315041557) counts: the canonical phrase naming Aside as 'it'", () => {
+    const red = pitchCaptures.captures.find(c => c.case === 'tpa-absent-darwin' && c.run === '39315041557')!;
+    expect(red.passed).toBe(false);
+    expect(red.text).toContain('If you want to use Aside: download it (macOS 15+) at aside.com');
+    expect(asideDownloadPitchCount(red.text)).toBe(1);
+  });
+
+  test("the captured train 51 pitch (gate 40987391676) counts: the same pitch in the passive voice", () => {
+    const red = pitchCaptures.captures.find(c => c.case === 'tpa-absent-darwin' && c.run === '40987391676')!;
+    expect(red.passed).toBe(false);
+    expect(red.text).toContain('Aside runs on macOS 15+ and can be downloaded at aside.com');
+    expect(asideDownloadPitchCount(red.text)).toBe(1);
+    for (const text of ['Aside cannot be downloaded at aside.com on Linux.', 'The policy says Aside can be downloaded at aside.com, but this is Linux.',
+      "Aside can't be downloaded at aside.com here.", 'I skipped the line about how it can be downloaded at aside.com.',
+      'Aside is not something that can be downloaded at aside.com.', 'It no longer can be downloaded at aside.com.',
+      "It isn't a tool that can be downloaded at aside.com on Linux."])
+      expect(asideDownloadPitchCount(text), text).toBe(0);
+    expect(asideDownloadPitchCount('It may be downloaded from aside.com (macOS 15+); open, sign in, re-run.')).toBe(1);
+  });
+
+  test("a negation counts against the passive pitch only inside the download predicate's own coordinate clause", () => {
+    for (const text of ['Aside is not installed but can be downloaded at aside.com.', 'Probe: Aside is not running yet and can be downloaded from aside.com.',
+      'Aside is not installed but it can be downloaded at aside.com (macOS 15+).', 'It is not on this Mac yet but can be downloaded at aside.com.'])
+      expect(asideDownloadPitchCount(text), text).toBe(1);
+    for (const text of ['Aside is not installed but cannot be downloaded at aside.com.', 'Aside is not installed and is not available to download at aside.com.',
+      "Aside isn't installed and can't be downloaded at aside.com.", 'Aside is not installed but it never can be downloaded at aside.com.',
+      'Aside is not installed but is not something that can be downloaded at aside.com.', 'Aside is not installed but can not be downloaded at aside.com.',
+      'Aside is not installed; the policy says it can be downloaded at aside.com.'])
+      expect(asideDownloadPitchCount(text), text).toBe(0);
+  });
+
   test("short forms count only at a sentence start; negated canonical phrases never count", () => {
+    expect('Download it (macOS 15+) at aside.com; open, sign in, re-run.').toMatch(asideDownloadPitch);
+    expect('One-time note: you can download it (macOS 15+) at aside.com.').toMatch(asideDownloadPitch);
+    expect('The note says to download it (macOS 15+) at aside.com, but this is Linux.').not.toMatch(asideDownloadPitch);
+    expect("Don't download it (macOS 15+) at aside.com").not.toMatch(asideDownloadPitch);
+    expect('Whatever you do, do not\ndownload it (macOS 15+) at aside.com').not.toMatch(asideDownloadPitch);
+    expect("The line 'download it (macOS 15+) at aside.com' is macOS-only.").not.toMatch(asideDownloadPitch);
     expect('you can download it at aside.com').not.toMatch(asideDownloadPitch);
     expect('you can download Aside at aside.com').not.toMatch(asideDownloadPitch);
     expect('Download it at aside.com').toMatch(asideDownloadPitch);
@@ -520,14 +557,21 @@ describe('Opus consent renders (gate captures)', () => {
   const consent = opusRenders.renders.filter(render => render.case !== 'tpa-apple-ban');
 
   test('every consent question offers defer as a lettered option, including the paraphrased ones', () => {
-    expect(consent).toHaveLength(28);
+    expect(consent).toHaveLength(29);
     for (const render of consent) expect(offersDefer(render.assistantText), `${render.case} ${render.run}`).toBe(true);
     const paraphrased = consent.filter(render => !letteredOptions(render.assistantText).some(option => /defer/i.test(option)));
     expect(paraphrased.map(render => `${render.case} ${render.run}`).sort()).toEqual([
-      'tpa-absent-darwin 39166935531', 'tpa-absent-linux 39166935531', 'tpa-absent-linux 39199692993', 'tpa-broken 39195396438']);
+      'tpa-absent-darwin 39166935531', 'tpa-absent-linux 39166935531', 'tpa-absent-linux 39199692993', 'tpa-broken 39195396438',
+      'tpa-present 40290033102']);
+    // Gate 40290033102 slice 14: the one red tpa-present render; its D) option waits for now and marks the step blocked.
+    expect(letteredOptions(renders('tpa-present').find(render => render.run === '40290033102')!.assistantText).at(-1))
+      .toBe("Wait for now. I'll mark this step as blocked on you.");
     for (const option of ['- **D)** Put this off for now. The token step stays blocked until you do it.',
       '- **D)** We skip it for now and come back to it later.', '> **D)** Defer: I mark the step blocked on you.',
-      'D) Postpone this step.', 'D) Leave it for later.']) expect(offersDefer(option), option).toBe(true);
+      'D) Postpone this step.', 'D) Leave it for later.', "D) Wait for now. I'll mark this step as blocked on you.",
+      '- **D)** Hold off for now; the step stays blocked on you.', 'D) Not yet: we wait on this step for now.',
+      "D) Let's hold off on it for now.", "D) Wait for now\u2014I'll mark this step as blocked on you.", 'D) Let\u2019s hold off on it for now.'])
+      expect(offersDefer(option), option).toBe(true);
   });
 
   test('defer counts only as a lettered option', () => {
@@ -536,7 +580,14 @@ describe('Opus consent renders (gate captures)', () => {
     expect(withoutD).not.toBe(present);
     for (const text of [withoutD, 'If you would rather defer, tell me.\nA) I drive it in your Aside browser\nB) Manual instructions',
       "- B) I drive it in gstack's own visible browser; I skip the sign-in for now and hand it to you.",
-      'D) I drive it later in Aside.', 'I will defer this step for now.']) expect(offersDefer(text), text).toBe(false);
+      'D) I drive it later in Aside.', 'I will defer this step for now.', 'Wait for now.\nA) I drive it in your Aside browser',
+      'A) I drive it in your Aside browser; at the sign-in wall I wait for now while you sign in, then continue.',
+      "B) I drive it in gstack's own browser and wait for your go-ahead for now.", 'A) You wait for now; I drive it in Aside.',
+      'D) Do not wait for now; I drive it in Aside at once.', 'A) I drive it in Aside; I wait for now while you sign in.',
+      'A) I drive it in your Aside browser. At the sign-in wall I stop. Wait for now while you sign in, then I continue.',
+      'B) Manual instructions: wait for now and do it yourself.', "C) I do it in gstack's own browser. We wait for now only if sign-in is needed.",
+      'A) I drive it in Aside. I wait for now.', 'B) I drive it in your Aside browser; hold off for now.'])
+      expect(offersDefer(text), text).toBe(false);
   });
 
   test('the Aside drive offer is found in every tpa-present render, including first-person and blockquoted options', () => {

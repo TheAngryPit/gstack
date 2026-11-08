@@ -12,9 +12,6 @@ description: |
   Use when asked to "tune questions", "stop asking me that", "too many questions",
   "show my profile", "what questions have I been asked", "show my vibe",
   "developer profile", or "turn off question tuning". (gstack)
-
-  Proactively suggest when the user says the same gstack question has come up before,
-  or when they explicitly override a recommendation for the Nth time.
 triggers:
   - tune questions
   - stop asking me that
@@ -221,7 +218,7 @@ explicit.
    # Update declared dimensions atomically
    GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
    _PROFILE="$GSTACK_STATE_ROOT/developer-profile.json"
-   bun -e "
+   bun --no-env-file --config=/dev/null -e "
      const fs = require('fs');
      const p = JSON.parse(fs.readFileSync('$_PROFILE','utf-8'));
      p.declared = p.declared || {};
@@ -275,6 +272,8 @@ Parse the JSON. Present in **plain English**, not raw floats:
   the inferred column next to declared:
   "**scope_appetite:** declared 0.8 (boil the ocean) ↔ observed 0.72 (close)"
   Use words for the gap: 0.0-0.1 "close", 0.1-0.3 "drift", 0.3+ "mismatch".
+  When `inferred.contributing_events[dim]` is below 3, show "not enough
+  observed answers yet" for that dimension instead of an observed value or gap word.
 
   This display gate is intentionally lower than the E1 **promotion gate**
   (90+ days stable across 3+ skills, per `docs/designs/PLAN_TUNING_V0.md`).
@@ -301,7 +300,7 @@ _LOG="$GSTACK_STATE_ROOT/projects/$SLUG/question-log.jsonl"
 if [ ! -f "$_LOG" ]; then
   echo "NO_LOG"
 else
-  bun -e "
+  bun --no-env-file --config=/dev/null -e "
     const lines = require('fs').readFileSync('$_LOG','utf-8').trim().split('\n').filter(Boolean);
     const byId = {};
     for (const l of lines) {
@@ -395,7 +394,7 @@ is a trust boundary.
    ```bash
    GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
    _PROFILE="$GSTACK_STATE_ROOT/developer-profile.json"
-   bun -e "
+   bun --no-env-file --config=/dev/null -e "
      const fs = require('fs');
      const p = JSON.parse(fs.readFileSync('$_PROFILE','utf-8'));
      p.declared = p.declared || {};
@@ -425,6 +424,9 @@ Parse the JSON. For each dimension where both declared and inferred exist:
   Consider updating your declared value, or reflect on whether your behavior
   is actually what you want."
 
+For each dimension in `low_evidence` (fewer than 3 observed answers moved it),
+say "not enough observed answers yet" instead of a gap.
+
 Never auto-update declared based on the gap. In v1 the gap is reporting only —
 the user decides whether declared is wrong or behavior is wrong.
 
@@ -441,7 +443,7 @@ SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 _LOG="$GSTACK_STATE_ROOT/projects/$SLUG/question-log.jsonl"
 if [ -f "$_LOG" ]; then
-  bun -e "
+  bun --no-env-file --config=/dev/null -e "
     const lines = require('fs').readFileSync('$_LOG','utf-8').trim().split('\n').filter(Boolean);
     const events = [];
     for (const l of lines) { try { events.push(JSON.parse(l)); } catch {} }
@@ -462,7 +464,7 @@ if [ -f "$_LOG" ]; then
 else
   echo 'TOTAL_LOGGED: 0'
 fi
-~/.claude/skills/gstack/bin/gstack-developer-profile --profile | bun -e "
+~/.claude/skills/gstack/bin/gstack-developer-profile --profile | bun --no-env-file --config=/dev/null -e "
   const p = JSON.parse(await Bun.stdin.text());
   const d = p.inferred?.diversity || {};
   console.log('SKILLS_COVERED: ' + (d.skills_covered ?? 0));
@@ -497,7 +499,7 @@ any that misfired via `always-ask`.
 SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 _LOG="$GSTACK_STATE_ROOT/projects/$SLUG/question-log.jsonl"
-[ ! -f "$_LOG" ] && echo 'NO_LOG' || bun -e "
+[ ! -f "$_LOG" ] && echo 'NO_LOG' || bun --no-env-file --config=/dev/null -e "
   const lines = require('fs').readFileSync('$_LOG','utf-8').trim().split('\n').filter(Boolean);
   const auto = [];
   for (const l of lines) {
@@ -529,7 +531,7 @@ adoption: high-traffic unmarked questions are the next candidates to retrofit.
 SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 _LOG="$GSTACK_STATE_ROOT/projects/$SLUG/question-log.jsonl"
-[ ! -f "$_LOG" ] && echo 'NO_LOG' || bun -e "
+[ ! -f "$_LOG" ] && echo 'NO_LOG' || bun --no-env-file --config=/dev/null -e "
   const lines = require('fs').readFileSync('$_LOG','utf-8').trim().split('\n').filter(Boolean);
   const counts = {};
   const summaries = {};
@@ -662,6 +664,19 @@ For background mode (e.g., the user wants to keep working):
 - **The profile never changes defaults.** This skill inspects and configures.
   Per-question preferences can auto-decide questions; the declared/inferred
   profile is advisory only.
+- **Observable questions are not the user's to answer.** A question whose
+  answer a command, a render or a measurement can produce is a question for the
+  machine: "is this faster" is two timed runs, "which layout reads better" is two
+  renders side by side, "does the API accept this shape" is one call against a
+  local or test endpoint. The skill that would have asked does the observation
+  and reports what it saw, as long as the observation is local, read-only and
+  free; one that changes state, reaches a live or third-party system or spends
+  money is a one-way door and stays a question (see the rule above). Only a
+  product or preference call reaches the user (what the product should do, what
+  they want, what they will spend or risk), and it arrives with the observation
+  already made. When the question log shows a prompt whose answer was observable,
+  the fix belongs in the asking skill, not in a never-ask preference: flag it in
+  the audit as an observable question and name the check that replaces it.
 - **Completion status:**
   - DONE — did what the user asked (enable/inspect/set/update/disable)
   - DONE_WITH_CONCERNS — action taken but flagging something (e.g., "your

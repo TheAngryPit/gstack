@@ -25,6 +25,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'node:crypto';
 import { validateCeoReviewCompletion } from './helpers/auq-sdk-capture';
+import { readSkillStartup } from './helpers/skill-startup';
 import { generateAntiShortcutClause, generateSpecReviewLoop } from '../scripts/resolvers/spec-review';
 import { generatePlanFileReviewReport } from '../scripts/resolvers/review-dashboard';
 import { generatePlanReviewApprovalCheck, generateExitPlanModeGate } from '../scripts/resolvers/plan-gates';
@@ -497,7 +498,7 @@ describe('CEO review decision boundaries contract', () => {
     expect(approach).not.toContain('0C-bis');
     expectMentions(compactProse(section), [['before','amending','resolve']], 'compactProse(section)');
     expectMentions(section, [['obvious fix', 'approval']], 'section');
-    const generated = fs.readFileSync(SKELETON, 'utf8');
+    const generated = readSkillStartup(SKELETON);
     expect(generated).toContain('### Tool resolution (read first)');
     expect(generated).toContain('SESSION_KIND: spawned');
     const afterAnswer = approach.split('**Post-answer checkpoint:**')[1]!;
@@ -509,7 +510,7 @@ describe('CEO review decision boundaries contract', () => {
     expect(alternatives).toContain('10 = all edge cases');
     expectMentions(alternatives, [['not','completeness','coverage']], 'alternatives');
     // Scoring and recommendation details are reused from the existing preamble.
-    const generated = fs.readFileSync(SKELETON, 'utf8');
+    const generated = readSkillStartup(SKELETON);
     expect(generated).toContain('10 = complete, 7 = happy path, 3 = shortcut');
     expect(generated).toContain('(recommended)');
     expect(generated).toContain('AUTO_DECIDE depends on it');

@@ -110,7 +110,7 @@ describe('design printed-paths tripwire', () => {
 
 describe('design generating flows', () => {
   const flows: Record<string, string[]> = {
-    'office-hours': ['office-hours/SKILL.md'],
+    'office-hours': ['office-hours/sections/visual-design.md'],
     'plan-design-review': ['plan-design-review/SKILL.md'],
     'design-consultation': ['design-consultation/sections/proposal-and-preview.md'],
     'design-shotgun': ['design-shotgun/SKILL.md'],

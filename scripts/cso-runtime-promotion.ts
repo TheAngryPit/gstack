@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /** Generate a reviewable catalog candidate from authenticated qualification statements. */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -18,7 +18,7 @@ import {
 } from '../lib/cso/runtime-catalog';
 import { ISOLATION_POLICY_HASH } from '../lib/cso/docker';
 import { imageBuildMatrix, type ImageBuildRow } from './cso-image-matrix';
-import { requalificationTriggers, staleRequalificationTriggers } from './cso-requalification';
+import { committedPreparation, requalificationTriggers, staleRequalificationTriggers } from './cso-requalification';
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const WORKFLOW = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[0-9]+$/;
@@ -273,6 +273,30 @@ export function catalogPromotionCandidate(
   return candidate;
 }
 
+/**
+ * The release contract: the promotion candidate, refused when any trigger moved since the staged commit.
+ * A recorded preparationSha256 that differs from the current one is re-measured at the staged commit in
+ * `source`, so a staging record made under the legacy rule compares under the current rule.
+ */
+export async function releaseCandidate(
+  evidenceValues: unknown[],
+  recorded: RequalificationTriggers,
+  current: RequalificationTriggers,
+  source?: string,
+): Promise<RuntimeCatalog> {
+  let candidate = catalogPromotionCandidate(committedCatalog, buildInputs, evidenceValues, recorded);
+  if (recorded.preparationSha256 !== current.preparationSha256) {
+    const staged = await committedPreparation(candidate.promotion!.sourceCommit, source);
+    if (recorded.preparationSha256 !== staged.current && recorded.preparationSha256 !== staged.legacy) {
+      throw new Error('REQUALIFICATION_TRIGGERS_MISMATCH: preparationSha256 was not measured at the staged commit');
+    }
+    candidate = catalogPromotionCandidate(committedCatalog, buildInputs, evidenceValues, { ...recorded, preparationSha256: staged.current });
+  }
+  const stale = staleRequalificationTriggers(candidate, current);
+  if (stale.length) throw new Error(`STALE_RUNTIME_QUALIFICATION: ${stale.join(', ')} changed since the staged commit; re-stage and requalify`);
+  return candidate;
+}
+
 /** A promotion may only replace the exact catalog revision it was generated from. */
 export function validateRuntimeCatalogTransition(currentValue: unknown, proposedValue: unknown): void {
   validateRuntimeCatalog(currentValue);
@@ -356,9 +380,7 @@ if (import.meta.main) {
       }
       const triggers = collectEvidence(args[1], 'requalification.json');
       if (triggers.length !== 1) throw new Error('MISSING_REQUALIFICATION_TRIGGERS');
-      const candidate = catalogPromotionCandidate(committedCatalog, buildInputs, collectEvidence(args[1]), triggers[0] as RequalificationTriggers);
-      const stale = staleRequalificationTriggers(candidate, await requalificationTriggers());
-      if (stale.length) throw new Error(`STALE_RUNTIME_QUALIFICATION: ${stale.join(', ')} changed since the staged commit; re-stage and requalify`);
+      const candidate = await releaseCandidate(collectEvidence(args[1]), triggers[0] as RequalificationTriggers, await requalificationTriggers());
       const output = path.resolve(args[3]);
       fs.writeFileSync(output, JSON.stringify(candidate, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
       process.stdout.write(`${output}\n`);

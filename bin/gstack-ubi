@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# gstack-ubi — the /ubicloud skill's entry point: ephemeral Ubicloud VMs for
+# test suites, builds and evals that outgrow the local machine. Everything is
+# scripts/ubicloud/ubi-runner.sh (run, verify, up, ssh, sync, pull, down, list,
+# usage, records, gc, reap); this wrapper only resolves the checkout so skill
+# prose has one stable path.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+exec bash "$here/../scripts/ubicloud/ubi-runner.sh" "$@"

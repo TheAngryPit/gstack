@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /** Validate all host renders and the freshness of repository-owned outputs.
  * Optional installed host caches are never read or changed. */
 
@@ -50,7 +50,7 @@ export function validateGeneratedArtifact(renderRoot: string, artifact: Generate
     if (artifact.kind === 'skill') {
       for (const message of validateSkillFrontmatter(content)) invalid(message);
     }
-    if (artifact.kind === 'skill' || artifact.kind === 'section') {
+    if (artifact.kind === 'skill' || artifact.kind === 'section' || artifact.kind === 'preamble') {
       const validation = validateSkill(file);
       for (const command of validation.invalid) invalid(`line ${command.line}: unknown command '${command.command}'`);
       for (const error of validation.snapshotFlagErrors) invalid(`line ${error.command.line}: ${error.error}`);

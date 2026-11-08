@@ -582,8 +582,17 @@ export function createShardSandbox(
     ...baseEnv, TMPDIR: tmp, TEMP: tmp, TMP: tmp,
     CHROMIUM_PROFILE: path.join(stateDir, 'chromium-profile'),
   };
+  for (const name of CAPY_LAUNCH_MARKERS) delete env[name];
   return { stateDir, tmp, env };
 }
+
+/**
+ * The Capy installer's `GSTACK_LAUNCH` markers. A lane started from a shell
+ * that sourced the launch file would hand them to every product-under-test
+ * child a shard spawns, so fixtures would see an unattended Capy session they
+ * never set up (GSTA-99); each fixture sets its own session kind.
+ */
+export const CAPY_LAUNCH_MARKERS = ['GSTACK_SESSION_KIND', 'GSTACK_CAPY', 'GSTACK_EPHEMERAL', 'GSTACK_INSTALL_VERDICT'] as const;
 
 /**
  * Asynchronous best-effort backstop removal: a SIGKILLed shard can leave a

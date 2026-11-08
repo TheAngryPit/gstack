@@ -15,7 +15,7 @@ const sample = (metric = 3): OverlayTrialOutcome => ({ passed: true, taskCorrect
 const sdkResult = (): AgentSdkResult => ({ events: [{ type: 'result', subtype: 'success' }] as AgentSdkResult['events'], assistantTurns: [], toolCalls: [], output: 'done', exitReason: 'success', turnsUsed: 1, durationMs: 1, firstResponseMs: 1, maxInterTurnMs: 0, costUsd: .01, model: 'test', sdkVersion: 'test', sdkClaudeCodeVersion: 'test', resolvedBinaryPath: 'test', browseErrors: [] });
 
 function roots() { return fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-lifecycle-free-')); }
-function opts(dir: string, provider: QueryProvider, signal: AbortSignal) { return { systemPrompt: '', userPrompt: 'test', workingDirectory: dir, queryProvider: provider, signal }; }
+function opts(dir: string, provider: QueryProvider, signal: AbortSignal) { return { systemPrompt: { type: 'sdk-default', reason: 'stub queryProvider: no model reads the prompt' } as const, userPrompt: 'test', workingDirectory: dir, queryProvider: provider, signal }; }
 
 test('every fixture owns one paid wrapper; public models/trials/concurrency/turn caps and walls are preserved', () => {
   expect(Object.values(OVERLAY_CASE_FILES).sort()).toEqual(OVERLAY_FIXTURES.map(f => f.id).sort());
@@ -28,7 +28,7 @@ test('every fixture owns one paid wrapper; public models/trials/concurrency/turn
   expect(isPaidTestFile('test/overlay-lifecycle.test.ts')).toBe(false);
   expect(OVERLAY_FIXTURES.every(f => f.trials === 10 && f.concurrency === 3)).toBe(true);
   expect(OVERLAY_FIXTURES.map(f => f.maxTurns ?? 5)).toEqual([15,8,15,15,15]);
-  expect(OVERLAY_FIXTURES.map(f => f.model)).toEqual([...Array(3).fill('claude-opus-4-7'), 'claude-sonnet-4-6', 'claude-opus-5-5']);
+  expect(OVERLAY_FIXTURES.map(f => f.model)).toEqual([...Array(3).fill('claude-opus-5-5'), 'claude-sonnet-5-5', 'claude-opus-5-5']);
   expect([OVERLAY_CASE_WORK_MS, OVERLAY_RECORD_GRACE_MS, OVERLAY_CASE_OUTER_MS, OVERLAY_MIN_FILE_WALL_MS]).toEqual([1_800_000, 5_000, 1_810_000, 1_830_000]);
 });
 

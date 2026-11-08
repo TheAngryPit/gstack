@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { readSkillStartup } from './helpers/skill-startup';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const BANNER = '<!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->\n<!-- Regenerate: bun run gen:skill-docs -->';
@@ -30,7 +31,7 @@ function fixture(copy: boolean) {
   put(path.join(root, 'VERSION'), '2.0.0.0\n');
   put(path.join(root, 'ETHOS.md'), 'Fixture ethos\n');
   put(path.join(root, 'package.json'), JSON.stringify({ type: 'module', scripts: { 'gen:skill-docs': 'bun run scripts/gen-skill-docs.ts' } }));
-  for (const bin of ['gstack-config', 'gstack-patch-names', 'gstack-relink', 'gstack-migrate-claude-code', 'gstack-claude-code', 'gstack-models', 'gstack-state-root.sh', 'gstack-bun-version.sh', 'gstack-path-spelling.sh', 'gstack-claude-root.sh', 'gstack-install-registry.sh', 'gstack-render-claude.sh', 'gstack-host-renders.sh']) {
+  for (const bin of ['gstack-config', 'gstack-patch-names', 'gstack-relink', 'gstack-migrate-claude-code', 'gstack-claude-code', 'gstack-models', 'gstack-state-root.sh', 'gstack-bun-version.sh', 'gstack-path-spelling.sh', 'gstack-skill-name.sh', 'gstack-claude-root.sh', 'gstack-install-registry.sh', 'gstack-render-claude.sh', 'gstack-host-renders.sh']) {
     const target = path.join(root, 'bin', bin);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(ROOT, 'bin', bin), target);
@@ -128,7 +129,7 @@ describe.skipIf(process.platform === 'win32')('full setup repairs the installed 
         expect(codexReview).toContain('Native second-opinion modes');
         expect(codexReview).not.toContain('gstack-claude-code');
         expect(fs.readFileSync(path.join(f.skills, 'gstack-review/notes.md'), 'utf8')).toBe('user notes\n');
-        expect(fs.readFileSync(path.join(f.root, '.agents/skills/gstack-review/SKILL.md'), 'utf8')).toContain('Model-Specific Behavioral Patch (gpt-5.6-sol)');
+        expect(readSkillStartup(path.join(f.root, '.agents/skills/gstack-review/SKILL.md'))).toContain('Model-Specific Behavioral Patch (gpt-5.6-sol)');
         expect(fs.existsSync(path.join(f.skills, 'gstack/bin/gstack-claude-code'))).toBe(true);
         expect(fs.existsSync(path.join(f.skills, 'gstack/lib/outside-review-result.ts'))).toBe(true);
         const fakeCli = path.join(f.temp, 'fake-reviewer.ts');

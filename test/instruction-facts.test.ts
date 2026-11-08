@@ -175,7 +175,6 @@ const STATE_ROOT_ALLOWLIST: Array<{ file: string; match: string; reason: string 
   { file: 'design-shotgun/SKILL.md.tmpl', match: 'v1 schema at `~/.gstack/projects/$SLUG/taste-profile.json`', reason: DESCRIPTION },
   { file: 'land-and-deploy/sections/readiness-gate.md.tmpl', match: 'eval store (`~/.gstack/projects/<slug>/evals/`', reason: readinessEvalReason },
   { file: 'land-and-deploy/sections/readiness-gate.md.tmpl', match: 'EVAL_DIR=~/.gstack/projects/$SLUG/evals', reason: readinessEvalReason },
-  { file: 'office-hours/SKILL.md.tmpl', match: "see each other's design docs in `~/.gstack/projects/`", reason: DESCRIPTION },
   { file: 'office-hours/sections/design-and-handoff.md.tmpl', match: 'The design doc at `~/.gstack/projects/` is automatically discoverable', reason: DESCRIPTION },
   { file: 'plan-ceo-review/sections/review-sections.md.tmpl', match: 'Keep in `~/.gstack/projects/` only (local, personal reference)', reason: DESCRIPTION },
   { file: 'plan-tune/SKILL.md.tmpl', match: 'Logs stay local (`~/.gstack/projects/<slug>/question-log.jsonl`)', reason: DESCRIPTION },

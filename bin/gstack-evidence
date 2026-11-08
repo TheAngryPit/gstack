@@ -1,9 +1,12 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * gstack-evidence — verification-evidence ledger: the mechanical arm of /ship's
  * IRON LAW ("no completion claims without fresh verification evidence").
  *
- *   gstack-evidence run --label <L> -- <cmd...>
+ *   gstack-evidence run [--reuse [--max-age <hours>]] --label <L> -- <cmd...>
+ *   gstack-evidence record-ci --label <L> --base <base> -- <cmd>
+ *   gstack-evidence passed -- <cmd>
+ *   gstack-evidence carried [--base <branch>] [--json]
  *   gstack-evidence check [--label <L> [--expect-cmd <exact string>]]... | --all
  *                         [--max-age <hours>] [--allow-paths <csv>]
  *   gstack-evidence bundle --out <file> [--label <L>]... [--require <csv>] [--selection L=<text>]...
@@ -14,14 +17,31 @@
  * `run` is a TRANSPARENT wrapper: it streams the child's output through
  * unchanged, tees it to a 0600 log (2MB cap with a truncation marker), and
  * appends {ts, label, command, cmd_sha256, exit, duration_s, commit, tree,
- * dirty, wtree, log_path, tests_ran} to ~/.gstack/projects/<slug>/<branch>-evidence.jsonl.
+ * dirty, wtree or wtree_changed, log_path, tests_ran} to ~/.gstack/projects/<slug>/<branch>-evidence.jsonl.
  *
  * `tests_ran` (zero-run green, W3 of docs/designs/HONEST_WORK_GATE_INTEGRITY.md)
  * is parsed from a bounded tail of the streamed output for the supported
  * runners only: bun (shard-engine's summary parser where importable; executed =
- * pass + fail, so an all-skip run is 0), jest, vitest, pytest, rspec, and Go's
- * zero-only case (every package `[no test files]`). The last summary per
- * runner wins; anything else is "unknown". Three states, never merged:
+ * pass + fail, so an all-skip run is 0), jest, vitest, pytest, rspec, Go's
+ * zero-only case (every package `[no test files]`), gstack's own shard runner
+ * (`bun run test:free` / `test:ubicloud`: the sum of its per-shard
+ * `[test:free] PASS — N tests` epilogues, or a files-from run's
+ * `FILES-FROM RESULT: … tests=N`), and a `gstack-pregate --remote` lane (the
+ * remote gate's `PREGATE_REMOTE: … tests=N` row, or the cleared obligation's
+ * `cleared by remote-gate … tests=N` receipt). The shard runner and the remote
+ * gate print only bun's terminal totals, which count skipped tests, so for
+ * those two the number is "ran, skips included" rather than executed (the shard
+ * runner refuses a shard whose bun summary counts fewer files than planned, but
+ * a shard whose files all loaded and executed nothing still passes with that
+ * total). When the shard runner spoke, its verdict stands for the whole tail:
+ * the tail is the stdout tail then the stderr tail, so a line's position says
+ * nothing about when it was printed across streams, and bun's own counts (on
+ * stderr) would otherwise outrank a 10k-test run whichever of the two ran
+ * first. Any summary when it did not speak follows the last-summary-wins rule,
+ * except that a complete set of `bun test --shard=i/N` processes ending the log
+ * is summed (GBEV-3);
+ * anything else is "unknown".
+ * Three states, never merged:
  * a count, 0 (ZERO-RUN, graded like STALE by `check`) and unknown (non-blocking).
  *
  * TRANSPARENCY INVARIANT (load-bearing): the child's exit code is ALWAYS the
@@ -35,6 +55,24 @@
  * invalidates it. `cmd_sha256` = sha256 of the exact command string, no
  * normalization — the same convention as bin/gstack-verify-gate (which hashes
  * for TRUST; this ledger hashes for FRESHNESS).
+ *
+ * `run --reuse` (GSTA-258, what gstack-ship-preflight and finish pass): before
+ * running, the newest row for this label, command hash and working-tree
+ * fingerprint decides. It is reused only when it passed with a counted run
+ * (tests_ran > 0) under the same execution identity (bun and node versions,
+ * OS, architecture and runner image; lockfiles and pins are tree content) within --max-age
+ * hours (default 24); a newer failure on that tree vetoes an older pass. The
+ * reuse appends a copy that keeps the original timestamp, so check's max age
+ * still measures the real run.
+ *
+ * `record-ci` writes the explicit CI-sourced row for a lane CI carried: it
+ * finds and verifies the run itself (lib/ci-carry.ts) for a command the base's
+ * ship_lanes_from maps, then records source "ci", the runs and profiles, the
+ * run's finish time as ts, bound to HEAD's clean tree, and the policy that
+ * mapped it (`origin/<base>@<sha>:…`); `carried` lists those rows at the
+ * current tree for the ship receipt, only when that policy is origin/<the
+ * receipt's base> (GST-1190: a row a run against another base wrote never
+ * counts).
  *
  * MACHINE-LOCAL by design: neither the ledger nor the logs are brain-synced.
  * A synced record citing an unsynced log would grade FRESH on a machine where
@@ -58,6 +96,11 @@ import { resultLine } from "../lib/result-codes";
 import { isUnavailable, loadPolicyFromBase, resolveBaseBranch } from "../lib/ship-policy";
 import { versionAtRef } from "../lib/restamp";
 import { bashCommandInvocation, runScriptSync, wtreeFingerprint } from "../lib/script-invocation";
+import { findCarry, laneMapping, mappingCoverage, perFileCommand } from "../lib/ci-carry";
+import { DEFAULT_MAX_AGE_HOURS, runChanged } from "../lib/run-evidence";
+import { isConfigUnavailable, loadConfigFromBase } from "../lib/pregate/config";
+import { buildRunCheck } from "../lib/pregate/run-check";
+import { readTestLaneExceptions, testLaneExceptionText, type BoundLaneException } from "../lib/test-lane-exception";
 
 const BIN_DIR = dirname(Bun.fileURLToPath(import.meta.url));
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
@@ -74,10 +117,32 @@ interface EvidenceRecord {
   tree?: string;
   dirty?: boolean;
   wtree?: string;
+  /** Up to five paths whose content changed between the before-run and after-run fingerprints (set instead of wtree). */
+  wtree_changed?: string[];
   log_path?: string;
   redacted?: boolean;
-  /** Executed tests per the runner's own summary; "unknown" when no supported summary was seen. */
-  tests_ran?: number | "unknown";
+  /** sha256 of the runtime the run had (identityDigest). */
+  identity?: string;
+  /** The original ts of the row a `run --reuse` copied. */
+  reused_from?: string;
+  /** "ci" for a lane CI carried (record-ci); absent for a local run. */
+  source?: "ci";
+  runs?: string[];
+  profiles?: string[];
+  /** The CI jobs a jobs-mapped lane carried from (record-ci, GST-1189); tests_ran is then "n/a". */
+  jobs?: string[];
+  /** The base policy that mapped a carried lane (record-ci), as `origin/<base>@<sha>:.gstack/pregate.json`. */
+  policy?: string;
+  /** The runner's own test count (executed for bun/jest/vitest/pytest/rspec; ran with skips included for gstack's shard runner and the remote gate), 0 for ZERO-RUN, or "unknown" when no supported summary was seen. */
+  tests_ran?: number | "unknown" | "n/a";
+  /** "files" when a carried narrow lane's tests_ran counts its inventory files the run covered (record-ci), not tests. */
+  tests_unit?: "files";
+  /** Why a carried lane was not owed at all: every job it names was path-skipped by an unchanged gate (record-ci, GST-1190). */
+  not_owed?: string;
+  /** The per_file run of the inventory files CI skipped entirely; not_owed: the ones that skipped every test here too (GST-1314). */
+  skipped_here?: { label: string; files: string[]; tests_ran: number | "unknown"; not_owed?: string[] };
+  /** The owner's test-lane exception that let a lane carry with uncovered inventory files, and the preflight of exactly them here (GST-1595). */
+  exception?: BoundLaneException;
 }
 
 /** Bytes of streamed output kept for the tests_ran parse (the 2MB log would truncate the summary). */
@@ -87,28 +152,65 @@ const TAIL_MAX_BYTES = 64 * 1024;
  * Ring of the last TAIL_MAX_BYTES of each child stream, kept per stream: the
  * pumps interleave by arrival, so a stderr summary read while stdout still has
  * pipe-buffered bytes behind it would otherwise be pushed out of a shared ring.
+ * Lines leaving the ring that bun's shard sum reads (a "--shard=i/N: running"
+ * line, " N pass", " N fail", "Ran N tests across") are kept in order ahead of
+ * the tail, so every shard of a long sharded run still counts (GBEV-3).
  */
 class OutputTail {
   private readonly decoders = { stdout: new TextDecoder("utf-8"), stderr: new TextDecoder("utf-8") };
   private readonly text = { stdout: "", stderr: "" };
+  private readonly kept = { stdout: [] as string[], stderr: [] as string[] };
+  private trim(origin: "stdout" | "stderr", text: string): string {
+    const cut = text.lastIndexOf("\n", text.length - TAIL_MAX_BYTES);
+    if (cut < 0) return text.slice(-TAIL_MAX_BYTES);
+    const lines = text.slice(0, cut).split("\n").filter((l) => /^(?:--shard=\d+\/\d+: running |\s*\d+ (?:pass|fail)\s*$|Ran \d+ tests? across )/.test(strip(l)));
+    this.kept[origin] = [...this.kept[origin], ...lines].slice(-4096);
+    return text.slice(cut + 1);
+  }
   push(chunk: Uint8Array, origin: "stdout" | "stderr"): void {
     this.text[origin] += this.decoders[origin].decode(chunk, { stream: true });
-    if (this.text[origin].length > TAIL_MAX_BYTES * 2) this.text[origin] = this.text[origin].slice(-TAIL_MAX_BYTES);
+    if (this.text[origin].length > TAIL_MAX_BYTES * 2) this.text[origin] = this.trim(origin, this.text[origin]);
   }
   end(): string {
     const tails = (["stdout", "stderr"] as const).map((origin) => {
       const text = this.text[origin] + this.decoders[origin].decode();
-      return text.length > TAIL_MAX_BYTES ? text.slice(-TAIL_MAX_BYTES) : text;
+      const tail = text.length > TAIL_MAX_BYTES ? this.trim(origin, text) : text;
+      return [...this.kept[origin], tail].join("\n");
     });
     return tails.join("\n");
   }
 }
 
+/** The one spelling a lane label has in the ledger: run and record-ci write it, check reads it (`pnpm lint` is `pnpm_lint`, TRUT-7). */
+const ledgerLabel = (raw: string): string => raw.replace(/[^a-zA-Z0-9._-]/g, "_");
+
 const ANSI = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const strip = (l: string) => l.replace(ANSI, "").replace(/\r$/, "");
 const count = (text: string, word: string): number => Number(new RegExp(`(\\d+) ${word}\\b`).exec(text)?.[1] ?? 0);
 
-/** Bun: the last "Ran N tests across M files" block; executed = its " N pass" + " N fail" lines. */
+/** The tests bun's last terminal summary in a run's log registered, skips included ("Ran N tests across M files"); 0 when the log or the summary is missing, or the log is incomplete (capped at LOG_MAX_BYTES or cut by a write failure), since its last summary need not be the run's. */
+function registeredBunTests(logPath: string | undefined): number {
+  let text = "";
+  try { text = logPath ? readFileSync(logPath, "utf8") : ""; } catch { return 0; }
+  if (/^\[gstack-evidence: log (truncated at 2MB|ended early)/m.test(text)) return 0;
+  const last = text.split("\n").map(strip).findLast((l) => /^Ran \d+ tests? across \d+ files?\. \[/.test(l));
+  return Number(/^Ran (\d+)/.exec(last ?? "")?.[1] ?? 0);
+}
+
+/**
+ * Bun: the last "Ran N tests across M files" block; executed = its " N pass" +
+ * " N fail" lines. When that block ends a `bun test --shard=i/N` process (bun's
+ * "--shard=i/N: running" line since the previous block), the blocks of shards
+ * 1/N to N/N, in that order, that end the log are summed (a sharded runner prints
+ * every shard, GBEV-3); any other shard set counts the last block alone. Bun always prints that counts block (" 0 pass" / " 0 fail"
+ * even for an all-skip or empty run), so a terminal line with no " N pass"
+ * above it is a line gstack's quiet shard runner forwarded (it forwards the
+ * terminal line without the " N pass" line), not a bun summary:
+ * it is skipped and the shard runner's own epilogue counts. A terminal line
+ * that itself says "Ran 0 tests" is ZERO-RUN even without counts, unless the
+ * shard runner spoke: a forwarded "Ran 0 tests across 1 file" is one shard's
+ * empty file, not the run.
+ */
 async function bunTestsRan(lines: string[]): Promise<{ at: number; ran: number } | null> {
   let isTerminal = (l: string) => /^Ran \d+ tests? across \d+ files?\. \[/.test(l);
   try {
@@ -117,9 +219,11 @@ async function bunTestsRan(lines: string[]): Promise<{ at: number; ran: number }
   } catch {
     warn("shard-engine classifier not importable; using the built-in bun summary parser");
   }
-  for (let i = lines.length - 1; i >= 0; i--) {
+  const blocks: { at: number; ran: number; shard?: string }[] = [];
+  let since = 0;
+  for (let i = 0; i < lines.length; i++) {
     if (!isTerminal(lines[i])) continue;
-    let pass = 0;
+    let pass: number | null = null;
     let fail = 0;
     for (let j = i - 1; j >= 0 && j >= i - 12; j--) {
       if (isTerminal(lines[j])) break;
@@ -128,9 +232,66 @@ async function bunTestsRan(lines: string[]): Promise<{ at: number; ran: number }
       if (p) pass = Number(p[1]);
       if (f) fail = Number(f[1]);
     }
-    return { at: i, ran: pass + fail };
+    const shard = lines.slice(since, i).map((l) => /^--shard=(\d+\/\d+): running /.exec(l)?.[1]).findLast(Boolean);
+    since = i + 1;
+    if (pass !== null) blocks.push({ at: i, ran: pass + fail, shard });
+    else if (/^Ran 0 tests? across/.test(lines[i])) blocks.push({ at: i, ran: 0 });
   }
-  return null;
+  const last = blocks.at(-1);
+  if (!last) return null;
+  const total = Number(last.shard?.split("/")[1] ?? 1);
+  const set = blocks.slice(-total);
+  const complete = total > 1 && set.length === total && set.every((b, k) => b.shard === `${k + 1}/${total}`);
+  return { at: last.at, ran: complete ? set.reduce((n, b) => n + b.ran, 0) : last.ran };
+}
+
+/**
+ * gstack's shard runner (scripts/test-free-shards.ts; `bun run test:free` /
+ * `test:ubicloud`). Its quiet shards forward bun's terminal line without the
+ * counts the bun branch reads, so each shard's epilogue "[test:free] PASS — N
+ * tests, M files, Ts." carries the shard's "Ran N" total (skips included) and
+ * the run's total is their sum; a files-from run ends with "[test:free]
+ * FILES-FROM RESULT: files=F tests=N failed=K exit=E", the same sum. Only the
+ * last run in the tail counts (its "[test:free] full suite:" / "files-from" /
+ * "QUICK SUBSET" start line); the other parsers decide only when no runner
+ * line at all is in the tail. A run with a "FAIL —" or "FLAKY-PASS —" epilogue and no FILES-FROM
+ * total has lost a shard's count (a FAIL epilogue carries none; the flaky retry
+ * re-runs only the failing files), so it is unknown rather than a partial sum.
+ * The runner's verdict covers the whole tail once it spoke: the tail is
+ * stdout-then-stderr, bun's counts block is on stderr and the runner's
+ * epilogues are on stdout, so "after" cannot be told from "before" across the
+ * two streams and a bun block printed before the suite (a focused file run
+ * first) would otherwise record its count, or ZERO-RUN, for a 10k-test run.
+ * The quiet shards forward only count-less terminal lines (a shard's "Ran 0
+ * tests across 1 file" is one empty file, not the run); under `--verbose` they
+ * forward whole blocks, which the runner's sum outranks. The epilogue is
+ * matched as the runner's whole line (the log path may contain spaces); like
+ * every runner summary here it is the child's own stdout, so a test that
+ * forges one is trusted the same way a forged bun summary is (see W3's trust
+ * model), and the exit is never derived from it. Returns undefined when no
+ * runner line is in the tail. A verdict line (PASS/FAIL/FLAKY-PASS epilogue or
+ * FILES-FROM RESULT) without its start line means the start line was evicted
+ * from the tail (a chatty default-mode or --verbose run): the runner spoke,
+ * the sum is incomplete, so the result is unknown rather than a forwarded
+ * shard block's count. A full-suite start line names its shard count
+ * ("across N shard processes", plus one exclusive host-state shard when it
+ * says so); fewer PASS epilogues than that (killed mid-shards, `--ci-verify`)
+ * is unknown, never a partial sum. An empty shard prints "shard i/N: 0 files,
+ * 0s, pass" instead of a PASS epilogue and counts as zero.
+ */
+function shardRunnerTestsRan(lines: string[]): number | "unknown" | undefined {
+  const verdictLine = /^\s*\[test:free\] (?:PASS — |FAIL — |FLAKY-PASS — |FILES-FROM RESULT: )/;
+  const start = lines.findLastIndex((l) => /^\s*\[test:free\] (?:full suite:|files-from |QUICK SUBSET:)/.test(l));
+  if (start < 0) return lines.some((l) => verdictLine.test(l)) ? "unknown" : undefined;
+  const run = lines.slice(start);
+  const result = /^\s*\[test:free\] FILES-FROM RESULT: files=\d+ tests=(\d+) failed=\d+ exit=\d+\s*$/;
+  const total = run.findLast((l) => result.test(l));
+  if (total) return Number(result.exec(total)![1]);
+  if (run.some((l) => /^\s*\[test:free\] (?:FAIL|FLAKY-PASS) — /.test(l) || /^\s*\[test:free\] PASS — \? tests/.test(l))) return "unknown";
+  const counts = run.map((l) => /^\s*\[test:free\] PASS — (\d+) tests?, \d+ files?, \d+s\. Full log: \S.*$/.exec(l)?.[1] ?? (/^\s*\[test:free\] shard \d+\/\d+: 0 files, \d+s, pass\s*$/.test(l) ? "0" : undefined)).filter((n): n is string => n !== undefined);
+  const planned = /across (\d+) shard processes/.exec(run[0]!);
+  const expected = planned ? Number(planned[1]) + (/exclusive host-state file/.test(run[0]!) ? 1 : 0) : 1;
+  return counts.length >= expected ? counts.reduce((sum, n) => sum + Number(n), 0) : "unknown";
 }
 
 function otherRunnersTestsRan(lines: string[]): { at: number; ran: number } | null {
@@ -162,14 +323,28 @@ function otherRunnersTestsRan(lines: string[]): { at: number; ran: number } | nu
   const goNoTests = lines.filter((l) => /^\?\s+\S+\s+\[no test files\]$/.test(l));
   const goRan = lines.some((l) => /^(?:ok|FAIL|---)\s/.test(l));
   if (goNoTests.length > 0 && !goRan) hits.push({ at: last(/\[no test files\]$/), ran: 0 });
+  // gstack-pregate --remote: the remote gate's own "PREGATE_REMOTE: tree=… tests=N failed=M"
+  // line (tests = the shard runner's FILES-FROM RESULT sum, relayed by scripts/ubicloud/pregate-remote.sh;
+  // lib/pregate/checks/lanes.ts parseRemoteReport is the canonical parser), rendered as a lane
+  // row under "lanes:" in the pregate table, and the obligation's "requires-remote: … cleared by
+  // remote-gate tree=… tests=N" receipt line (lib/pregate/index.ts). Whole lines, like every
+  // other runner pattern here, so a prefixed or quoted echo does not count (the row is indented
+  // under "lanes:" by design, so indentation is accepted). When both appear they carry the same
+  // count; the later one wins.
+  for (const re of [/^\s*(?:lanes:\s+)?PREGATE_REMOTE: tree=\S+ tests=(\d+) failed=\d+(?: spent=\S+)?\s*$/, /^\s*requires-remote: .* cleared by remote-gate tree=\S+ tests=(\d+)\b/]) {
+    i = last(re);
+    if (i >= 0) hits.push({ at: i, ran: Number(re.exec(lines[i])![1]) });
+  }
   if (hits.length === 0) return null;
   return hits.reduce((a, b) => (b.at > a.at ? b : a));
 }
 
-/** The executed-test count from the output tail, or "unknown". Never throws into the caller's exit path. */
+/** The runner-reported test count from the output tail (see the header for which runners report executed vs ran), 0, or "unknown". Never throws into the caller's exit path. */
 async function parseTestsRan(tail: string): Promise<number | "unknown"> {
   if (process.env.GSTACK_EVIDENCE_FAULT === "tests_ran") throw new Error("injected tests_ran parser fault");
   const lines = tail.split("\n").map(strip);
+  const shard = shardRunnerTestsRan(lines);
+  if (shard !== undefined) return shard;
   const candidates = [await bunTestsRan(lines), otherRunnersTestsRan(lines)].filter((c): c is { at: number; ran: number } => c !== null);
   if (candidates.length === 0) return "unknown";
   return candidates.reduce((a, b) => (b.at > a.at ? b : a)).ran;
@@ -269,104 +444,21 @@ function openLog(logsDir: string, label: string, cmdSha: string): { fd: number; 
   return undefined;
 }
 
-/**
- * Bun AUTO-LOADS `.env`, `.env.<NODE_ENV>` and `.env.local` from the working
- * directory into `process.env`. This file has a `#!/usr/bin/env bun` shebang, so
- * every command it spawns inherits those variables — and a repo `.env.local`
- * routinely holds PRODUCTION credentials.
- *
- * Two things go wrong, and the second one is worse than the leak:
- *
- *  1. Secrets reach a child process that would not have had them. `npm test` run
- *     by hand in the same shell sees none of this; run through the wrapper it sees
- *     all of it.
- *  2. THE COMMAND UNDER TEST BEHAVES DIFFERENTLY, so the evidence ledger
- *     certifies a run that is not the run CI performs. Observed in a Next.js repo
- *     2026-08-20: four tests failed 4/4 through the wrapper and passed 5/5 without
- *     it, because app code branched on env vars only the wrapper supplied. The
- *     wrapper exists to record trustworthy evidence, so silently changing the
- *     environment defeats its whole purpose.
- *
- * Verified against bun 1.3.11: a dotenv file does NOT override a variable the
- * shell already exported (the shell's value wins). So a key whose live value is
- * exactly the dotenv file's value was injected by bun, and dropping it restores
- * the environment the user's own shell would have given the command.
- *
- * Escape hatch: GSTACK_EVIDENCE_KEEP_DOTENV=1 keeps the old behaviour for anyone
- * who really does want the wrapper to supply .env values.
- */
-const BUN_DOTENV_FILES = (): string[] => {
-  const nodeEnv = process.env.NODE_ENV;
-  // bun's documented precedence, lowest first. `.env.local` is skipped by bun
-  // when NODE_ENV is "test"; mirror that rather than guessing.
-  const files = [".env"];
-  if (nodeEnv) files.push(`.env.${nodeEnv}`);
-  if (nodeEnv !== "test") files.push(".env.local");
-  return files;
-};
-
-/** Minimal dotenv reader: KEY=VALUE, one per line. Quotes stripped, comments and
- *  `export ` prefixes tolerated. Multi-line values are not parsed — a key we fail
- *  to parse is simply left in the child env, which is the safe direction.
- *  Known limitation: bun EXPANDS ${VAR} references inside dotenv values, but this
- *  reader compares the raw file text, so an expanded live value never matches and
- *  that key is left in the child env — the pre-scrub behavior persists for those
- *  keys (fails open, same safe direction as above). */
-function parseDotenv(text: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    let key = line.slice(0, eq).trim();
-    if (key.startsWith("export ")) key = key.slice(7).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-    let val = line.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"') && val.length > 1) ||
-        (val.startsWith("'") && val.endsWith("'") && val.length > 1)) {
-      val = val.slice(1, -1);
-    }
-    out.set(key, val);
-  }
-  return out;
-}
-
-/** process.env minus the variables bun injected from the repo's dotenv files.
- *  Returns the scrubbed env and the KEY NAMES removed (never the values). */
-function childEnv(cwd: string): { env: Record<string, string>, scrubbed: string[] } {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-  if (process.env.GSTACK_EVIDENCE_KEEP_DOTENV === "1") return { env, scrubbed: [] };
-
-  const scrubbed: string[] = [];
-  for (const file of BUN_DOTENV_FILES()) {
-    let text: string;
-    try {
-      text = readFileSync(join(cwd, file), "utf-8");
-    } catch {
-      continue; // absent or unreadable — nothing to scrub from it
-    }
-    for (const [k, v] of parseDotenv(text)) {
-      // Only when the live value IS the file's value. A different live value means
-      // the shell exported its own and bun left it alone, so it is genuinely the
-      // user's environment and must survive.
-      if (env[k] !== undefined && env[k] === v) {
-        delete env[k];
-        if (!scrubbed.includes(k)) scrubbed.push(k);
-      }
-    }
-  }
-  return { env, scrubbed };
-}
-
 async function cmdRun(argv: string[]): Promise<number> {
   let label = "default";
   const li = argv.indexOf("--label");
   const sep = argv.indexOf("--");
   if (li >= 0 && li + 1 < argv.length && (sep < 0 || li < sep)) label = argv[li + 1];
   if (sep < 0 || sep + 1 >= argv.length) {
-    console.error("usage: gstack-evidence run --label <L> -- <cmd...>");
+    console.error("usage: gstack-evidence run [--reuse [--max-age <hours>]] --label <L> -- <cmd...>");
+    return 2;
+  }
+  const opts = argv.slice(0, sep);
+  const reuse = opts.includes("--reuse") && !opts.includes("--no-reuse");
+  const maxAgeAt = opts.indexOf("--max-age");
+  const reuseMaxAge = maxAgeAt >= 0 ? Number(opts[maxAgeAt + 1]) : 24;
+  if (!Number.isFinite(reuseMaxAge) || reuseMaxAge <= 0) {
+    console.error(`gstack-evidence: --max-age must be a positive number of hours, got: ${JSON.stringify(opts[maxAgeAt + 1])}`);
     return 2;
   }
   const cmdArgv = argv.slice(sep + 1);
@@ -375,7 +467,7 @@ async function cmdRun(argv: string[]): Promise<number> {
   const commandString = cmdArgv.length === 1 ? cmdArgv[0] : cmdArgv.join(" ");
   const shell = cmdArgv.length === 1 ? bashCommandInvocation(cmdArgv[0]) : null;
   const cmdSha = sha256(commandString);
-  label = label.replace(/[^a-zA-Z0-9._-]/g, "_");
+  label = ledgerLabel(label);
 
   // Bookkeeping context — every piece is optional; failures only warn.
   let paths: ReturnType<typeof ledgerPath> | undefined;
@@ -385,6 +477,7 @@ async function cmdRun(argv: string[]): Promise<number> {
   } catch (e: any) {
     warn(`ledger setup failed (${e?.message ?? e}) — result will not be recorded`);
   }
+  if (reuse && paths && reused(paths.file, label, cmdSha, reuseMaxAge)) return 0;
   const log = paths ? openLog(paths.logsDir, label, cmdSha) : undefined;
 
   // Fingerprint the content BEFORE the child runs: a working-tree edit made
@@ -395,15 +488,9 @@ async function cmdRun(argv: string[]): Promise<number> {
   let exitCode: number;
   let proc: ReturnType<typeof Bun.spawn> | undefined;
   try {
-    const { env: spawnEnv, scrubbed } = childEnv(process.cwd());
-    if (scrubbed.length > 0) {
-      // Names only. Printing values here would defeat the point.
-      warn(`scrubbed ${scrubbed.length} bun-injected dotenv var(s) from the child env: ${scrubbed.join(", ")} `
-        + `(GSTACK_EVIDENCE_KEEP_DOTENV=1 to keep them)`);
-    }
     if (shell && !shell.ok) throw new Error(shell.error);
     const spawnArgv = shell?.ok ? [shell.cmd, ...shell.argv] : cmdArgv;
-    proc = Bun.spawn(spawnArgv, { stdin: "inherit", stdout: "pipe", stderr: "pipe", env: spawnEnv });
+    proc = Bun.spawn(spawnArgv, { stdin: "inherit", stdout: "pipe", stderr: "pipe", env: log ? { ...process.env, GSTACK_EVIDENCE_LOG: log.path } : process.env });
   } catch (e: any) {
     // Spawn failure (ENOENT on argv-direct form): record exit 127, propagate 127.
     exitCode = 127;
@@ -528,8 +615,12 @@ function record(
       const wtreeAfter = currentWtree();
       if (wtreeBefore && wtreeAfter && wtreeBefore === wtreeAfter) {
         rec.wtree = wtreeAfter;
+        rec.identity = identityDigest();
       } else if (wtreeBefore || wtreeAfter) {
-        warn("working-tree content changed during the run — evidence recorded without a content fingerprint (will grade STALE)");
+        const changed = wtreeBefore && wtreeAfter ? (git(["diff", "--name-only", wtreeBefore, wtreeAfter]) ?? "").split("\n").map((s) => s.trim()).filter(Boolean) : [];
+        if (changed.length) rec.wtree_changed = changed.slice(0, 5);
+        const named = changed.length ? `: ${changed.slice(0, 5).join(", ")}${changed.length > 5 ? ", ..." : ""}` : "";
+        warn(`working-tree content changed during the run${named} — evidence recorded without a content fingerprint (will grade STALE)`);
       }
     }
     if (logPath) rec.log_path = logPath;
@@ -545,6 +636,270 @@ function record(
   }
 }
 
+/**
+ * sha256 of the runtime a lane ran under: the bun and node on PATH, OS, architecture and runner image. The lockfiles and
+ * pins the execution identity also names (lib/evidence-bundle.ts) are working-tree content, so the fingerprint binds them.
+ */
+function identityDigest(): string {
+  const version = (b: string) => {
+    const r = spawnSync(b, ["--version"], { encoding: "utf-8", timeout: 15000 });
+    return r.status === 0 ? (r.stdout || "").trim().replace(/^v/, "") || null : null;
+  };
+  return sha256(JSON.stringify({ bun: version("bun"), node: version("node"), os: process.platform, arch: process.arch, image: process.env.GSTACK_RUNNER_IMAGE || null }));
+}
+
+/** A local row that passed with a counted run within the max age, under this machine's identity. */
+function countedPass(r: EvidenceRecord, maxAgeHours: number): boolean {
+  if (r.exit !== 0 || typeof r.tests_ran !== "number" || r.tests_ran <= 0) return false;
+  const age = Date.now() - Date.parse(r.ts);
+  if (!(age >= 0 && age <= maxAgeHours * 3600_000)) return false;
+  return r.identity === identityDigest();
+}
+
+/**
+ * `passed -- <cmd>` (GST-1186, read-only): did this exact command pass here at the current working tree under any label? The
+ * newest local row for the command hash and tree decides, so a newer failure vetoes; it must be a counted pass (countedPass).
+ * CI rows never count: a CI pass counts only through record-ci's live check against the base. Prints PASSED: label=<L>
+ * source=local ts=<ts> and exits 0, else NOT_PASSED: <reason> and exits 1. gstack-pregate's guards read it.
+ */
+function cmdPassed(argv: string[]): number {
+  const sep = argv.indexOf("--");
+  const command = sep < 0 ? "" : argv.slice(sep + 1).join(" ");
+  if (!command || sep !== 0) { console.error("usage: gstack-evidence passed -- <command>"); return 2; }
+  let records: EvidenceRecord[] = [];
+  try { records = readJsonl<EvidenceRecord>(ledgerPath().file); } catch { records = []; }
+  const cmdSha = sha256(command);
+  const local = records.filter((r) => r.cmd_sha256 === cmdSha && r.source === undefined);
+  if (!local.length) { console.log("NOT_PASSED: no local ledger row for this command"); return 1; }
+  const wtree = currentWtree();
+  if (!wtree) { console.log("NOT_PASSED: no working-tree fingerprint"); return 1; }
+  const newest = local.findLast((r) => r.wtree === wtree);
+  if (!newest) { console.log(`NOT_PASSED: no local ledger row for this command at tree ${wtree.slice(0, 12)}`); return 1; }
+  if (!countedPass(newest, 24)) { console.log(`NOT_PASSED: the newest row (label=${newest.label} ts=${newest.ts}) is not a counted pass within 24 h under this runtime`); return 1; }
+  console.log(`PASSED: label=${newest.label} source=local ts=${newest.reused_from ?? newest.ts}`);
+  return 0;
+}
+
+/**
+ * `run --reuse`: the newest local row for this label, command and working tree decides. A counted pass under the same
+ * identity within the max age is copied (original ts kept) and printed as a run would be; anything else runs the command.
+ */
+function reused(file: string, label: string, cmdSha: string, maxAgeHours: number): boolean {
+  const wtree = currentWtree();
+  if (!wtree) return false;
+  let records: EvidenceRecord[] = [];
+  try {
+    records = readJsonl<EvidenceRecord>(file);
+  } catch {
+    return false;
+  }
+  const newest = records.findLast((r) => r.label === label && r.cmd_sha256 === cmdSha && r.wtree === wtree && r.source === undefined);
+  if (!newest || !countedPass(newest, maxAgeHours)) return false;
+  try {
+    appendJsonl(file, { ...newest, reused_from: newest.reused_from ?? newest.ts }, { mode: 0o600 });
+  } catch (e: any) {
+    warn(`ledger append failed (${e?.message ?? e}) — running the command instead`);
+    return false;
+  }
+  console.error(`gstack-evidence: reused label=${label} tree=${wtree.slice(0, 12)} from=${newest.ts}`);
+  console.error(`gstack-evidence: recorded label=${label} exit=0 tests_ran=${newest.tests_ran} log=${newest.log_path ?? "-"}`);
+  return true;
+}
+
+/**
+ * `record-ci`: carry a lane from CI. Its command must be a key of the base branch's ship_lanes_from; the run is found and
+ * verified here (lib/ci-carry.ts) at HEAD's clean tree, so no caller supplies run ids, a test count or a tree. Never runs the lane;
+ * inventory files every run skipped entirely run here through the entry's per_file runner (label <L>.skipped) first, and the CI
+ * row is written only when that run passes at the same tree.
+ */
+async function cmdRecordCi(argv: string[]): Promise<number> {
+  const sep = argv.indexOf("--");
+  const opts = sep < 0 ? argv : argv.slice(0, sep);
+  const get = (name: string) => { const i = opts.indexOf(name); return i >= 0 ? opts[i + 1] : undefined; };
+  const raw = get("--label");
+  const label = raw === undefined ? undefined : ledgerLabel(raw);
+  const base = get("--base");
+  const command = sep < 0 ? "" : argv.slice(sep + 1).join(" ");
+  if (!label || !base || !command || opts.length !== 4) {
+    console.error("usage: gstack-evidence record-ci --label <L> --base <base> -- <command>");
+    return 2;
+  }
+  const none = (reason: string, detail: string, diagnosis: string[] = []) => {
+    console.error(`CARRY_NONE: ${reason}: ${detail}`);
+    for (const d of diagnosis) console.error(`CARRY_DIAGNOSIS: ${d}`);
+    console.error(`gstack-evidence record-ci: label=${label} not carried; nothing recorded`);
+    return 1;
+  };
+  const cwd = process.cwd();
+  const loaded = loadConfigFromBase(cwd, base);
+  if (isConfigUnavailable(loaded)) return none("config_unavailable", loaded.detail);
+  if (loaded.errors.length) return none("config_invalid", loaded.errors.map((x) => `${x.path}: ${x.message}`).join("; "));
+  const m = laneMapping(loaded.config.ship_lanes_from, command);
+  if (!m) return none("not_mapped", `the command is neither a key nor a declared alias in origin/${base}'s ship_lanes_from`);
+  const check = buildRunCheck(cwd, null, true, base);
+  if ("error" in check) return none("profiles_unavailable", check.error);
+  const head = git(["rev-parse", "HEAD"]);
+  const tree = git(["rev-parse", "HEAD^{tree}"]);
+  if (!head || !tree) return none("no_head", "HEAD is unreadable");
+  const wtree = () => { const fp = wtreeFingerprint({ cwd, timeoutMs: 30000 }); return "tree" in fp ? fp.tree : null; };
+  const grants = readTestLaneExceptions(cwd);
+  const atHead = grants.filter((g) => g.head === head);
+  const v = findCarry(check, { profiles: m.profiles, head, tree, wtree, ...mappingCoverage(m, cwd), ...(atHead.length ? { excepted: atHead } : {}) });
+  const elsewhere = grants.filter((g) => g.head !== head).map((g) => `${g.approval} at ${g.head.slice(0, 12)}`);
+  if (!v.ok) return none(v.reason, `${v.detail}${v.reason === "inventory_uncovered" && !atHead.length && elsewhere.length ? `; test-lane exception ${elsewhere.join(", ")} binds another head, not HEAD ${head.slice(0, 12)}` : ""}`, v.diagnosis);
+  let exception: BoundLaneException | undefined;
+  const grant = atHead.find((g) => g.approval === v.exceptedBy);
+  if (v.excepted?.length && grant) {
+    const preLabel = `${label}.excepted`;
+    console.error(`gstack-evidence record-ci: test-lane exception ${grant.approval}: preflighting ${v.excepted.length} uncovered file(s) here at ${head.slice(0, 12)}, one at a time (label=${preLabel})`);
+    let ran = 0;
+    for (const file of v.excepted) {
+      const preCommand = perFileCommand(m.per_file!, [file]);
+      const exit = await cmdRun(["--label", preLabel, "--", preCommand]);
+      let rows: EvidenceRecord[] = [];
+      try { rows = readJsonl<EvidenceRecord>(ledgerPath().file); } catch { rows = []; }
+      const n = rows.findLast((r) => r.label === preLabel && r.source === undefined && r.cmd_sha256 === sha256(preCommand) && r.wtree === tree)?.tests_ran ?? "unknown";
+      if (exit !== 0 || typeof n !== "number" || n <= 0) return none("exception_preflight_failed", `test-lane exception ${grant.approval}'s preflight of ${file} ${exit !== 0 ? `exited ${exit}` : `ran ${n} tests`} here (label=${preLabel}); the exception binds only when each of ${v.excepted.join(", ")} runs and passes at HEAD`);
+      ran += n;
+    }
+    exception = { ...grant, preflight: { label: preLabel, tests_ran: ran } };
+  }
+  const testsRan = exception && typeof v.tests === "number" ? v.tests + v.excepted!.length : v.tests;
+  let here: EvidenceRecord["skipped_here"];
+  if (v.remainder?.length) {
+    const hereLabel = `${label}.skipped`;
+    console.error(`gstack-evidence record-ci: ${v.remainder.length} inventory file(s) skipped every test in CI; running them here one at a time (label=${hereLabel})`);
+    let ran = 0;
+    const notOwed: string[] = [];
+    for (const file of v.remainder) {
+      const hereCommand = perFileCommand(m.per_file!, [file]);
+      const exit = await cmdRun(["--label", hereLabel, "--", hereCommand]);
+      if (exit !== 0) return none("skipped_failed", `the per_file run of ${file} exited ${exit} (label=${hereLabel})`);
+      let rows: EvidenceRecord[] = [];
+      try { rows = readJsonl<EvidenceRecord>(ledgerPath().file); } catch { rows = []; }
+      const row = rows.findLast((r) => r.label === hereLabel && r.source === undefined && r.cmd_sha256 === sha256(hereCommand) && r.wtree === tree);
+      const n = row?.tests_ran ?? "unknown";
+      if (typeof n === "number" && n > 0) { ran += n; continue; }
+      if (n === 0 && registeredBunTests(row?.log_path) > 0) { notOwed.push(file); continue; }
+      return none("skipped_zero_run", `the per_file run of ${file} ran ${n} tests here and registered none it skipped (label=${hereLabel}); a lane passes on its runner count, never exit 0 alone`);
+    }
+    here = { label: hereLabel, files: v.remainder, tests_ran: ran, ...(notOwed.length ? { not_owed: notOwed } : {}) };
+    if (notOwed.length) console.error(`gstack-evidence record-ci: not owed here: ${notOwed.length} remainder file(s) skipped every test on CI and here too (env- or tool-gated by design): ${notOwed.join(", ")}`);
+  }
+  if (here || exception) {
+    for (const e of v.runs) {
+      const changed = runChanged(check.deps, e.run_id, e.run_attempt);
+      if (changed) return none("run_changed", changed);
+    }
+    if (wtree() !== tree) return none("tree_changed", `the working tree changed while the per_file run of label=${here?.label ?? exception!.preflight.label} ran`);
+  }
+  let paths: ReturnType<typeof ledgerPath>;
+  try {
+    paths = ledgerPath();
+    mkdirpSync(paths.dir);
+  } catch (e: any) {
+    console.error(`gstack-evidence record-ci: ledger setup failed (${e?.message ?? e}); nothing recorded`);
+    return 1;
+  }
+  const runs = v.runs.map((r) => `${r.run_id}/${r.run_attempt}`);
+  const rec: EvidenceRecord = {
+    ts: new Date(v.runs.map((r) => r.finished_at).sort()[0]!).toISOString(), label, command, cmd_sha256: sha256(command), exit: 0, duration_s: 0,
+    commit: head, tree, dirty: false, wtree: tree, tests_ran: testsRan, source: "ci", runs, profiles: m.profiles, policy: loaded.label, ...(m.jobs ? { jobs: m.jobs } : {}), ...(v.unit ? { tests_unit: v.unit } : {}), ...(v.notOwed ? { not_owed: v.notOwed } : {}), ...(here ? { skipped_here: here } : {}), ...(exception ? { exception } : {}),
+  };
+  appendJsonl(paths.file, rec, { mode: 0o600 });
+  console.error(`gstack-evidence: recorded label=${label} exit=0 tests_ran=${testsRan}${v.unit ? ` unit=${v.unit}` : ""} log=- source=ci runs=${runs.join(",")} policy=${loaded.label}${here ? ` skipped_here=${here.files.length} tests_ran_here=${here.tests_ran}${here.not_owed ? ` not_owed_here=${here.not_owed.length}` : ""}` : ""}`);
+  if (v.notOwed) console.error(`gstack-evidence: not owed: ${v.notOwed}`);
+  if (exception) console.error(`TEST_LANE_EXCEPTION: ${testLaneExceptionText(exception)}`);
+  return 0;
+}
+
+/**
+ * `carried`: each label's newest row when it is a CI-sourced row at the current working tree whose mapping policy is
+ * origin/<base> (the receipt's base; default the resolved base branch), as the receipt's ci_carried entries.
+ */
+function cmdCarried(argv: string[]): number {
+  const at = argv.indexOf("--base");
+  if (at >= 0 && !argv[at + 1]) { console.error("usage: gstack-evidence carried [--base <branch>] [--json]"); return 2; }
+  const policyRef = `origin/${(at >= 0 ? argv[at + 1]! : resolveBaseBranch(git(["rev-parse", "--show-toplevel"]) ?? process.cwd())).replace(/^origin\//, "")}@`;
+  let records: EvidenceRecord[] = [];
+  try {
+    records = readJsonl<EvidenceRecord>(ledgerPath().file);
+  } catch {
+    records = [];
+  }
+  const wtree = currentWtree();
+  const latest = new Map<string, EvidenceRecord>();
+  for (const r of records) latest.set(r.label, r);
+  const carried = [...latest.values()].filter((r) => r.source === "ci" && !!wtree && r.wtree === wtree && Array.isArray(r.runs) && typeof r.policy === "string" && r.policy.startsWith(policyRef)
+    && gradeRecord(r, { maxAgeHours: DEFAULT_MAX_AGE_HOURS, allowPaths: [], wtreeNow: wtree }).verdict === "FRESH")
+    .flatMap((r) => r.runs!.map((ref) => { const [run, attempt] = ref.split("/").map(Number); return { lane: r.label, run, attempt, tree: r.wtree!, ...(r.exception ? { exception: r.exception } : {}) }; }));
+  if (argv.includes("--json")) console.log(JSON.stringify(carried));
+  else for (const c of carried) console.log(`CI_CARRIED: ${c.lane} run=${c.run}/${c.attempt} tree=${c.tree.slice(0, 12)}`);
+  return 0;
+}
+
+/** check's verdict for one ledger row; `carried` lists a CI row only when it grades FRESH here, so a carry that never reached FRESH leaves no receipt entry. */
+function gradeRecord(latest: EvidenceRecord, o: { maxAgeHours?: number; expectCmd?: string; allowPaths: string[]; wtreeNow: string | undefined }): { verdict: "FRESH" | "STALE" | "ZERO-RUN"; reason: string } {
+  const { maxAgeHours, expectCmd, allowPaths, wtreeNow } = o;
+  const testsRan = typeof latest.tests_ran === "number" || latest.tests_ran === "n/a" ? latest.tests_ran : "unknown";
+  const changedDuringRun = Array.isArray(latest.wtree_changed) ? latest.wtree_changed.filter((p): p is string => typeof p === "string" && p !== "" && !/[\u0000-\u001f\u007f]/.test(p)).slice(0, 5) : [];
+  let verdict: "FRESH" | "STALE" | "ZERO-RUN" = "FRESH";
+  let reason = "";
+  if (latest.exit !== 0) {
+    verdict = "STALE";
+    reason = "recorded run failed";
+  } else if (testsRan === 0) {
+    // Zero-run green: exit 0 with nothing executed (all skipped, empty
+    // selection, "No tests found"). Graded like STALE under its own label;
+    // "unknown" (no recognised runner summary) stays non-blocking.
+    verdict = "ZERO-RUN";
+    reason = "runner reported 0 executed tests";
+  } else if (maxAgeHours !== undefined) {
+    const ageMs = Date.now() - Date.parse(latest.ts);
+    if (!(ageMs >= 0 && ageMs <= maxAgeHours * 3600 * 1000)) {
+      verdict = "STALE";
+      reason = `older than ${maxAgeHours}h`;
+    }
+  }
+  if (verdict === "FRESH" && expectCmd !== undefined && sha256(expectCmd) !== latest.cmd_sha256) {
+    verdict = "STALE";
+    reason = "command changed (cmd_sha256 mismatch)";
+  }
+  if (verdict === "FRESH") {
+    // Content binding: identical working-tree fingerprint, or a diff confined
+    // to the allow-list. Any git failure (gc'd tree, not a repo) → STALE —
+    // never an error into the calling flow.
+    if (!latest.wtree || !/^[0-9a-f]{40}$/.test(latest.wtree) || !wtreeNow) {
+      // Stored fingerprints are re-validated before reaching git argv — a
+      // forged/corrupt ledger line must degrade, never inject options.
+      verdict = "STALE";
+      reason = !latest.wtree
+        ? changedDuringRun.length
+          ? `content changed during the run: ${changedDuringRun.join(", ")}`
+          : "record has no content fingerprint"
+        : !/^[0-9a-f]{40}$/.test(latest.wtree)
+          ? "record has malformed fingerprint"
+          : "current fingerprint unavailable";
+    } else if (latest.wtree !== wtreeNow) {
+      const diff = git(["diff", "--name-only", latest.wtree, wtreeNow]);
+      if (diff === undefined) {
+        verdict = "STALE";
+        reason = "content changed (fingerprint diff unavailable)";
+      } else {
+        const changed = diff.split("\n").map((s) => s.trim()).filter(Boolean);
+        const outside = changed.filter((f) => !allowPaths.some((a) => f === a || f.startsWith(a.replace(/\/$/, "") + "/")));
+        if (changed.length === 0 || outside.length === 0) {
+          reason = changed.length ? `diff confined to allow-paths (${changed.length} file(s))` : "";
+        } else {
+          verdict = "STALE";
+          reason = `content changed: ${outside.slice(0, 5).join(", ")}${outside.length > 5 ? ", ..." : ""}`;
+        }
+      }
+    }
+  }
+  return { verdict, reason };
+}
+
 function cmdCheck(argv: string[]): number {
   // Parse: repeated --label, each optionally followed (anywhere later) by its
   // own --expect-cmd; pairing is positional — an --expect-cmd binds to the most
@@ -555,7 +910,7 @@ function cmdCheck(argv: string[]): number {
   let allowPaths: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--label") wanted.push({ label: argv[++i] ?? "" });
+    if (a === "--label") wanted.push({ label: ledgerLabel(argv[++i] ?? "") });
     else if (a === "--expect-cmd") {
       if (wanted.length === 0) {
         console.error("gstack-evidence: --expect-cmd requires a preceding --label");
@@ -603,60 +958,10 @@ function cmdCheck(argv: string[]): number {
       allFresh = false;
       continue;
     }
-    const testsRan = typeof latest.tests_ran === "number" ? latest.tests_ran : "unknown";
-    const detail = `label=${label} exit=${latest.exit} tests_ran=${testsRan} ts=${latest.ts}${latest.log_path ? ` log=${latest.log_path}` : ""}`;
-    let verdict: "FRESH" | "STALE" | "ZERO-RUN" = "FRESH";
-    let reason = "";
-    if (latest.exit !== 0) {
-      verdict = "STALE";
-      reason = "recorded run failed";
-    } else if (testsRan === 0) {
-      // Zero-run green: exit 0 with nothing executed (all skipped, empty
-      // selection, "No tests found"). Graded like STALE under its own label;
-      // "unknown" (no recognised runner summary) stays non-blocking.
-      verdict = "ZERO-RUN";
-      reason = "runner reported 0 executed tests";
-    } else if (maxAgeHours !== undefined) {
-      const ageMs = Date.now() - Date.parse(latest.ts);
-      if (!(ageMs >= 0 && ageMs <= maxAgeHours * 3600 * 1000)) {
-        verdict = "STALE";
-        reason = `older than ${maxAgeHours}h`;
-      }
-    }
-    if (verdict === "FRESH" && expectCmd !== undefined && sha256(expectCmd) !== latest.cmd_sha256) {
-      verdict = "STALE";
-      reason = "command changed (cmd_sha256 mismatch)";
-    }
-    if (verdict === "FRESH") {
-      // Content binding: identical working-tree fingerprint, or a diff confined
-      // to the allow-list. Any git failure (gc'd tree, not a repo) → STALE —
-      // never an error into the calling flow.
-      if (!latest.wtree || !/^[0-9a-f]{40}$/.test(latest.wtree) || !wtreeNow) {
-        // Stored fingerprints are re-validated before reaching git argv — a
-        // forged/corrupt ledger line must degrade, never inject options.
-        verdict = "STALE";
-        reason = !latest.wtree
-          ? "record has no content fingerprint"
-          : !/^[0-9a-f]{40}$/.test(latest.wtree)
-            ? "record has malformed fingerprint"
-            : "current fingerprint unavailable";
-      } else if (latest.wtree !== wtreeNow) {
-        const diff = git(["diff", "--name-only", latest.wtree, wtreeNow]);
-        if (diff === undefined) {
-          verdict = "STALE";
-          reason = "content changed (fingerprint diff unavailable)";
-        } else {
-          const changed = diff.split("\n").map((s) => s.trim()).filter(Boolean);
-          const outside = changed.filter((f) => !allowPaths.some((a) => f === a || f.startsWith(a.replace(/\/$/, "") + "/")));
-          if (changed.length === 0 || outside.length === 0) {
-            reason = changed.length ? `diff confined to allow-paths (${changed.length} file(s))` : "";
-          } else {
-            verdict = "STALE";
-            reason = `content changed: ${outside.slice(0, 5).join(", ")}${outside.length > 5 ? ", ..." : ""}`;
-          }
-        }
-      }
-    }
+    const testsRan = typeof latest.tests_ran === "number" || latest.tests_ran === "n/a" ? latest.tests_ran : "unknown";
+    const ci = latest.source === "ci" && Array.isArray(latest.runs) ? ` source=ci runs=${latest.runs.filter((s) => /^\d+\/\d+$/.test(s)).join(",")}` : "";
+    const detail = `label=${label} exit=${latest.exit} tests_ran=${testsRan}${latest.tests_unit === "files" ? " unit=files" : ""} ts=${latest.ts}${latest.log_path ? ` log=${latest.log_path}` : ""}${ci}`;
+    const { verdict, reason } = gradeRecord(latest, { maxAgeHours, expectCmd, allowPaths, wtreeNow });
     console.log(`EVIDENCE: ${verdict} ${detail}${reason ? ` reason=${reason}` : ""}`);
     if (verdict !== "FRESH") allFresh = false;
   }
@@ -753,6 +1058,12 @@ const [, , sub, ...rest] = process.argv;
 try {
   if (sub === "run") {
     process.exit(await cmdRun(rest));
+  } else if (sub === "record-ci") {
+    process.exit(await cmdRecordCi(rest));
+  } else if (sub === "passed") {
+    process.exit(cmdPassed(rest));
+  } else if (sub === "carried") {
+    process.exit(cmdCarried(rest));
   } else if (sub === "check") {
     process.exit(cmdCheck(rest));
   } else if (sub === "bundle") {
@@ -762,7 +1073,7 @@ try {
   } else if (sub === "verify") {
     process.exit(cmdVerify(rest));
   } else {
-    console.error("usage: gstack-evidence run|check|bundle|ancestor|verify ...");
+    console.error("usage: gstack-evidence run|record-ci|passed|carried|check|bundle|ancestor|verify ...");
     process.exit(2);
   }
 } catch (e: any) {

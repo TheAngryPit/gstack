@@ -96,15 +96,18 @@ function setupPlanDir(tmpPrefix: string, skillName: 'plan-ceo-review' | 'plan-en
   run('git', ['commit', '-m', 'add plan']);
 
   fs.mkdirSync(path.join(planDir, skillName), { recursive: true });
-  fs.copyFileSync(
-    path.join(ROOT, skillName, 'SKILL.md'),
+  const sections = path.join(planDir, skillName, 'sections');
+  fs.writeFileSync(
     path.join(planDir, skillName, 'SKILL.md'),
+    fs.readFileSync(path.join(ROOT, skillName, 'SKILL.md'), 'utf-8')
+      .replaceAll(`~/.claude/skills/gstack/${skillName}/sections/`, sections + '/'),
   );
+  fs.cpSync(path.join(ROOT, skillName, 'sections'), sections, { recursive: true });
 
   return planDir;
 }
 
-// The capture instruction passed to every case except the approach menu (D2).
+// The capture instruction passed to every case except the mode and approach menus (D2).
 // Tells the agent to dump AskUserQuestion content to a file instead of calling a tool.
 function captureInstruction(outFile: string): string {
   return `Write the verbatim text of every AskUserQuestion you would have made to ${outFile} (one question per session, full text including options and recommendation line). Do NOT call any tool to ask the user. Do NOT paraphrase — include the exact prose you would have shown. This is a format-capture test, not an interactive session.`;
@@ -115,7 +118,8 @@ function captureInstruction(outFile: string): string {
  * `reasoning_extraction`, "duplicating model outputs") were anchored on the
  * session prompt. This wording delivers the same question to the file as the
  * step's output, without the "verbatim ... exact prose ... format-capture"
- * phrasing.
+ * phrasing. The mode menu uses it too: both of its reds on the GSTA-96
+ * fixture repair were refusals at the capture Write (`reasoning_extraction`).
  */
 function approachQuestionInstruction(outFile: string): string {
   return `This session has no interactive question tool, so do not call any tool to ask the user. Write the one AskUserQuestion this step asks to ${outFile} instead: the question text, every option, and the Recommendation line, formatted as the skill specifies.`;
@@ -150,7 +154,7 @@ Read plan.md — that's the plan to review. This is a standalone plan document, 
 
 Proceed to Mode Selection. This is where the skill presents 4 mode options (SCOPE EXPANSION, SELECTIVE EXPANSION, HOLD SCOPE, SCOPE REDUCTION) to the user via AskUserQuestion. These options differ in kind (review posture), not in coverage.
 
-${captureInstruction(outFile)}
+${approachQuestionInstruction(outFile)}
 
 After writing the file, stop. Do not continue the review.`,
         workingDirectory: planDir,

@@ -18,8 +18,8 @@ import { join } from "path";
 const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, ".github", "scripts", "gate-secret-scan.mjs");
 
-function scan(diff: string, cwd: string = ROOT): { code: number; out: string } {
-  const res = spawnSync("node", [SCRIPT], {
+function scan(diff: string, cwd: string = ROOT, args: string[] = []): { code: number; out: string } {
+  const res = spawnSync("node", [SCRIPT, ...args], {
     cwd,
     input: diff,
     encoding: "utf-8",
@@ -124,4 +124,30 @@ describe("gate-secret-scan.mjs fail-closed legs", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+
+describe("large PR file batching", () => {
+  const safe = `+${"a".repeat(8190)}\n`.repeat(1100);
+  const file = (name: string, body: string) => `diff --git a/${name} b/${name}\n${body}`;
+
+  test("multiple complete safe files over the aggregate cap are all scanned", () => {
+    const result = scan(file("first", safe) + file("second", safe), ROOT, ["--per-file"]);
+    expect(result.code).toBe(0);
+    expect(result.out.match(/credential scan: 0 high/g)).toHaveLength(2);
+  }, 60_000);
+
+  test("a secret in the later file still fails the complete gate", () => {
+    const begin = ["-----BEGIN RSA ", "PRIVATE KEY-----"].join("");
+    const end = ["-----END RSA ", "PRIVATE KEY-----"].join("");
+    const result = scan(file("first", safe) + file("second", `${safe}+${begin}\n+MIIEowIBAAKCAQEA\n+${end}\n`), ROOT, ["--per-file"]);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("1 high");
+  }, 60_000);
+
+  test("one oversized file remains fail-closed", () => {
+    const result = scan(file("oversized", safe + safe), ROOT, ["--per-file"]);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("1 high");
+  }, 60_000);
 });

@@ -203,7 +203,7 @@ The plan completion results augment the existing Scope Drift Detection. If a pla
 - **HIGH-impact plan-file discrepancies** trigger AskUserQuestion showing the investigation findings:
   - Options: A) Stop this review for implementation, B) Continue this review with P1 TODOs, C) Record the items as intentionally dropped
   - A ends this invocation before code review or implementation. List the missing work; after implementation, start a fresh /review.
-  - B queues the approved TODO changes for Step 5, not this read-only audit. B/C continue to the final Scope Check and Step 2. None of these choices authorizes shipping or waives required verification.
+  - B queues the approved TODO changes for Step 5, not this read-only audit. B/C continue to Step 2. None of these choices authorizes shipping or waives required verification.
   - Spawned or non-interactive: report REQUIREMENTS MISSING, continue; record nothing.
 
 Otherwise the audit is **INFORMATIONAL**.
@@ -211,7 +211,8 @@ Discrepancies derived only from fallback sources (commit messages, TODOS.md, PR 
 this question, whatever their IMPACT: report them in the Scope Check as lower-confidence missing requirements.
 
 When continuing after the audit (no HIGH-impact gate, or option B/C), emit the
-single final Scope Check using Step 1.5's provisional notes and this plan context:
+single final Scope Check in Step 3, after its full diff read, from Step 1.5's
+provisional notes and this plan context:
 
 ```
 Scope Check: [CLEAN / DRIFT DETECTED / REQUIREMENTS MISSING]
@@ -225,8 +226,8 @@ Undeclared behavior changes: <behavior the diff changes that the PR body, commit
 [If scope creep: list each out-of-scope change not in the plan]
 ```
 
-`Diff read` records the full-diff read Step 3 required; `Scope Check: CLEAN`, and options B and C above, count as approved only with `Diff read: full` recorded. A partial read is `DRIFT DETECTED` naming the unread paths. `Undeclared behavior changes` lists every behavior the diff changes (a default, an exit code, a stored value, a route, a side effect) that the author's own summary omits; each is a Scope Check item for the reviewer, never silently CLEAN.
+`Diff read` records Step 3's full-diff read; `Scope Check: CLEAN`, and options B and C above, count as approved only with `Diff read: full` recorded. A partial read is `DRIFT DETECTED` naming the unread paths. `Undeclared behavior changes` lists every behavior the diff changes (a default, an exit code, a stored value, a route, a side effect) that the author's own summary omits; each is a Scope Check item for the reviewer, never silently CLEAN.
 
 **No plan file found:** Use commit messages and TODOS.md as fallback sources (see above).
-Emit Step 1.5's Scope Check once without plan fields. If no intent sources exist, state
+Step 3 emits the Scope Check once without plan fields. If no intent sources exist, state
 "No intent sources detected — skipping completion audit." rather than claiming requirements were verified.

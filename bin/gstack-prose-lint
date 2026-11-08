@@ -1,0 +1,73 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-prose-lint — the AI tells a regular expression can decide, over the
+ * prose /ship writes (docs/troubleshooting.md#prose-lint-found).
+ *
+ *   gstack-prose-lint <file>... [--unreleased | --base <ref> | --sections <a,b>] [--gate] [--json]
+ *
+ * Scans each file (fenced code, inline code, URLs, comments and quoted words excluded) and
+ * prints one `PROSE:` line per finding, then `PROSE_LINT: ok | found=<n> | none`.
+ * --unreleased reads only each file's `## [Unreleased]` CHANGELOG block,
+ * --base <ref> only the lines the working tree adds since the merge base with
+ * <ref>, and --sections <a,b> only the text under those `## ` headings (nothing
+ * to scan is `none`). Exit 0 unless --gate is set and something was found
+ * (exit 1); unreadable input is exit 2. Report-only everywhere else: a
+ * template, a doc or a README gets the report and keeps its em dashes.
+ * Logic: lib/prose-lint.ts. Called from /ship Steps 13 and 19 and the
+ * quality-gate workflow.
+ */
+import * as fs from 'node:fs';
+import { EXIT, exitTableHelp } from '../lib/headless-artifacts';
+import { baseArg } from '../lib/gate-diff/git';
+import { lintFiles, renderProseLint } from '../lib/prose-lint';
+import { resultLine } from '../lib/result-codes';
+
+const HELP = `gstack-prose-lint — AI tells a regex can decide, over CHANGELOG entries and PR bodies (docs/troubleshooting.md#prose-lint-found)
+
+  <file>...      files to scan; fenced code, inline code, URLs and HTML comments are skipped
+  --unreleased   scan only each file's ## [Unreleased] CHANGELOG block (none present: PROSE_LINT: none)
+  --base <ref>   scan only the lines the working tree adds to each file since the merge base with <ref>
+  --sections <a,b>  scan only the text under these ## headings (the sections an author writes in a PR body)
+  --gate         exit 1 when anything was found (default: report and exit 0)
+  --json         findings as JSON instead of PROSE: lines
+
+Rules: vocabulary, not-just-but, metaphor-noun, mid-sentence-colon, inline-header-list, arrow, dropped-article,
+and unclosed-block (a fence or HTML comment left open hid the text after it). Quoted words are never read.
+--sections with --gate exits 2 when a file has none of the headings, so a renamed heading cannot pass unread.
+
+${exitTableHelp()}`;
+
+function main(argv: string[]): number {
+  if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) { process.stdout.write(HELP + '\n'); return argv.length ? EXIT.ok : EXIT.usage; }
+  const flags = new Set<string>();
+  const files: string[] = [];
+  let base: string | undefined;
+  let sections: string[] | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--base') { base = argv[++i]; if (!base || base.startsWith('--')) { process.stderr.write('gstack-prose-lint: --base needs a ref\n'); return EXIT.usage; } }
+    else if (a === '--sections') { const v = argv[++i]; if (!v || v.startsWith('--')) { process.stderr.write('gstack-prose-lint: --sections needs a comma-separated list of headings\n'); return EXIT.usage; } sections = v.split(','); }
+    else if (['--unreleased', '--gate', '--json'].includes(a)) flags.add(a);
+    else if (a.startsWith('--')) { process.stderr.write(`gstack-prose-lint: unknown flag ${a}\n${HELP}\n`); return EXIT.usage; }
+    else files.push(a);
+  }
+  if (files.length === 0) { process.stderr.write('gstack-prose-lint: name at least one file\n'); return EXIT.usage; }
+  if ([base, sections, flags.has('--unreleased') || undefined].filter(Boolean).length > 1) { process.stderr.write('gstack-prose-lint: --unreleased, --base and --sections are different selections; pass one\n'); return EXIT.usage; }
+  for (const f of files) if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) { process.stderr.write(`gstack-prose-lint: cannot read ${f}\n`); return EXIT.usage; }
+  let result;
+  try { result = lintFiles(files, { unreleased: flags.has('--unreleased'), base: base && baseArg('gstack-prose-lint', base, process.cwd()), sections }); }
+  catch (e: any) { process.stderr.write(`gstack-prose-lint: ${e.message}\n`); return EXIT.usage; }
+  if (sections && flags.has('--gate') && result.empty.length) {
+    process.stderr.write(`gstack-prose-lint: no "## <section>" heading from --sections in ${result.empty.join(', ')}; nothing would be gated\n`);
+    return EXIT.usage;
+  }
+  if (flags.has('--json')) process.stdout.write(JSON.stringify({ findings: result.findings, scanned: result.scanned, empty: result.empty }, null, 2) + '\n');
+  else process.stdout.write(renderProseLint(result));
+  if (result.findings.length && flags.has('--gate')) {
+    process.stderr.write(resultLine('gstack-prose-lint', 'PROSE_LINT_FOUND', `${result.findings.length} finding${result.findings.length === 1 ? '' : 's'}`) + '\n');
+    return EXIT.fail;
+  }
+  return EXIT.ok;
+}
+
+process.exit(main(process.argv.slice(2)));

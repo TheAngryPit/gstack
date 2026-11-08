@@ -157,12 +157,11 @@ describe('pickFreeDisplay (Xvfb installed)', () => {
 describe('xvfb spawn → cleanup round trip (Linux + Xvfb only)', () => {
   test.skipIf(!HAS_XVFB)('spawn, validate ownership, cleanup', async () => {
     const { spawnXvfb } = await import('../src/xvfb');
-    const display = pickFreeDisplay(99, 110);
-    if (display == null) {
-      // No free display in range — skip.
-      return;
-    }
-    const handle = await spawnXvfb(display);
+    // A range no other allocator in the suite uses: headed daemons in parallel
+    // shards take displays from the default :99-:120 between this pick and the spawn.
+    const display = pickFreeDisplay(25000, 25100);
+    expect(display).not.toBeNull();
+    const handle = await spawnXvfb(display!);
     try {
       expect(handle.pid).toBeGreaterThan(0);
       expect(handle.display).toBe(`:${display}`);
@@ -173,7 +172,7 @@ describe('xvfb spawn → cleanup round trip (Linux + Xvfb only)', () => {
       const lock = fs.readFileSync(lockPath, 'utf8');
       cleanupXvfb({ ...handle, startTime: 'stale-start-time' });
       expect(isOurXvfb(handle.pid, handle.startTime)).toBe(true);
-      await expect(spawnXvfb(display)).rejects.toThrow('already reserved');
+      await expect(spawnXvfb(display!)).rejects.toThrow('already reserved');
       expect(fs.readFileSync(lockPath, 'utf8')).toBe(lock);
       expect(isOurXvfb(handle.pid, handle.startTime)).toBe(true);
     } finally {
@@ -374,6 +373,7 @@ describe.skipIf(process.platform !== 'linux')('daemon-owned display lifecycle', 
       fs.writeFileSync(preload, `
         import * as fs from 'node:fs';
         import { BrowserManager } from ${JSON.stringify(path.resolve(import.meta.dir, '../src/browser-manager.ts'))};
+        import { atomicWriteSync } from ${JSON.stringify(path.resolve(import.meta.dir, '../../lib/fs-atomic.ts'))};
         const getPage = BrowserManager.prototype.getPage;
         const wrapped = new WeakSet();
         let rejectWelcome;
@@ -384,7 +384,7 @@ describe.skipIf(process.platform !== 'linux')('daemon-owned display lifecycle', 
             const goto = page.goto.bind(page);
             page.goto = async (url, options) => {
               if (new URL(url).pathname === '/welcome') {
-                fs.writeFileSync(${JSON.stringify(entered)}, JSON.stringify(this.getXvfbHandle()));
+                atomicWriteSync(${JSON.stringify(entered)}, JSON.stringify(this.getXvfbHandle()));
                 if (${JSON.stringify(mode)} === 'shutdown') {
                   return new Promise((resolve, reject) => {
                     rejectWelcome = () => reject(new Error('Welcome interrupted during shutdown'));
@@ -471,7 +471,10 @@ describe.skipIf(process.platform !== 'linux')('daemon-owned display lifecycle', 
           if (!response.ok) throw new Error(`${name}: ${response.status}: ${await response.text()}`);
           return response.text();
         };
-        if (mode === 'welcome') expect(await command('url')).toContain('/welcome');
+        if (mode === 'welcome') {
+          const url = await command('url');
+          expect(url, `daemon log tail: ${fs.readFileSync(path.join(root, 'daemon.log'), 'utf8').slice(-800)}`).toContain('/welcome');
+        }
         if (mode === 'welcome failure') {
           expect(fs.readFileSync(path.join(root, 'daemon.log'), 'utf8')).toContain('Welcome test navigation failure');
           expect(await command('url')).toContain('about:blank');

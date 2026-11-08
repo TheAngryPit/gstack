@@ -1,0 +1,34 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+// gstack-skill-bill — size per level for one skill and growth since its last diet. Logic: lib/skill-bill.ts.
+import { buildSkillBill, renderSkillBill, resolveSkill, SkillBillError } from "../lib/skill-bill";
+
+const USAGE = `Usage: gstack-skill-bill <skill-name|skill-dir> [--json]
+       gstack-skill-bill --help
+
+Prints bytes and estimated tokens for each level of one skill: its description (loaded every
+session), SKILL.md and its template (every use), and sections/ or references/ files (on demand).
+Names the skill's kind: gstack-checkout (edit SKILL.md.tmpl, then bun run gen:skill-docs),
+gstack-install (never edit; gstack-upgrade overwrites it) or user. BASELINE is the newest commit
+with a "Skill-Diet: <name>" trailer; DUE means the authored file grew over 10% since then.
+In a gstack checkout, EVAL TASKS names test/fixtures/skill-evals/<name>/tasks.json (or none) and
+EVAL_TASKS_INVALID flags a file that breaks docs/designs/SKILL_EVAL_CONTRACT.md's task format, and
+EVIDENCE prints the skill's row in docs/inventory/evidence.json: its status and source, plan or reason.
+A name must match exactly; pass a path when it names more than one skill.
+Exit 0 on a report, 2 on SKILL_NOT_FOUND, SKILL_AMBIGUOUS or SKILL_MD_MISSING (each with a fix line).`;
+
+const args = process.argv.slice(2);
+if (args.includes("--help") || args.includes("-h")) { console.log(USAGE); process.exit(0); }
+const unknown = args.find((a) => a.startsWith("-") && a !== "--json");
+const targets = args.filter((a) => !a.startsWith("-"));
+if (unknown || targets.length !== 1) {
+  console.error(unknown ? `gstack-skill-bill: unknown argument '${unknown}'; valid: --json --help` : USAGE);
+  process.exit(2);
+}
+try {
+  const report = buildSkillBill(resolveSkill(targets[0], process.cwd()));
+  console.log(args.includes("--json") ? JSON.stringify(report, null, 2) : renderSkillBill(report));
+} catch (e) {
+  if (!(e instanceof SkillBillError)) throw e;
+  console.error(`gstack-skill-bill: ${e.message} (${e.code})\nfix: ${e.fix}`);
+  process.exit(2);
+}

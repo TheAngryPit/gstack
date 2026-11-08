@@ -5,7 +5,10 @@
 # Reads all *-reviews.jsonl files across branches, parses specialist fields,
 # and outputs hit rates. Tags specialists as GATE_CANDIDATE (0 findings in 10+
 # dispatches) or NEVER_GATE (security, data-migration, state-machines — insurance policy).
+# Fix-range passes (scope "fix-range", #3339) are skipped: a narrowed dispatch
+# says nothing about a specialist's hit rate on a whole branch.
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null)"
 . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
@@ -31,7 +34,7 @@ if [ -z "$COMBINED" ]; then
   exit 0
 fi
 
-printf '%s' "$COMBINED" | bun -e "
+printf '%s' "$COMBINED" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
 const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
 const NEVER_GATE = new Set(['security', 'data-migration', 'state-machines']);
 const stats = {};
@@ -40,7 +43,7 @@ let reviewed = 0;
 for (const line of lines) {
   try {
     const e = JSON.parse(line);
-    if (!e.specialists) continue;
+    if (!e.specialists || e.scope === 'fix-range') continue;
     reviewed++;
     for (const [name, info] of Object.entries(e.specialists)) {
       if (!stats[name]) stats[name] = { dispatched: 0, findings: 0 };

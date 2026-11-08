@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-  BINDING_FILE, CANDIDATE_FILE, REUSE_FILE, buildBinding, confirmReuse, findReusableGate, parseReuse, reuseReport, selectionFingerprint,
+  BINDING_FILE, CANDIDATE_FILE, REUSE_FILE, buildBinding, confirmReuse, findReusableGate, parseBinding, parseReuse, reuseReport, selectionFingerprint,
   type GateBinding, type GateReuse,
 } from '../scripts/gate-reuse';
 import type { GhRunner, WorkflowRun } from '../scripts/recover-receipts';
@@ -57,6 +57,8 @@ beforeAll(() => {
   origin = path.join(scratch, 'origin.git');
   git(scratch, 'init', '-q', '--bare', origin);
   git(origin, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+  git(origin, 'config', 'maintenance.auto', 'false');
+  git(origin, 'config', 'gc.auto', '0');
   const work = path.join(scratch, 'work');
   git(scratch, 'clone', '-q', origin, work);
   const policy = fs.readFileSync(path.join(ROOT, '.gstack/ship-policy.json'), 'utf8');
@@ -129,9 +131,10 @@ type Jobs = Record<number, Array<{ name: string; conclusion: string | null }>>;
  * slices; an unbound one ran none unless scripted), downloads that write the
  * scripted binding (or raw text), and merge-bases from the fixture repo.
  */
-function fakeGh(runs: WorkflowRun[], bindings: Record<number, GateBinding | string>, failList = '', jobs: Jobs = {}, failCompare = false): GhRunner {
+function fakeGh(runs: WorkflowRun[], bindings: Record<number, GateBinding | string>, failList = '', jobs: Jobs = {}, failCompare = false, prCommits: string[] = []): GhRunner {
   return (args) => {
     const ok = (body: unknown) => ({ status: 0, stdout: JSON.stringify(body), stderr: '' });
+    if (args.some(a => /\/pulls\/42\/commits$/.test(a))) return { status: 0, stdout: prCommits.join('\n') + '\n', stderr: '' };
     if (args.some(a => a.endsWith('/workflows/evals.yml/runs'))) return failList ? { status: 1, stdout: '', stderr: failList } : ok({ workflow_runs: runs });
     const jobList = args.find(a => /\/runs\/\d+\/jobs$/.test(a));
     if (jobList) {
@@ -175,13 +178,30 @@ function tested(base: string, head: string): string {
 
 let outCount = 0;
 function find(head: string, runs: WorkflowRun[], bindings: Record<number, GateBinding | string>,
-  over: { baseSha?: string; failList?: string; jobs?: Jobs; failCompare?: boolean; testedSha?: string } = {}) {
+  over: { baseSha?: string; failList?: string; jobs?: Jobs; failCompare?: boolean; testedSha?: string; screen?: { policy: 'narrow' | 'broad' }; prCommits?: string[] } = {}) {
   const out = path.join(scratch, 'out-' + ++outCount);
   const result = findReusableGate({ repo: REPO, pr: 42, headRepo: REPO, branch: 'feature', selfRunId: 500, headSha: head,
-    testedSha: over.testedSha ?? tested(over.baseSha ?? sha.base!, head), repoRoot: receipt, out,
-    gh: fakeGh(runs, bindings, over.failList, over.jobs, over.failCompare) });
+    testedSha: over.testedSha ?? tested(over.baseSha ?? sha.base!, head), repoRoot: receipt, out, ...(over.screen ? { screen: over.screen } : {}),
+    gh: fakeGh(runs, bindings, over.failList, over.jobs, over.failCompare, over.prCommits) });
   return { ...result, out, text: result.lines.join('\n') };
 }
+
+describe('fixture origin', () => {
+  // Value: protects=a push into the bare origin starts no detached auto-maintenance there, so a later push never writes into an
+  //   object directory a repack just removed (unable to write ./objects/3f/…, Free Tests 41980850843 shard 5); fails_when=the origin
+  //   loses maintenance.auto=false; why_new=local transport drops the runner's GIT_CONFIG_COUNT backstop; seam=none;
+  //   no_claim=which maintenance task removed the directory on the CI runner's git
+  test('a push into the origin starts no auto-maintenance even when the runner backstop is dropped', () => {
+    const trace = path.join(scratch, 'trace2.txt');
+    const backstop = { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'maintenance.auto', GIT_CONFIG_VALUE_0: 'false', GIT_CONFIG_KEY_1: 'gc.auto', GIT_CONFIG_VALUE_1: '0' };
+    const push = spawnSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/maintenance-probe'],
+      { cwd: path.join(scratch, 'work'), encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...backstop, GIT_TRACE2: trace } });
+    expect(push.status, push.stderr).toBe(0);
+    const events = fs.readFileSync(trace, 'utf8');
+    expect(events).toContain('receive-pack');
+    expect(events.split('\n').filter(line => line.includes('child_start') && line.includes('maintenance'))).toEqual([]);
+  });
+});
 
 describe('find: the positive case', () => {
   test('a restamp of a GREEN head on the same base yields a candidate with the receipt', () => {
@@ -488,3 +508,143 @@ describe.skipIf(!Bun.which('jq') || !Bun.which('bash'))('the PR comment for a re
     expect(failed.stdout).toContain('❌ FAIL');
   });
 });
+
+describe('dispatched screens (GSTA-49 T1b): authenticated by PR, head, repository and tested base', () => {
+  const title = (policy: string, pr = 42) => `E2E Evals [eval-bg pr.screen.${policy}-${'c'.repeat(12)}-${'d'.repeat(12)}-abc123] screen #${pr}`;
+  // A screen dispatches on main: the run's head_sha is main's tip, never the PR head; the binding carries the PR head and the merge commit.
+  const screenRun = (id: number, policy = 'narrow', over: Partial<WorkflowRun> = {}) => run(id, sha.base!, 'success', { event: 'workflow_dispatch', pull_requests: [], display_title: title(policy), ...over });
+  const screenBinding = (head: string, policy: 'narrow' | 'broad' = 'narrow', over: Partial<GateBinding> = {}) =>
+    binding({ head_sha: head, purpose: 'screen', tested_sha: tested(sha.base!, head), screen_policy: policy, ...over });
+  const commits = () => [sha.gated!, sha.restamp!];
+  const screen = (policy: 'narrow' | 'broad', runs: WorkflowRun[], bindings: Record<number, GateBinding | string>, over: { prCommits?: string[]; jobs?: Jobs } = {}) =>
+    find(sha.restamp!, runs, bindings, { screen: { policy }, prCommits: over.prCommits ?? commits(), jobs: over.jobs });
+
+  test('a screen, a restamp-only push, then a re-screen of the same policy reuses through R2a', () => {
+    const { candidate, text } = screen('narrow', [screenRun(300)], { 300: screenBinding(sha.gated!) });
+    expect(text).toContain('TREE: same-modulo-stamps');
+    expect(candidate).toMatchObject({ kind: 'restamp-only', reused_run_id: 300, gated_head: sha.gated, current_head: sha.restamp, base_sha: sha.base, reused_screen_policy: 'narrow' });
+    expect(reuseReport(candidate!, REPO)).toContain('(a narrow screen)');
+  });
+
+  test("a PR push under a train policy (no paid slice, no binding) is passed over; the PR's earlier screen still reuses", () => {
+    const summary = run(320, sha.restamp!, 'success');
+    const { candidate } = screen('narrow', [summary, screenRun(300)], { 300: screenBinding(sha.gated!) }, { jobs: { 320: [{ name: 'eval-slices', conclusion: 'skipped' }] } });
+    expect(candidate?.reused_run_id).toBe(300);
+  });
+
+  test('a broad screen never adopts a narrow run; a narrow screen never adopts a pull_request gate (broad); a broad screen may', () => {
+    const narrowRun = screen('broad', [screenRun(300)], { 300: screenBinding(sha.gated!) });
+    expect(narrowRun.candidate).toBeNull();
+    expect(narrowRun.text).toContain('gated the narrow selection; a broad screen never adopts it');
+    const prRun = screen('narrow', [run(300, sha.gated!)], { 300: binding() });
+    expect(prRun.candidate).toBeNull();
+    expect(prRun.text).toContain('gated the broad selection; a narrow screen never adopts it');
+    expect(screen('broad', [run(300, sha.gated!)], { 300: binding() }).candidate?.reused_run_id).toBe(300);
+  });
+
+  test('a forged screen is refused: another PR, a head outside the PR, a mismatched binding, a tested commit off its bound base, another repository', () => {
+    const refused: Array<[WorkflowRun[], Record<number, GateBinding | string>, string, string[]?]> = [
+      [[screenRun(300, 'narrow', { display_title: title('narrow', 43) })], { 300: screenBinding(sha.gated!) }, 'no earlier executed gate on this PR bound a verdict'],
+      [[screenRun(300)], { 300: screenBinding(sha.gated!) }, 'is not a commit of PR #42', [sha.restamp!]],
+      [[screenRun(300)], { 300: screenBinding(sha.gated!, 'narrow', { pr: 43 }) }, 'does not match the run it came from'],
+      [[screenRun(300)], { 300: binding() }, 'does not match the run it came from'],
+      [[screenRun(300)], { 300: screenBinding(sha.gated!, 'narrow', { tested_sha: tested(sha.moved!, sha.gated!) }) }, 'does not merge its head into its bound base'],
+      [[screenRun(300, 'narrow', { head_repository: { full_name: 'fork/gstack' } })], { 300: screenBinding(sha.gated!) }, 'no earlier executed gate on this PR bound a verdict'],
+      [[run(300, sha.gated!)], { 300: screenBinding(sha.gated!) }, 'does not match the run it came from'],
+    ];
+    for (const [runs, bindings, why, prCommits] of refused) {
+      const { candidate, text } = screen('narrow', runs, bindings, { prCommits });
+      expect(candidate, why).toBeNull();
+      expect(text, why).toContain(why);
+    }
+  });
+
+  test('train, bisect and plain dispatch runs never bind a verdict, so they never reuse or get reused', () => {
+    const report = path.join(scratch, 'bind-purpose');
+    fs.mkdirSync(report, { recursive: true });
+    fs.writeFileSync(path.join(report, 'manifest.json'), JSON.stringify(manifest()));
+    fs.writeFileSync(path.join(report, 'collector-outcomes.json'), JSON.stringify({ verdict: { verdict: 'GREEN' }, totals: { manual_accepted: 0 } }));
+    const args = { repository: REPO, pr: 42, runId: 300, runAttempt: 1, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), profile: 'full', reconcileExit: 0, reportDir: report };
+    for (const purpose of ['train', 'bisect', 'dispatch'] as const) {
+      const bound = buildBinding({ ...args, purpose });
+      expect(bound.binding, purpose).toBeNull();
+      expect(bound.reason).toBe(`a ${purpose} run never binds a verdict for reuse`);
+    }
+    expect(buildBinding({ ...args, profile: 'pr', purpose: 'screen', testedSha: 'c'.repeat(40), screenPolicy: 'broad' }).binding)
+      .toMatchObject({ purpose: 'screen', tested_sha: 'c'.repeat(40), screen_policy: 'broad' });
+    // A train dispatch in the history is neither a screen nor a pull_request run of this PR: never listed, never a candidate.
+    const trainRun = run(310, sha.base!, 'success', { event: 'workflow_dispatch', pull_requests: [], display_title: 'E2E Evals [eval-bg gate.train-x]' });
+    expect(screen('narrow', [trainRun, screenRun(300)], { 300: screenBinding(sha.gated!), 310: screenBinding(sha.gated!) }).candidate?.reused_run_id).toBe(300);
+  });
+});
+
+describe('rule-16 flaky GREENs are reusable (GSTA-53, F1)', () => {
+  const flaky = (over: Partial<GateBinding> = {}) => binding({ flaky_cases: ['tpa-absent-darwin'], ...over });
+  /** A run that bound once per attempt: gate-binding-a<n> each, download by name (a `gh run rerun --failed` attempt binds again). */
+  function attemptsGh(runs: WorkflowRun[], perAttempt: Record<number, GateBinding>): GhRunner {
+    const inner = fakeGh(runs, { 300: perAttempt[1]! });
+    return (args, timeoutMs) => {
+      if (args.some(a => /\/runs\/300\/artifacts$/.test(a))) {
+        return { status: 0, stdout: JSON.stringify({ artifacts: [...Object.keys(perAttempt).map(n => ({ name: `gate-binding-a${n}`, expired: false })), { name: 'paid-slice-1-a1', expired: false }] }), stderr: '' };
+      }
+      if (args[0] === 'run' && args[1] === 'download' && args[2] === '300') {
+        const dir = args[args.indexOf('-D') + 1]!;
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, BINDING_FILE), JSON.stringify(perAttempt[Number(args[args.indexOf('-n') + 1]!.slice('gate-binding-a'.length))]));
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      return inner(args, timeoutMs);
+    };
+  }
+  const findWith = (head: string, gh: GhRunner, baseSha = sha.base!) => {
+    const out = path.join(scratch, 'out-' + ++outCount);
+    const result = findReusableGate({ repo: REPO, pr: 42, headRepo: REPO, branch: 'feature', selfRunId: 500, headSha: head, testedSha: tested(baseSha, head), repoRoot: receipt, out, gh });
+    return { ...result, out, text: result.lines.join('\n') };
+  };
+
+  test('R2a: a restamp of a flaky-annotated GREEN reuses it and carries the flaky case names', () => {
+    const { candidate } = find(sha.restamp!, [run(300, sha.gated!)], { 300: flaky() });
+    expect(candidate).toMatchObject({ kind: 'restamp-only', reused_run_id: 300, reused_flaky: ['tpa-absent-darwin'] });
+    expect(parseReuse(candidate)).toEqual(candidate);
+    expect(reuseReport(candidate!, REPO)).toContain('flaky (rule 16): tpa-absent-darwin failed once and passed on their one rerun in the reused gate');
+  });
+
+  test('R2: main moved with an identical own diff reuses a flaky-annotated GREEN', () => {
+    const { candidate } = find(sha.rebased!, [run(300, sha.gated!)], { 300: flaky() }, { baseSha: sha.moved });
+    expect(candidate).toMatchObject({ kind: 'main-moved', reused_run_id: 300, reused_flaky: ['tpa-absent-darwin'] });
+  });
+
+  test('a manual --failed attempt that went green: its newest binding is reused (R2a and R2), never the red first attempt', () => {
+    const attempts = { 1: binding({ verdict: 'RED', reconcile_exit: 1 }), 2: flaky({ run_attempt: 2 }) };
+    const restamp = findWith(sha.restamp!, attemptsGh([run(300, sha.gated!)], attempts));
+    expect(restamp.candidate, restamp.text).toMatchObject({ kind: 'restamp-only', reused_run_attempt: 2, reused_flaky: ['tpa-absent-darwin'] });
+    const moved = findWith(sha.rebased!, attemptsGh([run(300, sha.gated!)], attempts), sha.moved!);
+    expect(moved.candidate, moved.text).toMatchObject({ kind: 'main-moved', reused_run_attempt: 2 });
+  });
+
+  test('negative control: a run still red after its rerun is never reused, whatever it calls flaky', () => {
+    const stillRed = find(sha.restamp!, [run(300, sha.gated!, 'failure')], { 300: flaky({ verdict: 'RED', reconcile_exit: 1 }) });
+    expect(stillRed.candidate).toBeNull();
+    expect(stillRed.text).toContain('is RED, reconcile exit 1');
+    const moved = find(sha.rebased!, [run(300, sha.gated!, 'failure')], { 300: flaky({ verdict: 'RED', reconcile_exit: 1 }) }, { baseSha: sha.moved });
+    expect(moved.candidate).toBeNull();
+    const newestRed = findWith(sha.restamp!, attemptsGh([run(300, sha.gated!, 'failure')], { 1: flaky(), 2: binding({ run_attempt: 2, verdict: 'RED', reconcile_exit: 1 }) }));
+    expect(newestRed.candidate).toBeNull();
+    expect(newestRed.text).toContain('is RED');
+  });
+
+  test('bind records the report\'s flaky cases; a malformed flaky list is no binding', () => {
+    const dir = path.join(scratch, 'bind-flaky');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest()));
+    fs.writeFileSync(path.join(dir, 'collector-outcomes.json'), JSON.stringify({ verdict: { verdict: 'GREEN' }, totals: { manual_accepted: 0 },
+      flaky: [{ case: 'tpa-absent-darwin' }, { case: 'plan-design-with-ui-scope' }] }));
+    const { binding: bound, reason } = buildBinding({ repository: REPO, pr: 42, runId: 300, runAttempt: 2, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), profile: 'pr', reconcileExit: 0, reportDir: dir });
+    expect(bound).toMatchObject({ verdict: 'GREEN', run_attempt: 2, flaky_cases: ['tpa-absent-darwin', 'plan-design-with-ui-scope'] });
+    expect(reason).toContain('bound GREEN (flaky: tpa-absent-darwin, plan-design-with-ui-scope)');
+    expect(parseBinding({ ...binding(), flaky_cases: 'x' })).toBeNull();
+    expect(parseBinding({ ...binding(), flaky_cases: [''] })).toBeNull();
+    expect(parseBinding(binding())?.flaky_cases).toBeUndefined();
+  });
+});
+

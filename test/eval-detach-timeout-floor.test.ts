@@ -20,7 +20,7 @@ import * as path from 'node:path';
 import {
   CANONICAL_REPO, DISPATCH_FOLLOW_SECONDS, EVAL_BG_LANES, LANE_SPECS, LOCAL_CAP_SECONDS, UNRECORDED_SHARD_MS,
   chooseBackend, conclusionExitCode, dedupeKey, dispatchBlockers, dispatchPlan, findDuplicateRun, launchDetached,
-  localCapSeconds, makeNonce, plannedSerialMs, statusOf, type CheckoutFacts, type RunSummary,
+  launchLocal, localCapSeconds, localRunId, makeNonce, plannedSerialMs, statusOf, type CheckoutFacts, type RunSummary,
 } from '../scripts/eval-bg';
 import { buildRunManifest, loadPaidTestDurations, recordedShardMs } from '../scripts/test-paid-shards';
 
@@ -157,6 +157,35 @@ describe('completion contract on both backends (DX-2)', () => {
       expect(statusOf(log)).toBe('failed');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }, 40_000);
+
+  // GSTA-70: the native-capture cases (qa-callers, ship-docsync, qa-functional)
+  // refuse to start without EVALS_RUN_ID. CI sets it per slice; the local lane
+  // used to launch without it, so 17 of /ship's PR cases failed in 0 s.
+  test('local: the lane exports a safe EVALS_RUN_ID named after its log, and keeps an exported one', async () => {
+    const { dir, env } = sandbox();
+    try {
+      delete env.EVALS_RUN_ID;
+      const probe = (out: string) => [process.execPath, '-e',
+        `const id = process.env.EVALS_RUN_ID ?? ''; require('fs').writeFileSync(${JSON.stringify(out)}, id); process.exit(/^[\\w.-]+$/.test(id) ? 0 : 4)`];
+      const log = path.join(dir, 'evals-pr-gstack-feature+x-20261024-200431-1.log');
+      launchLocal({ log, label: 'evals-test', timeoutSeconds: 60, header: '[eval-bg] backend=local lane=pr tested=abc', env, command: probe(path.join(dir, 'id')) });
+      const text = await waitForExit(log);
+      expect(localRunId(log)).toBe('evals-pr-gstack-feature-x-20261024-200431-1');
+      expect(fs.readFileSync(path.join(dir, 'id'), 'utf8')).toBe(localRunId(log));
+      expect(text.split('\n').slice(0, 2)).toEqual(['[eval-bg] backend=local lane=pr tested=abc', `[eval-bg] EVALS_RUN_ID=${localRunId(log)}`]);
+      expect(text).toMatch(/### gstack-detach EXIT=0 ###/);
+      const kept = path.join(dir, 'kept.log');
+      launchLocal({ log: kept, label: 'evals-test', timeoutSeconds: 60, header: 'h', env: { ...env, EVALS_RUN_ID: 'mine-1' }, command: probe(path.join(dir, 'kept')) });
+      expect(await waitForExit(kept)).toMatch(/### gstack-detach EXIT=0 ###/);
+      expect(fs.readFileSync(path.join(dir, 'kept'), 'utf8')).toBe('mine-1');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }, 40_000);
+
+  test('the local backend launches through launchLocal', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'scripts/eval-bg.ts'), 'utf8');
+    expect(source).toMatch(/console\.log\(launchLocal\(\{ log, label, timeoutSeconds: cap\.seconds, header, command: \['bun', 'run', LANE_SPECS\[lane\]\.script\] \}\)\)/);
+    expect(source.match(/launchDetached\(\{ log, label/g)?.length).toBe(1);
+  });
 
   for (const [conclusion, code, word] of [['failure', 1, 'failed'], ['cancelled', 130, 'cancelled'], ['success', 0, 'passed']] as const) {
     test(`dispatch: a followed run that ends ${conclusion} writes EXIT=${code}`, async () => {

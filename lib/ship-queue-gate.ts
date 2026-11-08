@@ -99,7 +99,8 @@ export function recomputeMergeTree(repoRoot: string, branchHead: string, predece
     if (!ours || !theirs) return { error: `${file} conflicts beyond a content merge (added or deleted on one side)` };
     if (file === policy.changelog) {
       const text = (sha: string) => git(repoRoot, ['cat-file', 'blob', sha]).out + '\n';
-      const merged = mergeChangelogs(text(ours), text(theirs));
+      const base = entry.get(1);
+      const merged = mergeChangelogs(text(ours), text(theirs), base ? text(base) : undefined);
       if (merged === null) return { error: `${file} conflicts beyond a heading move` };
       const blob = git(repoRoot, ['hash-object', '-w', '--stdin'], undefined, merged);
       if (!blob.ok) return { error: `cannot write the merged ${file}: ${blob.err}` };

@@ -16,13 +16,14 @@ import { safeUnlink, safeUnlinkQuiet, safeKill, isProcessAlive } from './error-h
 import { readPidStartTime, readPidCmdline } from './xvfb';
 import { writeSecureFile, mkdirSecure } from './file-permissions';
 import { resolveConfig, ensureStateDir, readVersionHash, isPairAgentEnabled, resolveChromiumProfile } from './config';
-import { resolveProxy, computeConfigHash, ProxyConfigError, PROXY_TROUBLESHOOTING } from './proxy-config';
+import { resolveProxy, computeConfigHash, explicitDirect, ProxyConfigError, PROXY_TROUBLESHOOTING } from './proxy-config';
 import { redactProxyUrl } from './proxy-redact';
 import { spawnTerminalAgent, bunChildFlags } from './terminal-agent-control';
 import { profileOwner, ensureProjectProfile, runProfilesCommand } from './chromium-profiles';
 // Zero side effects on import (documented invariant in token-registry.ts) —
 // safe to pull the shared pairing default into the CLI.
 import { DEFAULT_PAIR_SCOPES } from './token-registry';
+import { chooseSession, extractSession, systemProcLookup } from './session-name';
 
 const config = resolveConfig();
 const IS_WINDOWS = process.platform === 'win32';
@@ -194,6 +195,8 @@ interface ServerState {
   proxy?: string;
   proxySource?: string;
   proxyBypass?: string;
+  /** #3440: started with BROWSE_PROXY_URL=direct where that bypasses the system proxy settings. */
+  proxyDirect?: boolean;
   /** Xvfb child PID for cleanup on disconnect. */
   xvfbPid?: number;
   xvfbStartTime?: string;
@@ -215,37 +218,48 @@ function readState(): ServerState | null {
 
 // isProcessAlive is imported from ./error-handling
 
-/**
- * HTTP health check — definitive proof the server is alive and responsive.
- * Used in all polling loops instead of isProcessAlive() (which is slow on Windows).
- */
-export async function isServerHealthy(port: number, timeoutMs = 2000): Promise<boolean> {
-  try {
-    const resp = await fetch(`http://127.0.0.1:${port}/health`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!resp.ok) return false;
-    const health = await resp.json() as any;
-    return health.status === 'healthy';
-  } catch {
-    return false;
-  }
-}
+/** Client timeout for one GET /health. Must stay above the daemon's active-tab
+ * probe (TAB_PROBE_TIMEOUT_MS in browser-manager.ts): when the two were equal,
+ * the CLI aborted just before a busy tab's reply arrived and could not tell a
+ * busy tab from a hung daemon (#3247). */
+export const HEALTH_REQUEST_TIMEOUT_MS = 2000;
 
-/** Best-effort tab count via GET /health (no auth, bounded). Returns null
- * when the daemon doesn't answer in time or predates the `tabs` field —
- * callers degrade to a countless phrasing, never block on this. */
-async function fetchDaemonTabCount(port: number, timeoutMs = 2000): Promise<number | null> {
+/** GET /health (no auth, bounded). Null when the daemon doesn't answer in
+ * time or the reply is not a 200. */
+async function fetchDaemonHealth(port: number, timeoutMs = HEALTH_REQUEST_TIMEOUT_MS): Promise<Record<string, unknown> | null> {
   try {
     const resp = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!resp.ok) return null;
-    const health = await resp.json() as any;
-    return typeof health.tabs === 'number' ? health.tabs : null;
+    return await resp.json() as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+/**
+ * HTTP health check — definitive proof the server is alive and responsive.
+ * Used in all polling loops instead of isProcessAlive() (which is slow on Windows).
+ * `status` is daemon liveness only; a busy active tab does not fail it (#3247).
+ */
+export async function isServerHealthy(port: number, timeoutMs = HEALTH_REQUEST_TIMEOUT_MS): Promise<boolean> {
+  return (await fetchDaemonHealth(port, timeoutMs))?.status === 'healthy';
+}
+
+/** Best-effort tab count via GET /health. Returns null when the daemon
+ * doesn't answer in time or predates the `tabs` field — callers degrade to a
+ * countless phrasing, never block on this. */
+async function fetchDaemonTabCount(port: number): Promise<number | null> {
+  const tabs = (await fetchDaemonHealth(port))?.tabs;
+  return typeof tabs === 'number' ? tabs : null;
+}
+
+/** The active tab's id when /health reports its main thread as not
+ * responding (#3247), else null — including daemons that predate the field. */
+async function fetchBusyActiveTab(port: number): Promise<number | null> {
+  const activeTab = (await fetchDaemonHealth(port))?.activeTab as { id?: unknown; responsive?: unknown } | null | undefined;
+  return activeTab?.responsive === false && typeof activeTab.id === 'number' ? activeTab.id : null;
 }
 
 // ─── Process Management ─────────────────────────────────────────
@@ -449,7 +463,7 @@ async function probeHealthWithBackoff(
     await Bun.sleep(intervalMs);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) return false;
-    if (await isServerHealthy(port, Math.min(2000, remainingMs))) return true;
+    if (await isServerHealthy(port, Math.min(HEALTH_REQUEST_TIMEOUT_MS, remainingMs))) return true;
   }
 }
 
@@ -502,24 +516,29 @@ function reportDaemonBusyAndExit(pid: number): never {
  * #915 refusal for a daemon whose proxy differs from this session's when
  * either side came from the environment: names the variable, the two
  * settings and the remedies. Null leaves the --proxy/--headed refusals as they
- * were (a headed difference always uses those).
+ * were (a headed difference always uses those). The BROWSE_PROXY_URL=direct
+ * remedy is offered only where it matches a proxy-less daemon's hash: on
+ * Linux, or when that daemon was started with it (#3440); elsewhere following
+ * it would be refused again.
  */
-export function proxyMismatchLines(flags: GlobalFlags, state: ServerState, env: NodeJS.ProcessEnv = process.env): string[] | null {
+export function proxyMismatchLines(flags: GlobalFlags, state: ServerState, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string[] | null {
   if ((state.mode === 'headed') !== flags.headed) return null;
   const fromEnv = (source?: string | null) => !!source && source !== '--proxy';
   const optedOut = env.BROWSE_PROXY_URL === 'direct' && !flags.proxyUrl;
-  if (!fromEnv(flags.proxySource) && !fromEnv(state.proxySource) && !flags.proxyWarning && !optedOut) return null;
+  if (!fromEnv(flags.proxySource) && !fromEnv(state.proxySource) && !flags.proxyWarning && !optedOut && !state.proxyDirect) return null;
   const describe = (proxy: string | undefined, source: string | null | undefined, bypass: string | null | undefined) =>
     proxy ? `proxy ${proxy} from ${source ?? 'an older browse'}${bypass ? `, bypassing ${bypass}` : ''}` : 'no proxy';
-  const daemon = describe(state.proxy, state.proxySource, state.proxyBypass);
+  const daemon = describe(state.proxy, state.proxySource, state.proxyBypass) + (state.proxyDirect ? ' (BROWSE_PROXY_URL=direct)' : '');
   const session = flags.proxyUrl
     ? describe(flags.redactedProxyUrl, flags.proxySource, flags.proxyBypass)
     : `no proxy${optedOut ? ' (BROWSE_PROXY_URL=direct)' : flags.proxyWarning ? ' (a proxy variable did not parse)' : ''}`;
   const sameProxy = !!state.proxy && state.proxy === (flags.proxyUrl ? flags.redactedProxyUrl : undefined);
   const variable = sameProxy ? 'NO_PROXY' : fromEnv(flags.proxySource) ? flags.proxySource : state.proxySource ?? 'BROWSE_PROXY_URL';
   const remedies = [`run 'browse stop' to restart the daemon with this session's proxy settings`];
-  if (!state.proxy) remedies.push(`or set BROWSE_PROXY_URL=direct to use the running daemon without a proxy`);
-  else remedies.push(`or run this session with the daemon's ${variable} so the settings match`);
+  if (state.proxy) remedies.push(`or run this session with the daemon's ${variable} so the settings match`);
+  else if (flags.explicitDirect && !state.proxyDirect) remedies.push(`or unset BROWSE_PROXY_URL to use the running daemon with the system proxy settings`);
+  else if (state.proxyDirect || platform === 'linux') remedies.push(`or set BROWSE_PROXY_URL=direct to use the running daemon without a proxy`);
+  else remedies.push(`or unset ${variable} to use the running daemon with the system proxy settings`);
   return [
     `the running browse daemon was started with different proxy settings (${variable} differs), so it was not reused.`,
     `  daemon:  ${daemon}`,
@@ -529,21 +548,33 @@ export function proxyMismatchLines(flags: GlobalFlags, state: ServerState, env: 
   ];
 }
 
-/** The server env for this invocation's resolved proxy (#915); empty when direct. */
-function proxyServerEnv(flags: Partial<Pick<GlobalFlags, 'proxyUrl' | 'proxySource' | 'proxyBypass'>> | null | undefined): Record<string, string> {
-  if (!flags?.proxyUrl) return {};
+/**
+ * The server env for this invocation's resolved proxy (#915); empty when
+ * direct, except BROWSE_PROXY_URL=direct where that bypasses the system proxy
+ * settings (#3440), so a daemon start or auto-restart carries the opt-out the
+ * session's hash was computed from. The resolved URL already carries any
+ * BROWSE_PROXY_USER/PASS, so those are blanked for the daemon, which inherits
+ * this environment and would otherwise see the creds twice (#3457).
+ */
+function proxyServerEnv(flags: Partial<Pick<GlobalFlags, 'proxyUrl' | 'proxySource' | 'proxyBypass' | 'explicitDirect'>> | null | undefined): Record<string, string> {
+  if (!flags?.proxyUrl) return flags?.explicitDirect ? { BROWSE_PROXY_URL: 'direct' } : {};
   return {
     BROWSE_PROXY_URL: flags.proxyUrl,
+    BROWSE_PROXY_USER: '',
+    BROWSE_PROXY_PASS: '',
     ...(flags.proxySource ? { BROWSE_PROXY_SOURCE: flags.proxySource } : {}),
     ...(flags.proxyBypass ? { BROWSE_PROXY_BYPASS: flags.proxyBypass } : {}),
   };
 }
 
 /**
- * Build the env for an auto-restart after a crash. headed/proxy/configHash are
+ * Build the env for an auto-restart after a crash. headed and configHash are
  * reapplied from THIS invocation OR the persisted server state, so a restart
  * triggered by a plain command (goto/status, no --headed flag) never silently
- * downgrades a headed session to headless (#1781). Pure + exported for tests.
+ * downgrades a headed session to headless (#1781). The proxy settings,
+ * including the explicit direct opt-out, come only from this invocation's
+ * flags, which the config-hash gate already matched against that daemon.
+ * Pure + exported for tests.
  */
 export function buildRestartEnv(
   globalFlags: GlobalFlags | null | undefined,
@@ -562,7 +593,7 @@ export function buildRestartEnv(
  * the same port, watchdog setting, proxy and config hash. Pure + exported for tests.
  */
 export function buildHeadedServerEnv(
-  globalFlags: Pick<GlobalFlags, 'proxyUrl' | 'configHash'> & Partial<Pick<GlobalFlags, 'proxySource' | 'proxyBypass'>>,
+  globalFlags: Pick<GlobalFlags, 'proxyUrl' | 'configHash' | 'explicitDirect'> & Partial<Pick<GlobalFlags, 'proxySource' | 'proxyBypass'>>,
 ): Record<string, string> {
   return {
     BROWSE_HEADED: '1',
@@ -953,8 +984,8 @@ async function ensureServer(flags?: GlobalFlags): Promise<ServerState> {
     // Same path: existing daemon is plain (no flags) but caller passes
     // --proxy/--headed. Refuse for the same reason — apply explicitly via
     // disconnect+reconnect.
-    if (desiredHash && !state.configHash && (flags?.proxyUrl || flags?.headed)) {
-      console.error(`[browse] existing daemon was started without --proxy/--headed.`);
+    if (desiredHash && !state.configHash && (flags?.proxyUrl || flags?.headed || flags?.explicitDirect)) {
+      console.error(`[browse] existing daemon was started without --proxy/--headed${flags?.explicitDirect ? ' or BROWSE_PROXY_URL=direct' : ''}.`);
       console.error(`[browse] run 'browse disconnect' first to apply new flags.`);
       process.exit(1);
     }
@@ -1063,16 +1094,44 @@ export function extractTabId(args: string[]): { tabId: number | undefined; args:
   return { tabId, args: stripped };
 }
 
+/** Did this fetch fail because its AbortSignal fired? Bun rejects an
+ * AbortSignal.timeout() fetch with TimeoutError, not AbortError — matching
+ * only AbortError left the timeout reports below unreachable. */
+export function isFetchTimeout(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null)?.name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
+/**
+ * What to print when a command's reply did not arrive within `timeoutMs`.
+ * #1781: a timeout on a heavy page usually means busy, not dead, so a live
+ * daemon is never restarted here. #3247: when /health names the active tab
+ * as not responding, say which tab and the commands that leave it without
+ * losing the session.
+ */
+export async function commandTimeoutReport(state: { pid: number; port: number } | null, timeoutMs: number): Promise<string[]> {
+  const after = `[browse] Command timed out after ${timeoutMs / 1000}s`;
+  if (!state?.pid || !isProcessAlive(state.pid)) return [after];
+  const busyTab = await fetchBusyActiveTab(state.port);
+  if (busyTab === null) return [`${after} (server still alive — busy, not restarting). Retry, or raise load.`];
+  return [
+    `${after}: tab ${busyTab} is not responding (its main thread is busy).`,
+    `[browse] The daemon, its other tabs and cookies still work: switch with 'browse tab <id>', close this one with 'browse closetab ${busyTab}', or retry once the page settles.`,
+  ];
+}
+
 // ─── Command Dispatch ──────────────────────────────────────────
 export async function sendCommand(state: ServerState, command: string, args: string[], retries = 0): Promise<void> {
-  // Precedence: CLI --tab-id flag > BROWSE_TAB env var.
+  // Precedence: CLI --tab-id flag > BROWSE_TAB env var > --session > BROWSE_SESSION > agent harness.
   // make-pdf always passes --tab-id; human users typically rely on BROWSE_TAB
   // or the active tab.
   const extracted = extractTabId(args);
-  args = extracted.args;
+  const sessionFlag = extractSession(extracted.args);
   const envTab = process.env.BROWSE_TAB;
   const tabId = extracted.tabId ?? (envTab ? parseInt(envTab, 10) : undefined);
-  const body = JSON.stringify({ command, args, ...(tabId !== undefined && !isNaN(tabId) ? { tabId } : {}) });
+  const hasTab = tabId !== undefined && !isNaN(tabId);
+  const { session, auto } = chooseSession({ hasTab, flag: sessionFlag.session, env: process.env, parentPid: process.ppid, lookup: systemProcLookup() });
+  const body = JSON.stringify({ command, args: sessionFlag.args, ...(hasTab ? { tabId } : {}), ...(session ? { session, ...(auto ? { sessionAuto: true } : {}) } : {}) });
   const timeoutMs = command === 'cookie-import-browser' ? 90_000 : 30_000;
 
   try {
@@ -1114,19 +1173,14 @@ export async function sendCommand(state: ServerState, command: string, args: str
       process.exit(1);
     }
   } catch (err: any) {
-    if (command === 'cookie-import-browser' && (['AbortError', 'TimeoutError'].includes(err.name)
+    if (command === 'cookie-import-browser' && (isFetchTimeout(err)
       || ['ECONNREFUSED', 'ECONNRESET'].includes(err.code) || err.message?.includes('fetch failed'))) {
       throw new Error('Cookie import response was lost or timed out. It may have partially completed; inspect the destination before retrying manually. The command was not replayed.');
     }
-    if (err.name === 'AbortError') {
-      // #1781: a 30s timeout on a heavy page usually means busy, not dead.
-      // Don't kill a live server (that's what triggered the crash-loop) — report
-      // and exit so the user can retry rather than losing their (headed) window.
-      const ts = readState();
-      const alive = ts?.pid ? isProcessAlive(ts.pid) : false;
-      console.error(alive
-        ? '[browse] Command timed out after 30s (server still alive — busy, not restarting). Retry, or raise load.'
-        : '[browse] Command timed out after 30s');
+    if (isFetchTimeout(err)) {
+      // Report and exit so the user can retry rather than losing their
+      // (headed) window — killing a live server triggered the crash-loop.
+      for (const line of await commandTimeoutReport(readState(), timeoutMs)) console.error(line);
       process.exit(1);
     }
     // Connection error — server may have crashed, OR may just be busy.
@@ -1344,9 +1398,11 @@ export interface GlobalFlags {
   proxyBypass: string | null;
   /** Why a standard proxy variable was ignored, printed when a server starts. */
   proxyWarning: string | null;
+  /** BROWSE_PROXY_URL=direct on a platform where it bypasses the system proxy settings (#3440). */
+  explicitDirect: boolean;
   /** Whether --headed was passed. */
   headed: boolean;
-  /** Hash of (proxy + headed) for daemon-mismatch check. */
+  /** Hash of (proxy + headed + explicit direct) for daemon-mismatch check. */
   configHash: string;
   /** Redacted form of proxyUrl, safe for logs. */
   redactedProxyUrl: string;
@@ -1362,7 +1418,7 @@ export interface GlobalFlags {
  *
  * Exported for unit tests.
  */
-export function extractGlobalFlags(rawArgs: string[], env: NodeJS.ProcessEnv): GlobalFlags {
+export function extractGlobalFlags(rawArgs: string[], env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): GlobalFlags {
   const out: string[] = [];
   let proxyUrl: string | null = null;
   let headed = false;
@@ -1395,6 +1451,7 @@ export function extractGlobalFlags(rawArgs: string[], env: NodeJS.ProcessEnv): G
   // creds embedded (server reads BROWSE_PROXY_URL from env, which passes to
   // the child without ps-aux exposure).
   const proxy = resolveProxy(proxyUrl, env);
+  const direct = !proxy.url && explicitDirect(env, platform);
 
   return {
     args: out,
@@ -1402,8 +1459,9 @@ export function extractGlobalFlags(rawArgs: string[], env: NodeJS.ProcessEnv): G
     proxySource: proxy.source,
     proxyBypass: proxy.bypass,
     proxyWarning: proxy.warning,
+    explicitDirect: direct,
     headed,
-    configHash: computeConfigHash({ proxyUrl: proxy.url, headed, noProxyRules: proxy.noProxyRules }),
+    configHash: computeConfigHash({ proxyUrl: proxy.url, headed, noProxyRules: proxy.noProxyRules, explicitDirect: direct }),
     redactedProxyUrl: redactProxyUrl(proxy.url),
     forceRestart,
   };
@@ -1834,6 +1892,10 @@ Inspection:     js <expr> | eval <file> | css <sel> <prop> | attrs <sel>
                 is <prop> <sel> (visible|hidden|enabled|disabled|checked|editable|focused)
 Visual:         screenshot [--viewport] [--clip x,y,w,h] [@ref|sel] [path]
                 pdf [path] | responsive [prefix]
+Touch:          device ["<phone>" [--landscape] | off | --list]  (this tab only)
+                tap <@ref|sel|x y> [--hold <ms>] | pinch <@ref|sel|x y> <scale>
+                swipe <@ref|sel|x y> <up|down|left|right> [--distance <px>] [--ms <n>]
+                touch [down|move <finger 0-9> <x> <y> | up <finger> | cancel]
 Snapshot:       snapshot [-i] [-c] [-d N] [-s sel] [-D] [-a] [-o path] [-C]
                 -D/--diff: diff against previous snapshot
                 -a/--annotate: annotated screenshot with ref labels
@@ -1841,6 +1903,8 @@ Snapshot:       snapshot [-i] [-c] [-d N] [-s sel] [-D] [-a] [-o path] [-C]
 Compare:        diff <url1> <url2>
 Multi-step:     chain (reads JSON from stdin)
 Tabs:           tabs | tab <id> | newtab [url] | closetab [id]
+                --session <name> | BROWSE_SESSION=<name>: this caller's own tab
+                (agents get one per agent process; BROWSE_SESSION= turns it off)
 Server:         status | cookie <n>=<v> | header <n>:<v>
                 useragent <str> | stop | restart
                 profiles [list] | profiles prune [--days N]  (per-project headed profiles)

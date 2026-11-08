@@ -47,10 +47,10 @@ fi`;
 /** Caller-owned workflow role. Only enumerated plan-review generators pass it; everything else stays no-role. */
 export type OutsideRole = 'plan-review';
 
-export function outsideVoicePreflight(ctx: TemplateContext, opts: { disabledBehavior: 'skip-all' | 'codex-only' | 'opt-in'; nativeReview?: boolean; role?: OutsideRole }): string {
+export function outsideVoicePreflight(ctx: TemplateContext, opts: { disabledBehavior: 'skip-all' | 'codex-only' | 'opt-in'; nativeReview?: boolean; role?: OutsideRole; nativeDispatched?: boolean }): string {
   const v = outsideVoiceFor(ctx);
   if (v.id === 'codex' && (opts.disabledBehavior === 'codex-only' || (opts.disabledBehavior === 'skip-all' && !opts.role))) {
-    let preflight = outsideVoiceLabels(ctx, codexPreflight({ disabledBehavior: opts.disabledBehavior, nativeReview: opts.nativeReview, role: !!opts.role }))
+    let preflight = outsideVoiceLabels(ctx, codexPreflight({ disabledBehavior: opts.disabledBehavior, nativeReview: opts.nativeReview, role: !!opts.role, nativeDispatched: opts.nativeDispatched }))
       .replace('```bash\n', `\`\`\`bash\n${runtimeRootPrelude(ctx)}\n`);
     if (['plan-eng-review', 'plan-ceo-review'].includes(ctx.skillName)) {
       preflight = preflight.replace("follow the workflow's native-review instructions below",
@@ -63,7 +63,7 @@ export function outsideVoicePreflight(ctx: TemplateContext, opts: { disabledBeha
   const bin = toShellPath(ctx.paths.binDir);
   const probe = v.id === 'codex'
     ? 'command -v codex >/dev/null 2>&1'
-    : `bun -e 'const {resolveClaudeCommand} = await import(process.argv[1]); process.exit(resolveClaudeCommand() ? 0 : 1)' "${bin}/../lib/claude-bin.ts"`;
+    : `bun --no-env-file --config=/dev/null -e 'const {resolveClaudeCommand} = await import(process.argv[1]); process.exit(resolveClaudeCommand() ? 0 : 1)' "${bin}/../lib/claude-bin.ts"`;
   // The send binaries enforce codex_reviews (consent_missing); this read only spares a doomed call.
   // An unreadable config exits 2 with its fix on stderr and reads as disabled.
   const config = `if ! _OUTSIDE_CFG=$("${bin}/gstack-config" get --stored codex_reviews) || [ "$_OUTSIDE_CFG" = disabled ]; then`;
@@ -82,7 +82,7 @@ ${readiness}
 
 ${ctx.skillName === 'ship' && opts.disabledBehavior === 'opt-in' ? `Ship attempts this optional design check when frontend review applies and \`codex_reviews\` allows it.
 Unset means the default, enabled; the first send prints a one-time notice.
-\`CODEX_MODE\` names the provider here, **${v.label}**.` : `The historical \`CODEX_MODE\` variable describes **${v.label}** availability here.`}${opts.disabledBehavior === 'opt-in' ? " `CODEX_MODE: disabled` or a send's `consent_missing` line: `codex_reviews` is off or unreadable; do not ask; record `outside_status: disabled`." : ''} ${opts.role ? 'The invocation checks auth and the [policy](https://github.com/garrytan/gstack/blob/main/docs/model-policy.md) plan-review model.' : 'Authentication and configured model validity are checked by the actual invocation, without overriding either.'} Missing/broken CLI: install or repair ${v.label}; authentication failure: run \`${v.id === 'codex' ? 'codex login' : 'claude auth login'}\`. ${opts.disabledBehavior === 'skip-all' ? "Disabled ends this entire extra review step (so does a send's `consent_missing` line), including the native fallback; record outside_status: disabled and continue after the section. Disabled is not an unavailable provider and never triggers a replacement reviewer." : opts.disabledBehavior === 'codex-only' ? "Disabled skips only the outside CLI (so does a send's `consent_missing` line); retain the native pass." : ctx.skillName === 'ship' ? '' : 'Otherwise honor this caller’s opt-in/skip choice.'} ${opts.disabledBehavior === 'skip-all' ? 'Provider failure is missing outside coverage; follow the caller’s existing fallback only when reviews are enabled.' : opts.disabledBehavior === 'codex-only' ? 'Non-ready means missing outside coverage. Keep the required native pass without duplicating it.' : 'Any non-ready outcome is missing outside coverage; follow the caller’s existing fallback.'} Never substitute another external provider.`;
+\`CODEX_MODE\` names the provider here, **${v.label}**.` : `The historical \`CODEX_MODE\` variable describes **${v.label}** availability here.`}${opts.disabledBehavior === 'opt-in' ? " `CODEX_MODE: disabled` or a send's `consent_missing` line: `codex_reviews` is off or unreadable; do not ask; record `outside_status: disabled`." : ''} ${opts.role ? 'The invocation checks auth and the [policy](https://github.com/garrytan/gstack/blob/main/docs/model-policy.md) plan-review model.' : 'Authentication and configured model validity are checked by the actual invocation, without overriding either.'} Missing/broken CLI: install or repair ${v.label}; authentication failure: run \`${v.id === 'codex' ? 'codex login' : 'claude auth login'}\`. ${opts.disabledBehavior === 'skip-all' ? "Disabled ends this entire extra review step (so does a send's `consent_missing` line), including the native fallback; record outside_status: disabled and continue after the section. Disabled is not an unavailable provider and never triggers a replacement reviewer." : opts.disabledBehavior === 'codex-only' ? `Disabled skips only the outside CLI (so does a send's \`consent_missing\` line)${opts.nativeDispatched ? '.' : '; retain the native pass.'}` : ctx.skillName === 'ship' ? '' : 'Otherwise honor this caller’s opt-in/skip choice.'} ${opts.disabledBehavior === 'skip-all' ? 'Provider failure is missing outside coverage; follow the caller’s existing fallback only when reviews are enabled.' : opts.disabledBehavior === 'codex-only' ? `Non-ready means missing outside coverage. ${opts.nativeDispatched ? 'The native pass follows its own DISPATCH line.' : 'Keep the required native pass without duplicating it.'}` : 'Any non-ready outcome is missing outside coverage; follow the caller’s existing fallback.'} Never substitute another external provider.`;
 }
 
 export interface OutsideCommandOptions {
@@ -97,7 +97,7 @@ export interface OutsideCommandOptions {
   reasoningEffort?: 'high' | 'medium';
   /** Creative proposals retain the recommendation gate with task-specific wording. */
   purpose?: 'design-direction';
-  nativeAlreadyRequired?: boolean;
+  nativeAlreadyRequired?: boolean | 'dispatched';
   /** Resolve the plan-review policy once in the invocation shell and bind it through probe and dispatch. */
   role?: OutsideRole;
 }
@@ -131,7 +131,7 @@ ${opts.structuredBase ? 'cat "$_OUTSIDE_TMP/text"' : 'cat "$_OUTSIDE_TMP/text" 2
 "${bin}/gstack-claude-code" --cwd "$_REPO_ROOT" --access ${opts.access ?? 'none'} --timeout-ms ${opts.timeoutMs}${opts.role ? ` --role ${opts.role}` : ''} <"$_OUTSIDE_INPUT" >"$_OUTSIDE_TMP/result.json" || _OUTSIDE_EXIT=$?
 # Preserve session/usage/modelUsage from this JSON; multiple models have no invented primary.
 cat "$_OUTSIDE_TMP/result.json" || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }
-bun -e 'const r=await Bun.file(process.argv[1]).json(); await Bun.write(process.argv[3],typeof r.stderr==="string"?r.stderr:""); if(r.status!=="completed" || typeof r.result!=="string" || !r.result.trim()) process.exit(1); await Bun.write(process.argv[2],r.result)' "$_OUTSIDE_TMP/result.json" "$_OUTSIDE_TMP/text" "$_OUTSIDE_TMP/stderr" || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }`;
+bun --no-env-file --config=/dev/null -e 'const r=await Bun.file(process.argv[1]).json(); await Bun.write(process.argv[3],typeof r.stderr==="string"?r.stderr:""); if(r.status!=="completed" || typeof r.result!=="string" || !r.result.trim()) process.exit(1); await Bun.write(process.argv[2],r.result)' "$_OUTSIDE_TMP/result.json" "$_OUTSIDE_TMP/text" "$_OUTSIDE_TMP/stderr" || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }`;
   return `${outsideVoiceGuard(ctx)}
 ${runtimeRootPrelude(ctx)}
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo 'ERROR: not in a git repo' >&2; exit 1; }
@@ -149,7 +149,7 @@ ${v.id === 'codex' && ctx.skillName === 'autoplan' ? `if [ "$_OUTSIDE_EXIT" -eq 
 fi` : ''}
 cat "$_OUTSIDE_TMP/stderr" >&2 || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }
 _OUTSIDE_RC=0
-bun "${root}/lib/outside-review-result.ts" --label '${v.label} outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" ${v.id === 'codex' && !opts.structuredBase ? '--events "$_OUTSIDE_TMP/events" ' : ''}${opts.purpose === 'design-direction' ? 'proposal' : opts.gate ?? 'review'} "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
+bun --no-env-file --config=/dev/null "${root}/lib/outside-review-result.ts" --label '${v.label} outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" ${v.id === 'codex' && !opts.structuredBase ? '--events "$_OUTSIDE_TMP/events" ' : ''}${opts.purpose === 'design-direction' ? 'proposal' : opts.gate ?? 'review'} "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
 ${v.id === 'claude-code' ? '[ "$_OUTSIDE_RC" -eq 1 ] || cat "$_OUTSIDE_TMP/text" || exit 1\n' : ''}case "$_OUTSIDE_RC" in
   0|3) ;;
   4) echo 'OUTSIDE_STATUS: unverified provider=${v.id} host=${ctx.host}'; exit 4 ;;
@@ -188,7 +188,7 @@ export function outsideVoiceInvocation(ctx: TemplateContext, requested: OutsideC
 ${outsideVoiceCommand(ctx, opts)}
 \`\`\`
 
-Use Bash \`timeout: ${gateMs}\`; show the full response in a \`tool-output\` fence. Require successful execution and valid markers. Refusal, empty/malformed output, missing ${planRecommendation ? 'Recommendation: <action> because <reason>' : opts.purpose === 'design-direction' ? 'Recommendation' : 'score/severity/completion'} markers, timeout or CLI failure means \`outside_status: unavailable\`. P0/P1 findings block like native ones; \`OUTSIDE_STATUS: unverified\` is missing coverage. ${opts.purpose === 'design-direction' ? 'Continue completed proposals; native completion does not count as outside coverage.' : opts.nativeAlreadyRequired ? 'Retain the required native pass without duplicating it; it cannot complete outside coverage.' : "Use the caller's fallback; missing coverage is never clean/PASS."} ${nativeStructured ? 'Scratch cleanup is automatic.' : 'After either outcome, delete only your private prompt; scratch cleanup is automatic.'}`;
+Use Bash \`timeout: ${gateMs}\`; show the full response in a \`tool-output\` fence. Require successful execution and valid markers. Refusal, empty/malformed output, missing ${planRecommendation ? 'Recommendation: <action> because <reason>' : opts.purpose === 'design-direction' ? 'Recommendation' : 'score/severity/completion'} markers, timeout or CLI failure means \`outside_status: unavailable\`. P0/P1 findings block like native ones; \`OUTSIDE_STATUS: unverified\` is missing coverage. ${opts.purpose === 'design-direction' ? 'Continue completed proposals; native completion does not count as outside coverage.' : opts.nativeAlreadyRequired === 'dispatched' ? 'A dispatched native pass runs once either way; outside output cannot complete it.' : opts.nativeAlreadyRequired ? 'Retain the required native pass without duplicating it; it cannot complete outside coverage.' : "Use the caller's fallback; missing coverage is never clean/PASS."} ${nativeStructured ? 'Scratch cleanup is automatic.' : 'After either outcome, delete only your private prompt; scratch cleanup is automatic.'}`;
 }
 
 /**

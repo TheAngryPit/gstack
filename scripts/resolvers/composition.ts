@@ -77,10 +77,9 @@ export function generateInvokeSkill(ctx: TemplateContext, args?: string[]): stri
   const DEFAULT_SKIPS = [
     'Preamble (run first)',
     'AskUserQuestion Format',
-    'Completeness Principle — Boil the Ocean',
+    'Shared preamble (load first)',
     'Search Before Building',
     'Contributor Mode',
-    'Completion Status Protocol',
     'Telemetry (run last)',
     'Step 0: Detect platform and base branch',
     'Review Readiness Dashboard',
@@ -134,6 +133,6 @@ export function generateAutoplanReviewFile(ctx: TemplateContext, args?: string[]
 export function generateAutoplanSnapshotTool(ctx: TemplateContext): string {
   return `\`\`\`bash
 ${runtimeRootPrelude(ctx)}
-bun -e 'console.log(require("fs").realpathSync(process.argv[1]))' "${toShellPath(ctx.paths.binDir)}/gstack-autoplan-snapshot.ts"
+bun --no-env-file --config=/dev/null -e 'console.log(require("fs").realpathSync(process.argv[1]))' "${toShellPath(ctx.paths.binDir)}/gstack-autoplan-snapshot.ts"
 \`\`\``;
 }

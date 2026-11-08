@@ -81,6 +81,12 @@ export interface HostConfig {
     descriptionLimit?: number | null;
     /** What to do when description exceeds limit. Default: 'error'. */
     descriptionLimitBehavior?: 'error' | 'truncate' | 'warn';
+    /**
+     * Put a trigger-first lead of at most this many chars on the first line of
+     * the description (lib/skill-triggers.ts withTriggerLead), for hosts whose
+     * skills index shows only the start of a description.
+     */
+    descriptionLead?: number;
     /** Additional frontmatter fields to inject (host-wide). */
     extraFields?: Record<string, unknown>;
     /**
@@ -97,7 +103,7 @@ export interface HostConfig {
 
   // --- Generation ---
   generation: {
-    /** Whether to create a metadata file alongside skills (always openai.yaml; gen-skill-docs hardcodes the format). */
+    /** Whether to create a metadata file alongside skills (always openai.yaml; gen-skill-docs hardcodes the format and reads the template's `codex_default_prompt:` key for its default_prompt). */
     generateMetadata: boolean;
     /** Skill directories to exclude from generation for this host. */
     skipSkills?: string[];
@@ -125,12 +131,11 @@ export interface HostConfig {
     /** How skills are linked into the host dir. */
     linkingStrategy: 'real-dir-symlink' | 'symlink-generated';
     /**
-     * Instruction-only fallback tier: a committed rules digest this host's
-     * users can hand-copy when there is no full install arm. Delivery is
-     * print-path + user-performed copy ONLY — setup must never write or
-     * overwrite a user's own AGENTS.md. See scripts/gen-agents-digest.ts.
+     * 'harness': setup's arm for this host is `gstack-harness register <host>`
+     * (lib/harness-register.ts): the host's render copied into the harness's own
+     * skills folder with an ownership ledger, not linked into a host skills dir.
      */
-    instructionTier?: { rulesFile: string };
+    registration?: 'harness';
   };
 
   // --- Host-Specific Behavioral Config ---
@@ -140,6 +145,17 @@ export interface HostConfig {
   learningsMode?: 'full' | 'basic';
   /** Anti-prompt-injection boundary instruction for cross-model invocations. */
   boundaryInstruction?: string;
+
+  // --- Session transcripts ---
+  /**
+   * Where this host keeps its own chat transcripts on disk, read by
+   * /context-restore's no-checkpoint fallback (sections/transcripts.md).
+   * `root` is the path pattern shown to the user; `layout` says how the
+   * current workspace's files are told apart from another project's. Absent:
+   * the host declares no transcript store, and the skill says so and falls
+   * back to the shared record and git.
+   */
+  transcripts?: { root: string; layout: string };
 }
 
 // --- Validation ---
@@ -178,8 +194,8 @@ export function validateHostConfig(config: HostConfig, validResolverNames?: Read
     if (!['native', 'prose'].includes(caps.questions)) errors.push(`capabilities.questions must be 'native' or 'prose'`);
     if (!['enforced', 'advisory'].includes(caps.safetyHooks)) errors.push(`capabilities.safetyHooks must be 'enforced' or 'advisory'`);
   }
-  if (config.tier === 'instruction-only' && !config.install.instructionTier && config.name !== 'slate' && config.name !== 'gbrain') {
-    errors.push('instruction-only hosts must declare install.instructionTier (what setup tells the user to copy)');
+  if (config.install.registration === 'harness' && config.tier !== 'experimental') {
+    errors.push('install.registration harness needs tier experimental (setup registers it through gstack-harness)');
   }
   const modelError = validateModel(config.defaultModel);
   if (modelError) {

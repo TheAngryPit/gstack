@@ -13,6 +13,11 @@
  *      FULL format spec in its always-loaded `SKILL.md` skeleton, NOT only in a
  *      section. The preamble is always in context, so the format spec is present
  *      the instant ANY question fires — Step 0, mode select, or a review finding.
+ *      Since the shared-preamble hoist (GSTA-96) a tier 2+ skill's startup is its
+ *      SKILL.md plus the shared sections/preamble.md that its "load first" pointer
+ *      requires before the start command (test/helpers/skill-startup.ts; the
+ *      pointer's position and the hoist's no-change proof are in
+ *      test/preamble-hoist.test.ts).
  *   2. REGRESSION — a known roster of interactive skills MUST still ship the
  *      block. A botched carve that drops `{{PREAMBLE}}` from a skeleton fails
  *      here in milliseconds instead of surfacing as a garbled question weeks
@@ -28,6 +33,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { readSkillStartup, SHARED_PREAMBLE_FILE } from './helpers/skill-startup';
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -79,10 +85,13 @@ function discoverSkills(): Array<{ skill: string; skillMd: string; sectionsDir: 
     .filter(skill => fs.existsSync(path.join(ROOT, skill, 'SKILL.md')))
     .map(skill => {
       const sectionsDir = path.join(ROOT, skill, 'sections');
+      // Carved means a section beyond the shared preamble every tier 2+ skill ships.
+      const carved = fs.existsSync(sectionsDir)
+        && fs.readdirSync(sectionsDir).some(f => f.endsWith('.md') && f !== SHARED_PREAMBLE_FILE);
       return {
         skill,
         skillMd: path.join(ROOT, skill, 'SKILL.md'),
-        sectionsDir: fs.existsSync(sectionsDir) ? sectionsDir : null,
+        sectionsDir: carved ? sectionsDir : null,
       };
     });
 }
@@ -91,7 +100,7 @@ const skills = discoverSkills();
 /** A skill is "interactive" if its always-loaded SKILL.md ships the format
  * block. That is the population that must be fully compliant. */
 const interactive = skills.filter(s =>
-  /##\s*AskUserQuestion Format/i.test(fs.readFileSync(s.skillMd, 'utf-8')),
+  /##\s*AskUserQuestion Format/i.test(readSkillStartup(s.skillMd)),
 );
 
 /** Roster guard: these interactive skills MUST keep shipping the format block.
@@ -141,7 +150,7 @@ describe('AUQ format is always-loaded (token-reduction safety net)', () => {
 
   for (const { skill, skillMd } of interactive) {
     test(`${skill}: full AUQ format spec present in always-loaded SKILL.md`, () => {
-      const body = fs.readFileSync(skillMd, 'utf-8');
+      const body = readSkillStartup(skillMd);
       const gaps = MANDATORY.filter(m => !m.re.test(body));
       if (gaps.length > 0) {
         throw new Error(
@@ -160,7 +169,7 @@ describe('AUQ format is always-loaded (token-reduction safety net)', () => {
   // never render AUQ format by design, so they have nothing to guard — but a
   // tier≥2 carve that wrongly moved the block into a section still trips here.
   const shipsAuqInUnion = (s: { skillMd: string; sectionsDir: string | null }): boolean => {
-    let union = fs.readFileSync(s.skillMd, 'utf-8');
+    let union = readSkillStartup(s.skillMd);
     if (s.sectionsDir) {
       for (const f of fs.readdirSync(s.sectionsDir).filter(f => f.endsWith('.md') && !f.endsWith('.md.tmpl'))) {
         union += '\n' + fs.readFileSync(path.join(s.sectionsDir, f), 'utf-8');
@@ -170,12 +179,10 @@ describe('AUQ format is always-loaded (token-reduction safety net)', () => {
   };
   for (const { skill, skillMd, sectionsDir } of skills.filter(s => s.sectionsDir && shipsAuqInUnion(s))) {
     test(`${skill} (carved): AUQ format block lives in the skeleton, not only sections/`, () => {
-      const body = fs.readFileSync(skillMd, 'utf-8');
+      const body = readSkillStartup(skillMd);
       expect(body).toMatch(/##\s*AskUserQuestion Format/i);
       expect(body).toMatch(/ELI10\s*:/i);
       expect(body).toMatch(/Recommendation\s*:/i);
-      // sanity: confirm there really is a section dir we're guarding against
-      expect(fs.readdirSync(sectionsDir!).some(f => f.endsWith('.md'))).toBe(true);
     });
   }
 
@@ -187,7 +194,7 @@ describe('AUQ format is always-loaded (token-reduction safety net)', () => {
       if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
         throw new Error(`${skill}/SKILL.md not found — roster is stale`);
       }
-      let union = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf-8');
+      let union = readSkillStartup(path.join(skillDir, 'SKILL.md'));
       const secDir = path.join(skillDir, 'sections');
       if (fs.existsSync(secDir)) {
         for (const f of fs.readdirSync(secDir).filter(f => f.endsWith('.md') && !f.endsWith('.md.tmpl'))) {

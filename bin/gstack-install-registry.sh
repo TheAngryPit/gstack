@@ -33,11 +33,13 @@
 # (#3084): print the commands that move it out first and return 0. A symlinked
 # ~/.claude/skills/gstack that points at SRC becomes the checkout itself.
 # Kiro writes its runtime files into ROOT in place, which would link the
-# checkout into itself, so it counts too. Claude installs in place from the
-# checkout, and a ROOT that is a symlink is replaced as a link: those return 1.
+# checkout into itself, so it counts too. Claude and the harness hosts
+# (OpenClaw, Hermes: gstack-harness copies skills that call the checkout) run
+# in place from the checkout, and a ROOT that is a symlink is replaced as a
+# link: those return 1.
 gstack_install_move_hint() {
   local src="$1" host="$2" root="$3" claude_link="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/gstack"
-  [ "$host" = claude ] && return 1
+  case "$host" in claude|openclaw|hermes) return 1 ;; esac
   [ -L "$root" ] && return 1
   command -v gstack_path_within >/dev/null 2>&1 && gstack_path_within "$src" "$root" || return 1
   if [ -L "$claude_link" ] && gstack_path_same "$claude_link" "$src"; then
@@ -273,8 +275,8 @@ gstack_install_render_for() {
 gstack_host_tier() {
   case "$1" in
     claude) echo full ;;
-    codex|kiro|factory|opencode|cursor|copilot|agy) echo experimental ;;
-    slate|openclaw|hermes|gbrain) echo instruction-only ;;
+    codex|kiro|factory|opencode|cursor|copilot|agy|gemini|openclaw|hermes) echo experimental ;;
+    slate|gbrain) echo instruction-only ;;
     *) echo unknown ;;
   esac
 }
@@ -345,6 +347,7 @@ gstack_install_known_roots() {
   printf 'cursor\tglobal\t%s\t%s\n' "$HOME/.cursor/skills" "$HOME/.cursor/skills/gstack"
   printf 'copilot\tglobal\t%s\t%s\n' "$HOME/.copilot/skills" "$HOME/.copilot/skills/gstack"
   printf 'agy\tglobal\t%s\t%s\n' "$HOME/.gemini/antigravity-cli/skills" "$HOME/.gemini/antigravity-cli/skills/gstack"
+  printf 'gemini\tglobal\t%s\t%s\n' "$HOME/.gemini/skills" "$HOME/.gemini/skills/gstack"
   proj="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   if [ -n "$proj" ] && [ "$proj" != "$HOME" ]; then
     printf 'claude\tproject\t%s\t%s\n' "$proj/.claude/skills" "$proj/.claude/skills/gstack"

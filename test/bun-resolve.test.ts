@@ -3,7 +3,7 @@
  * bin/gstack-bun-version.sh and `resolveBun` / `launchRuntime` in
  * lib/pregate/runtime.ts must pick the same binary (by realpath) for the
  * GBRA-60 layout: the image's old Bun first on PATH, Bun 1.4.2 in
- * $BUN_INSTALL/bin, Bun 1.4.3 elsewhere, a project pinning 1.4.3 only through
+ * $BUN_INSTALL/bin, Bun 1.4.4 elsewhere, a project pinning 1.4.4 only through
  * a CI lane, an unpinned project and a directory outside any project. A file
  * carrying the shim marker is never returned, and a candidate is chosen only
  * when it satisfies every applicable pin.
@@ -41,7 +41,7 @@ function layout(opts: { storeVersions?: string[]; homeVersion?: string } = {}) {
   const pinned = path.join(base, 'gbrain');
   fs.mkdirSync(path.join(pinned, '.github/workflows'), { recursive: true });
   fs.writeFileSync(path.join(pinned, 'package.json'), '{ "name": "gbrain", "engines": { "bun": ">=1.4.0" } }\n');
-  fs.writeFileSync(path.join(pinned, '.github/workflows/ci.yml'), 'jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: 1.4.3\n');
+  fs.writeFileSync(path.join(pinned, '.github/workflows/ci.yml'), 'jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: 1.4.4\n');
   const unpinned = path.join(base, 'plain');
   fs.mkdirSync(unpinned);
   fs.writeFileSync(path.join(unpinned, 'package.json'), '{ "name": "plain" }\n');
@@ -74,25 +74,25 @@ function tsResolve(l: ReturnType<typeof layout>, project: string | null): string
 }
 
 describe('one Bun resolution contract, two twins', () => {
-  test('GBRA-60: 1.4.3 in the store, 1.4.2 in $BUN_INSTALL, a CI-lane pin of 1.4.3 — both twins pick the store 1.4.3 for the project and for an unpinned or outside directory', () => {
-    const l = layout({ storeVersions: ['1.4.3'] });
-    const store143 = path.join(bunStore(l.state), '1.4.3/bun');
-    const projectWant = `${store143} 1.4.3 ${process.platform === 'linux' ? 'pin' : 'default'}`;
-    for (const [project, want] of [[l.pinned, projectWant], [l.unpinned, `${store143} 1.4.3 default`], [null, `${store143} 1.4.3 default`]] as const) {
+  test('GBRA-60: 1.4.4 in the store, 1.4.2 in $BUN_INSTALL, a CI-lane pin of 1.4.4 — both twins pick the store 1.4.4 for the project and for an unpinned or outside directory', () => {
+    const l = layout({ storeVersions: ['1.4.4'] });
+    const store144 = path.join(bunStore(l.state), '1.4.4/bun');
+    const projectWant = `${store144} 1.4.4 ${process.platform === 'linux' ? 'pin' : 'default'}`;
+    for (const [project, want] of [[l.pinned, projectWant], [l.unpinned, `${store144} 1.4.4 default`], [null, `${store144} 1.4.4 default`]] as const) {
       expect(bashResolve(l, project)).toBe(want);
       expect(tsResolve(l, project)).toBe(want);
     }
     const lanes = launchRuntime(l.pinned, l.env);
-    expect(path.join(lanes.dir!, 'bun')).toBe(store143);
+    expect(path.join(lanes.dir!, 'bun')).toBe(store144);
     expect(lanes.verdict).toBe('skipped');
     expect(lanes.label).toContain('install verdict: not checked');
   });
 
-  test('1.4.2 in $BUN_INSTALL and 1.4.3 in ~/.bun/bin, nothing in the store: the pinned project skips the ineligible 1.4.2; unpinned directories take $BUN_INSTALL first', () => {
-    const l = layout({ homeVersion: '1.4.3' });
-    const home143 = path.join(l.home, '.bun/bin/bun');
+  test('1.4.2 in $BUN_INSTALL and 1.4.4 in ~/.bun/bin, nothing in the store: the pinned project skips the ineligible 1.4.2; unpinned directories take $BUN_INSTALL first', () => {
+    const l = layout({ homeVersion: '1.4.4' });
+    const home144 = path.join(l.home, '.bun/bin/bun');
     const bi142 = path.join(l.bunInstall, 'bin/bun');
-    const projectWant = process.platform === 'linux' ? `${home143} 1.4.3 home` : `${bi142} 1.4.2 BUN_INSTALL`;
+    const projectWant = process.platform === 'linux' ? `${home144} 1.4.4 home` : `${bi142} 1.4.2 BUN_INSTALL`;
     for (const [project, want] of [[l.pinned, projectWant], [l.unpinned, `${bi142} 1.4.2 BUN_INSTALL`], [null, `${bi142} 1.4.2 BUN_INSTALL`]] as const) {
       expect(bashResolve(l, project)).toBe(want);
       expect(tsResolve(l, project)).toBe(want);
@@ -108,20 +108,20 @@ describe('one Bun resolution contract, two twins', () => {
   });
 
   test('a symlinked candidate resolves to its target realpath in both twins (portable readlink loop, no realpath(1))', () => {
-    const l = layout({ storeVersions: ['1.4.3'] });
+    const l = layout({ storeVersions: ['1.4.4'] });
     const linkDir = path.join(l.base, 'links');
     fs.mkdirSync(linkDir);
-    fs.symlinkSync('../home/.gstack/runtimes/bun/1.4.3/bun', path.join(linkDir, 'bun'));
+    fs.symlinkSync('../home/.gstack/runtimes/bun/1.4.4/bun', path.join(linkDir, 'bun'));
     fs.rmSync(path.join(l.bunInstall, 'bin/bun'));
     const env = { ...l.env, GSTACK_STATE_ROOT: path.join(l.base, 'elsewhere'), PATH: `${linkDir}:${l.env.PATH}` };
-    const want = `${path.join(bunStore(l.state), '1.4.3/bun')} 1.4.3 PATH`;
+    const want = `${path.join(bunStore(l.state), '1.4.4/bun')} 1.4.4 PATH`;
     expect(bashResolve({ ...l, env, state: env.GSTACK_STATE_ROOT }, null)).toBe(want);
     expect(tsResolve({ ...l, env, state: env.GSTACK_STATE_ROOT }, null)).toBe(want);
   });
 
   // Integration item 8: the gstack checkout itself binds the 'none' verdict.
   test('launchRuntime on the gstack checkout reads the none verdict and launches its recorded Bun', () => {
-    const l = layout({ storeVersions: ['1.4.3'] });
+    const l = layout({ storeVersions: ['1.4.4'] });
     const { installVerdictPath } = require('../lib/install-verdict') as typeof import('../lib/install-verdict');
     const checkout = fs.realpathSync(ROOT);
     const file = installVerdictPath(checkout, l.state, null);
@@ -139,5 +139,34 @@ describe('one Bun resolution contract, two twins', () => {
     const viaLaunch = launchRuntime(ROOT, l.env);
     expect(viaLaunch.dir).toBe(launch);
     expect(viaLaunch.env.PATH?.split(path.delimiter)[0]).toBe(launch);
+  });
+
+  // GST-1233: a docs child's install replaced the shared verdict and republished the shared launch
+  // directory with its own Bun; the finish pregate admits from ship's own record and launches ship's Bun.
+  test("launchRuntime admits /ship from its own record when another workflow's install replaced the shared verdict, and never launches that install's Bun", () => {
+    const l = layout({ storeVersions: ['1.4.4'] });
+    const { installVerdictPath } = require('../lib/install-verdict') as typeof import('../lib/install-verdict');
+    const checkout = fs.realpathSync(ROOT);
+    const file = installVerdictPath(checkout, l.state, null);
+    const head = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000 }).stdout.trim();
+    const childBun = path.join(bunStore(l.state), '1.4.4/bun');
+    const launch = file.replace(/\.json$/, '.launch');
+    fs.mkdirSync(launch, { recursive: true });
+    fs.symlinkSync(childBun, path.join(launch, 'bun'));
+    const record = { schema_version: 2, checkout, project: '', head, pins_planning_only: false, ok: true, min_revision: '', launch_path: launch, time: '' };
+    fs.writeFileSync(file, JSON.stringify({ ...record, for: 'document-release', required: ['claude'], trailer: 'gstack: ok for=document-release', bun_path: fs.realpathSync(childBun), bun_version: '1.4.4' }));
+    const refused = launchRuntime(ROOT, l.env);
+    expect(refused.refusal).toMatchObject({ code: 'INSTALL_UNVERIFIED' });
+    expect(refused.refusal?.detail).toContain('certified for=document-release');
+    const own = file.replace(/\.json$/, '.for/ship.json');
+    fs.mkdirSync(path.dirname(own), { recursive: true });
+    fs.writeFileSync(own, JSON.stringify({ ...record, for: 'ship', required: ['claude', 'codex', 'patch'], trailer: 'gstack: ok for=ship', bun_path: REAL_BUN, bun_version: Bun.version }));
+    const r = launchRuntime(ROOT, l.env);
+    expect(r.refusal).toBeNull();
+    expect(r.verdict).toBe('ok');
+    expect(r.label).toBe(`bun ${Bun.version} at ${REAL_BUN} (recorded by the install verdict)`);
+    expect(r.dir).toBe(path.dirname(REAL_BUN));
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), ok: false, trailer: 'gstack: fail setup — ./setup failed' }));
+    expect(launchRuntime(ROOT, l.env).refusal?.detail).toBe('install verdict: the install verdict says: gstack: fail setup — ./setup failed');
   });
 });

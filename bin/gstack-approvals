@@ -1,0 +1,211 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-approvals — the per-thread approval record (capy/skill/gstack/captain.md).
+ *
+ *   gstack-approvals add --ask <text> --words <exact words> --by <who> --scope <what it covers>
+ *                        [--pending <text>] [--outcome approved|rejected|pending|standing]
+ *                        [--date YYYY-MM-DD] [--source <ref>] [--branch <name>] [--json]
+ *   gstack-approvals import --autoplan <run dir> [--by <whose words>] [--branch <name> | --stack <b1,b2,...>] [--json]
+ *   gstack-approvals render [--no-heading] [--full] [--branch <name>]
+ *   gstack-approvals rule --finding <fingerprint> --head <stop head> --reason <why> --words <exact words> --by <who ruled> [--json]
+ *   gstack-approvals rulings [--branch <name>]
+ *   gstack-approvals lane-exception --head <pushed head> --files <f1,f2> --reason <why> --words <exact words> --by <who granted> [--json]
+ *   gstack-approvals list [--json] [--branch <name>]
+ *   gstack-approvals sync [--branch <name>]
+ *   gstack-approvals path [--branch <name>]
+ *
+ * Rows are kept per branch under the state root and, on Capy, mirrored to
+ * GSTACK_APPROVALS_DIR, else the `approvals/` directory a Captain created in
+ * its drive (readable by the whole crew), else the private project-user Drive
+ * folder. Every field is secret-scanned before it is written. A row with
+ * `render` prints the `## Approvals` section /ship puts in the PR body. Logic:
+ * lib/approval-record.ts.
+ */
+import { spawnSync } from 'node:child_process';
+import * as path from 'node:path';
+import { EXIT, exitTableHelp } from '../lib/headless-artifacts';
+import { appendRows, branchExists, buildRow, importAutoplan, locate, readRecord, renderMode, renderRecord, repoVisibility, syncRecord, type RecordError, type StoreLocation } from '../lib/approval-record';
+import { GSTACK_ACTOR, openShipRun, RULED_NOTE_SCOPE, ruledNoteRow, ruledNotes, ruledNoteText } from '../lib/ruled-notes';
+import { resultLine } from '../lib/result-codes';
+import { TEST_LANE_EXCEPTION_SCOPE, testLaneExceptionRow } from '../lib/test-lane-exception';
+
+const HELP = `gstack-approvals — the per-thread approval record (capy/skill/gstack/captain.md)
+
+  add     --ask <text> --words <exact words> --by <who> --scope <what it covers>
+          [--pending <text>] [--outcome approved|rejected|pending|standing] [--date YYYY-MM-DD] [--source <ref>]
+  import  --autoplan <run dir> [--by <whose words, e.g. Garry>] [--stack <b1,b2,...>]
+          --stack writes the same rows to every branch of a stack; each branch is checked first, and one unknown branch writes none
+  rule    --finding <fingerprint> --head <the stop head the owner ruled at> --reason <why it ships as a note, one line>
+          --words <the owner's exact words> --by <who ruled>
+          the owner's ruling that a review finding ships as a disclosed note (docs/ship-policy.md#ruled-notes); finish
+          counts that finding closed on a fix-check whose range_base..commit holds the head, and the receipt and PR body
+          list it; refused inside this checkout's open /ship run
+  rulings                         the "Ruled note: …" lines the Pre-Landing Review and the PR body carry
+  lane-exception --head <the pushed head the owner granted at> --files <the uncovered inventory files, comma-separated>
+          --reason <why, one line> --words <the owner's exact words> --by <who granted>
+          the owner's grant that a CI-carried lane counts although exactly those files are in no run's tree.json
+          (docs/ship-policy.md#test-lane-exceptions); gstack-evidence record-ci binds it only at that head, for that exact
+          set, after a local preflight of those files passes; refused inside this checkout's open /ship run
+  render  [--no-heading] [--full] the ## Approvals section for a PR body or report; a public repository, or one whose
+          visibility gh cannot read, gets only "Approved: yes|no (record <id>)", because a PR description keeps
+          its edit history; --full prints the rows when gh cannot read the visibility and you know the repo is private
+  list    [--json]
+  sync                            re-mirror the record (GSTACK_APPROVALS_DIR, the Captain's drive approvals/, or the project-user Drive)
+  path                            print the record and mirror paths, and which rule chose the mirror
+  Every command takes [--branch <name>] (default: the checked-out branch).
+
+Example:
+  gstack-approvals add --ask "Approve the plan for the Capy approvals PR" --words "rec" \\
+    --by "Garry (via GStack Minder)" --scope "the reviewed plan, every recommendation"
+
+${exitTableHelp()}`;
+
+const VALUE_FLAGS = new Set(['--ask', '--words', '--by', '--scope', '--pending', '--outcome', '--date', '--source', '--branch', '--autoplan', '--stack', '--finding', '--reason', '--head', '--files']);
+
+function parse(args: string[]): { flags: Record<string, string>; bools: Set<string>; error?: string } {
+  const flags: Record<string, string> = {};
+  const bools = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (VALUE_FLAGS.has(a)) {
+      const v = args[i + 1];
+      if (v === undefined) return { flags, bools, error: `${a} needs a value` };
+      flags[a] = v; i++;
+    } else if (a === '--json' || a === '--no-heading' || a === '--full') bools.add(a);
+    else return { flags, bools, error: `unknown argument ${a}` };
+  }
+  return { flags, bools };
+}
+
+function fail(cmd: string, e: RecordError): number {
+  process.stderr.write(resultLine(`gstack-approvals ${cmd}`, e.code, e.message) + '\n');
+  if (e.code === 'APPROVAL_RECORD_INVALID') return EXIT.usage;
+  if (e.code === 'APPROVAL_RECORD_WRITE_FAILED' || e.code === 'APPROVAL_RECORD_UNAVAILABLE' || e.code === 'ARTIFACT_MALFORMED_JSONL') return EXIT.fail;
+  return EXIT.refused;
+}
+
+/** `import --stack`: every branch checked first, then the same rows (ids are branch-independent) written to each branch's record. */
+function importStack(cmd: string, flags: Record<string, string>, json: boolean): number {
+  if (cmd !== 'import' || !flags['--autoplan'] || flags['--branch'] !== undefined) { process.stderr.write(`gstack-approvals: --stack goes with import --autoplan <run dir>, without --branch\n`); return EXIT.usage; }
+  const branches = [...new Set(flags['--stack']!.split(',').map(b => b.trim()).filter(Boolean))];
+  if (!branches.length) { process.stderr.write(`gstack-approvals: --stack needs <b1,b2,...>\n`); return EXIT.usage; }
+  const cwd = process.cwd();
+  const missing = branches.filter(b => !branchExists(cwd, b));
+  if (missing.length) return fail(cmd, { code: 'APPROVAL_RECORD_NO_BRANCH', message: `no local or origin branch ${missing.join(', ')}; nothing was written` });
+  const runDir = path.resolve(flags['--autoplan']);
+  const results: Array<{ branch: string; added: string[]; skipped: number; file: string; mirror: string | null; error?: string }> = [];
+  let firstError: RecordError | undefined;
+  const plans: Array<{ branch: string; loc: StoreLocation; rows: ReturnType<typeof importAutoplan> & unknown[] }> = [];
+  for (const branch of branches) {
+    const loc = locate({ cwd, env: process.env, branch });
+    if ('code' in loc) return fail(cmd, loc);
+    const rows = importAutoplan(runDir, branch, flags['--by']);
+    if ('code' in rows) return fail(cmd, rows);
+    plans.push({ branch, loc, rows });
+  }
+  for (const { branch, loc, rows } of plans) {
+    const res = appendRows(loc, rows);
+    if ('code' in res) { firstError ??= res; results.push({ branch, added: [], skipped: 0, file: loc.file, mirror: loc.mirror ?? null, error: res.message }); continue; }
+    if (res.mirrorError) firstError ??= res.mirrorError;
+    results.push({ branch, added: res.added.map(r => r.id), skipped: res.skipped, file: loc.file, mirror: loc.mirror ?? null, ...(res.mirrorError ? { error: res.mirrorError.message } : {}) });
+  }
+  if (json) process.stdout.write(JSON.stringify({ branches: results }) + '\n');
+  else {
+    for (const r of results) process.stdout.write(`APPROVAL_IMPORTED: branch=${r.branch} n=${r.added.length} skipped=${r.skipped} ${r.file}${r.mirror ? ` mirror=${r.mirror}` : ''}${r.error ? ` error=${r.error}` : ''}\n`);
+    process.stdout.write(`APPROVAL_IMPORTED_STACK: branches=${results.length} added=${results.reduce((n, r) => n + r.added.length, 0)}\n`);
+  }
+  return firstError ? fail(cmd, firstError) : EXIT.ok;
+}
+
+function main(argv: string[]): number {
+  const [cmd, ...rest] = argv;
+  if (!cmd || cmd === '--help' || cmd === '-h') { process.stdout.write(HELP + '\n'); return cmd ? EXIT.ok : EXIT.usage; }
+  const { flags, bools, error } = parse(rest);
+  if (error) { process.stderr.write(`gstack-approvals: ${error}\n${HELP}\n`); return EXIT.usage; }
+  if (flags['--stack'] !== undefined) return importStack(cmd, flags, bools.has('--json'));
+  const loc = locate({ cwd: process.cwd(), env: process.env, branch: flags['--branch'] });
+  if ('code' in loc) return fail(cmd, loc);
+  const json = bools.has('--json');
+  const recorded = (where: StoreLocation) => `${where.file}${where.mirror ? ` mirror=${where.mirror}` : ''}`;
+
+  if (cmd === 'add' || cmd === 'import' || cmd === 'rule' || cmd === 'lane-exception') {
+    let rows;
+    if (cmd === 'lane-exception') {
+      const invalid = (message: string) => fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message });
+      const files = [...new Set((flags['--files'] ?? '').split(',').map(f => f.trim().replace(/^(\.\/)+/, '')).filter(Boolean))].sort();
+      const reason = (flags['--reason'] ?? '').trim();
+      if (!files.length || files.some(f => /\s/.test(f)) || !reason || /[\x00-\x1f\x7f]/.test(reason)) return invalid('lane-exception needs --files <the uncovered inventory files, comma-separated, no spaces> and --reason <why, one line>');
+      const head = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${flags['--head'] ?? ''}^{commit}`], { encoding: 'utf8', timeout: 10_000 });
+      if (!flags['--head'] || head.status !== 0) return invalid('lane-exception needs --head <the pushed head the owner granted at, a commit in this repository>');
+      if (GSTACK_ACTOR.test((flags['--by'] ?? '').trim())) return invalid('--by names gstack; a test-lane exception is the owner\'s, so --by names who granted it');
+      const open = openShipRun(process.cwd());
+      if (open) return invalid(`/ship run ${open} is open on this checkout: a test-lane exception is the owner's, never the lane's own runner's; record it from the owner's session`);
+      const built = buildRow({ ...testLaneExceptionRow(head.stdout.trim(), files, reason), words: flags['--words'] ?? '', by: flags['--by'] ?? '', date: flags['--date'] }, loc.branch);
+      if ('code' in built) return fail(cmd, built);
+      rows = [built];
+    } else if (cmd === 'rule') {
+      const invalid = (message: string) => fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message });
+      const finding = (flags['--finding'] ?? '').trim(), reason = (flags['--reason'] ?? '').trim();
+      if (!finding || /\s/.test(finding) || !reason) return invalid('rule needs --finding <the finding\'s fingerprint, no spaces> and --reason <why it ships as a note>');
+      if (/[\x00-\x1f\x7f]/.test(reason)) return invalid('--reason is one line: no newline or control character');
+      const head = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${flags['--head'] ?? ''}^{commit}`], { encoding: 'utf8', timeout: 10_000 });
+      if (!flags['--head'] || head.status !== 0) return invalid('rule needs --head <the stop head the owner ruled at, a commit in this repository>');
+      if (GSTACK_ACTOR.test((flags['--by'] ?? '').trim())) return invalid('--by names gstack; a ruling is the owner\'s, so --by names who ruled');
+      const open = openShipRun(process.cwd());
+      if (open) return invalid(`/ship run ${open} is open on this checkout: a ruling is the owner's, never the lane's own runner's; record it from the owner's session`);
+      const built = buildRow({ ...ruledNoteRow(finding, head.stdout.trim(), reason), words: flags['--words'] ?? '', by: flags['--by'] ?? '', date: flags['--date'] }, loc.branch);
+      if ('code' in built) return fail(cmd, built);
+      rows = [built];
+    } else if (cmd === 'add') {
+      if (RULED_NOTE_SCOPE.test(flags['--scope'] ?? '')) return fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message: 'a ruled_note scope is recorded with gstack-approvals rule' });
+      if (TEST_LANE_EXCEPTION_SCOPE.test(flags['--scope'] ?? '')) return fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message: 'a test_lane_exception scope is recorded with gstack-approvals lane-exception' });
+      const built = buildRow({ ask: flags['--ask'] ?? '', words: flags['--words'] ?? '', by: flags['--by'] ?? '', scope: flags['--scope'] ?? '', pending: flags['--pending'], outcome: flags['--outcome'], date: flags['--date'], source: flags['--source'] }, loc.branch);
+      if ('code' in built) return fail(cmd, built);
+      rows = [built];
+    } else {
+      if (!flags['--autoplan']) { process.stderr.write(`gstack-approvals: import needs --autoplan <run dir>\n`); return EXIT.usage; }
+      const imported = importAutoplan(path.resolve(flags['--autoplan']), loc.branch, flags['--by']);
+      if ('code' in imported) return fail(cmd, imported);
+      rows = imported;
+    }
+    const res = appendRows(loc, rows);
+    if ('code' in res) return fail(cmd, res);
+    if (json) process.stdout.write(JSON.stringify({ added: res.added.map(r => r.id), skipped: res.skipped, file: loc.file, mirror: loc.mirror ?? null }) + '\n');
+    else if (cmd !== 'import') process.stdout.write(`APPROVAL_RECORDED: ${rows[0]!.id}${res.skipped ? ' (already present)' : ''} ${recorded(loc)}\n`);
+    else process.stdout.write(`APPROVAL_IMPORTED: n=${res.added.length} skipped=${res.skipped} ${recorded(loc)}\n`);
+    if (res.mirrorError) return fail(cmd, res.mirrorError);
+    return EXIT.ok;
+  }
+  if (cmd === 'render' || cmd === 'list') {
+    const read = readRecord(loc);
+    if (read.restored) process.stderr.write(`gstack-approvals: read the Drive mirror ${loc.mirror} (no local copy on this machine; gstack-approvals sync restores it)\n`);
+    if (cmd === 'list' && json) process.stdout.write(JSON.stringify({ branch: loc.branch, state: read.state, rows: read.rows }) + '\n');
+    else if (cmd === 'list') for (const r of read.rows) process.stdout.write(`${r.date} ${r.id} ${r.outcome} ${JSON.stringify(r.ask)} words=${JSON.stringify(r.words)} by=${JSON.stringify(r.by)}\n`);
+    else {
+      const visibility = repoVisibility(process.cwd());
+      const mode = renderMode(visibility, bools.has('--full'));
+      if (mode === 'redacted') process.stderr.write(`APPROVALS_RENDER: redacted (repository visibility ${visibility}${bools.has('--full') ? '; --full applies only to a private repository' : ''}); gstack-approvals list shows the full record\n`);
+      process.stdout.write(renderRecord(read, loc, { heading: !bools.has('--no-heading'), mode }));
+    }
+    if (read.state === 'unavailable') return fail(cmd, { code: 'APPROVAL_RECORD_UNAVAILABLE', message: `no record at ${loc.file} and no mirror` });
+    return EXIT.ok;
+  }
+  if (cmd === 'rulings') {
+    const notes = ruledNotes(readRecord(loc).rows);
+    process.stdout.write(notes.length ? notes.map(n => `Ruled note: ${ruledNoteText(n)}\n`).join('') : 'RULED_NOTES: none\n');
+    return EXIT.ok;
+  }
+  if (cmd === 'sync') {
+    const s = syncRecord(loc);
+    process.stdout.write(`APPROVAL_SYNCED: rows=${s.rows} ${recorded(loc)}\n`);
+    return s.error ? fail(cmd, s.error) : EXIT.ok;
+  }
+  if (cmd === 'path') {
+    process.stdout.write(`RECORD: ${loc.file}\nMIRROR: ${loc.mirror ? `${loc.mirror} (${loc.mirror_source})` : 'none'}\n${(loc.read_also ?? []).map(f => `READ_ALSO: ${f}\n`).join('')}BRANCH: ${loc.branch}\n`);
+    return EXIT.ok;
+  }
+  process.stderr.write(`gstack-approvals: unknown command ${cmd}\n${HELP}\n`);
+  return EXIT.usage;
+}
+
+process.exitCode = main(process.argv.slice(2));

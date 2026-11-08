@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { inspectPreparation, railsTestConfiguration } from '../lib/cso/preparation';
 import { assertRuntimeCompatible, RUNTIME_CATALOG, rollbackCatalog, selectRuntime, validateRuntimeCatalog } from '../lib/cso/runtime-catalog';
-import { completeRuntimeCatalogFixture, qualifiedRuntimeFixture } from './helpers/cso-runtime-catalog';
+import { completeRuntimeCatalogFixture, qualifiedRuntimeFixture, unqualifiedRuntimeCatalog } from './helpers/cso-runtime-catalog';
 
 const roots: string[] = [];
 const hash = 'a'.repeat(64);
@@ -170,6 +170,32 @@ describe('CSO inert Python preparation', () => {
   });
 });
 
+describe('CSO preparation names a Go module as Go (#3263)', () => {
+  const goFiles = {
+    'go.mod': 'module example.com/app\n\ngo 1.23\n\nrequire github.com/google/uuid v1.6.0\n',
+    'go.sum': 'github.com/google/uuid v1.6.0 h1:abc=\n',
+    'main.go': 'package main\n\nfunc main() {}\n',
+  };
+  const GO_UNSUPPORTED = { code: 'UNSUPPORTED_STACK', message: 'Go (go.mod) is not a supported runtime stack yet; supported runtime stacks are Node, Bun, Python, and Rails.', path: 'go.mod' };
+  test('a go.mod repository is Go, unsupported, and never asks for requirements.txt', () => {
+    const plan = inspectPreparation(fixture(goFiles));
+    expect([plan.stack, plan.runtimeProfile, plan.status]).toEqual(['go', 'go', 'prerequisites']);
+    expect(plan.prerequisites).toEqual([GO_UNSUPPORTED]);
+    expect(JSON.stringify(plan)).not.toContain('requirements.txt');
+  });
+  test('Python helper metadata beside go.mod stays Go', () => {
+    const plan = inspectPreparation(fixture({ ...goFiles, 'requirements.txt': `mkdocs==1.6.1 --hash=sha256:${hash}\n` }));
+    expect(plan.stack).toBe('go');
+    expect(plan.prerequisites).toEqual([GO_UNSUPPORTED]);
+  });
+  test('controls: go.mod beside a Node lockfile stays Node; Python without go.mod stays Python', () => {
+    const node = inspectPreparation(fixture({ ...goFiles, ...nodeFiles() }));
+    expect([node.stack, node.status]).toEqual(['node', 'ready']);
+    expect(inspectPreparation(fixture({ 'requirements.txt': `Flask==3.1.0 --hash=sha256:${hash}\n` })).stack).toBe('python');
+    expect(inspectPreparation(fixture({ 'go.sum': '', 'main.go': '' })).stack).toBe('python');
+  });
+});
+
 describe('CSO inert Rails preparation', () => {
   test('does not silently choose Node in a multi-stack repository',()=>{const plan=inspectPreparation(fixture({...nodeFiles(),'Gemfile.lock':gemLock,'Gemfile':''}));expect(plan.status).toBe('prerequisites');expect(plan.prerequisites[0].code).toBe('MULTIPLE_STACKS');expect(inspectPreparation(fixture({...nodeFiles(),'Gemfile.lock':gemLock,'Gemfile':''}),'rails').stack).toBe('rails');});
   test('fetches exact gems without evaluating Gemfiles or building native extensions', () => {
@@ -231,10 +257,13 @@ describe('CSO inert Rails preparation', () => {
 describe('CSO runtime catalog admission', () => {
   const runtime = () => qualifiedRuntimeFixture('node');
   const catalog = () => completeRuntimeCatalogFixture('test-1');
-  test('default catalog cannot execute unqualified images', () => {
+  test('default catalog admits only digest-pinned reviewed profiles and unqualified profiles cannot execute', () => {
     expect(RUNTIME_CATALOG.profiles).toHaveLength(10);
-    expect(RUNTIME_CATALOG.runtimes).toEqual([]);
-    expect(() => selectRuntime('node', 'linux/amd64')).toThrow('Reviewed build profile node-24.4.0-amd64 is awaiting a qualified image promotion');
+    for (const runtime of RUNTIME_CATALOG.runtimes) {
+      expect(RUNTIME_CATALOG.profiles.filter(profile => profile.id === runtime.id && profile.stack === runtime.stack && profile.platform === runtime.platform)).toHaveLength(1);
+      expect(runtime.image).toMatch(/@sha256:[a-f0-9]{64}$/);
+    }
+    expect(() => selectRuntime('node', 'linux/amd64', unqualifiedRuntimeCatalog())).toThrow('Reviewed build profile node-24.4.0-amd64 is awaiting a qualified image promotion');
   });
   test('selects exact qualified digest and platform', () => {
     expect(selectRuntime('node', 'linux/amd64', catalog()).image).toContain('@sha256:');

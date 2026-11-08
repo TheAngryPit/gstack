@@ -11,10 +11,10 @@ import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { deriveDependencies, derivedDependencies, referenceText } from '../scripts/pr-dependencies';
 import {
-  DERIVABLE_PREFIXES, PERIODIC_ONLY_PR_FILES, PR_FULL_GATE_FILES, PR_PROFILE_MAPS, selectPrProfile, unknownFileLabel,
+  DERIVABLE_PREFIXES, PERIODIC_ONLY_PR_FILES, PR_FULL_GATE_FILES, PR_PROFILE_MAPS, formatPrCoverageSummary, selectPrProfile, unknownFileLabel,
 } from '../scripts/test-pr-profile';
 import { buildRunManifest, computePaidCaseSelection } from '../scripts/test-paid-shards';
-import { E2E_TIERS } from './helpers/touchfiles-data';
+import { E2E_TIERS, LLM_JUDGE_TOUCHFILES } from './helpers/touchfiles-data';
 import { matchGlob } from './helpers/test-selection';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -179,7 +179,7 @@ describe('safe classification (A1-2)', () => {
       }
       expect(unknownFileLabel(file).label).toBe('full-gate input');
     }
-    expect(unknownFileLabel('ETHOS.md').label).toBe('real unknown dependency');
+    expect(unknownFileLabel('SECURITY.md').label).toBe('real unknown dependency');
   });
 });
 
@@ -264,7 +264,7 @@ describe('the fail-closed full-gate list', () => {
   });
 
   test('a file the derivation cannot place restores the full gate with its fix', () => {
-    for (const file of ['ETHOS.md', 'conductor.json']) {
+    for (const file of ['SECURITY.md', 'conductor.json']) {
       const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [file], packageVersionOnly: true });
       expect(result.coverage?.mode, file).toBe('full-fallback');
       const label = result.coverage!.unknownFileLabels[0]!;
@@ -304,6 +304,20 @@ describe('deleted files (paths absent from the head tree)', () => {
     expect(real.referencers('bin/gstack-next-version')).toContain('review/SKILL.md.tmpl');
   });
 
+  test('a file the PR adds is read from the checkout under review, not from the selector\'s own tree (an older install)', () => {
+    const added = 'hosts/claude/hooks/zz-added-hook.ts';
+    expect(fs.existsSync(path.join(ROOT, added))).toBe(false);
+    expect(real.referencers(added)).toContain('setup');
+    const checkout = fixtureRepo({ setup: 'SETUP_HOOK=hosts/claude/hooks/zz-added-hook\n', [added]: 'export {};\n' });
+    try {
+      const result = computePaidCaseSelection({ profile: 'pr', rootDir: checkout, env: { EVALS_BASE: 'HEAD' }, changedFiles: [added], packageVersionOnly: true });
+      expect(result.coverage!.unknownFileLabels.filter(l => l.file === added)).toEqual([]);
+      expect(result.reason).not.toContain('deleted but still referenced');
+    } finally {
+      fs.rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
   test('a deleted file a full-gate input still references, or a deleted full-gate entry, restores the full gate', () => {
     expect(real.referencers('bin/gstack-install-registry.sh')).toContain('setup');
     const referenced = pick('bin/gstack-install-registry.sh');
@@ -324,5 +338,67 @@ describe('deleted files (paths absent from the head tree)', () => {
     const relative = fixtureRepo({ 'test/skill-e2e-alpha.test.ts': "import './helpers/gone';\n", 'scripts/build.sh': '', 'scripts/resolvers/index.ts': '', 'package.json': '{}' });
     expect(deriveDependencies({ e2eTouchfiles: { alpha: ['test/skill-e2e-alpha.test.ts'] }, judgeTouchfiles: {}, globalTouchfiles: [] }, relative)
       .referencers('test/helpers/gone.ts')).toEqual(['test/skill-e2e-alpha.test.ts']);
+  });
+});
+
+describe('narrow screens leave hub files to the train gate', () => {
+  const plan = (changedFiles: string[], policy = 'narrow', profile: 'pr' | 'full' = 'pr') =>
+    computePaidCaseSelection({ profile, env: { EVALS_SCREEN_POLICY: policy }, changedFiles, packageVersionOnly: true });
+  const hub = 'lib/restamp.ts';
+
+  test('a hub file reaches every gate case only through the derived closure', () => {
+    expect(gate.every(id => real.e2e.get(hub)?.has(id))).toBe(true);
+  });
+
+  test('a hub-only diff selects no case or judge on a narrow screen and names the hub file', () => {
+    const result = plan([hub]);
+    expect(result.coverage?.hubFiles).toEqual([hub]);
+    expect(result.coverage?.mode).toBe('pr');
+    expect(result.selection).toEqual({ e2e: [], judges: [] });
+    expect(plan([hub], 'broad').selection.judges).toEqual(Object.keys(LLM_JUDGE_TOUCHFILES).sort());
+    expect(formatPrCoverageSummary({ profile: 'pr', selection: result.selection, prCoverage: result.coverage }).join('\n'))
+      .toContain(`Left to the train gate's full census (narrow screen): \`${hub}\``);
+    expect(result.reason).toContain(`train gate's full census runs them: ${hub}`);
+  });
+
+  test('a broad screen, an unset policy and the full profile keep every dependent of a hub file', () => {
+    expect(computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [hub], packageVersionOnly: true }).selection.e2e).toEqual(gate.sort());
+    const broad = plan([hub], 'broad');
+    expect(broad.coverage?.mode).toBe('dependents');
+    expect(broad.coverage?.hubFiles).toEqual([]);
+    expect(broad.selection.e2e).toEqual(gate.sort());
+    expect(plan([hub], 'narrow', 'full')).toEqual(plan([hub], 'broad', 'full'));
+  });
+
+  test('a hub file beside a shared runtime input, an unknown file or a full-gate file still runs the full gate', () => {
+    for (const other of ['scripts/resolvers/preamble/generate-voice-directive.ts', 'SECURITY.md', 'bun.lock']) {
+      expect({ other, e2e: plan([hub, other]).selection.e2e }).toEqual({ other, e2e: gate.sort() });
+    }
+  });
+
+  test('a hub file beside a direct edit keeps that edit\'s own cases', () => {
+    const direct = plan(['browse/src/retired-module.ts']).selection.e2e;
+    expect(direct).toContain('browse-basic');
+    expect(plan([hub, 'browse/src/retired-module.ts']).selection.e2e).toEqual(direct);
+  });
+
+  test('a deleted file that still reaches every gate case is not a hub: a narrow screen keeps its dependents', () => {
+    const without = { ...real, tracked: new Set([...real.tracked].filter(file => file !== hub)) };
+    const result = selectPrProfile({ selectedE2E: [], selectedJudges: [], changedFiles: [hub], derived: without, screenPolicy: 'narrow' });
+    expect(result.hubFiles).toEqual([]);
+    expect(result.mode).toBe('dependents');
+    expect(result.e2e).toEqual(gate.sort());
+  });
+
+  test('only dispatched screens default to narrow in the PR workflow; a pull_request run plans broad', () => {
+    const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'evals.yml'), 'utf8');
+    expect(workflow).toContain("EVALS_SCREEN_POLICY: ${{ inputs.screen_policy || (github.event_name == 'workflow_dispatch' && 'narrow') || 'broad' }}");
+    expect(workflow).not.toContain("EVALS_SCREEN_POLICY: ${{ inputs.screen_policy || 'narrow' }}");
+  });
+
+  test('size-ledger baselines select only the cases that read them, none in the gate', () => {
+    const result = plan(['test/size-ledger/ship/base.json']);
+    expect(result.coverage?.unknownFiles).toEqual([]);
+    expect(result.selection.e2e).toEqual([]);
   });
 });

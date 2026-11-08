@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, utimesSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { spawnSync } from "child_process";
@@ -417,11 +417,9 @@ describe("gstack-global-discover", () => {
       const json = JSON.parse(result.stdout);
 
       // Total sessions should equal sum across tools
-      const toolTotal =
-        json.tools.claude_code.total_sessions +
-        json.tools.codex.total_sessions +
-        json.tools.gemini.total_sessions;
+      const toolTotal = Object.values(json.tools as Record<string, { total_sessions: number }>).reduce((n, t) => n + t.total_sessions, 0);
       expect(json.total_sessions).toBe(toolTotal);
+      for (const key of ["claude_code", "codex", "gemini", "kimi_code", "omp", "agy"]) expect(json.tools).toHaveProperty(key);
     });
 
     test("deduplicates Conductor workspaces by remote", () => {
@@ -436,6 +434,108 @@ describe("gstack-global-discover", () => {
       const remotes = json.repos.map((r: any) => r.remote);
       const uniqueRemotes = new Set(remotes);
       expect(remotes.length).toBe(uniqueRemotes.size);
+    });
+  });
+
+  describe("Kimi Code, OMP and Antigravity sessions (#2917, #1977)", () => {
+    let home: string;
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), "gstack-more-tools-"));
+    });
+    afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+    const gitEnv = () => ({ ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" });
+    function repo(rel: string, remote: string): string {
+      const dir = join(home, rel);
+      mkdirSync(dir, { recursive: true });
+      for (const args of [["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "init"], ["remote", "add", "origin", remote]]) {
+        expect(spawnSync("git", ["-C", dir, ...args], { encoding: "utf-8", timeout: 30_000, env: gitEnv() }).status).toBe(0);
+      }
+      return dir;
+    }
+    const old = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+    function kimi(id: string, workDir: string, updatedAt: number): void {
+      const dir = join(home, ".kimi-code", "sessions", "ws-1", id);
+      mkdirSync(join(dir, "agents", "main"), { recursive: true });
+      writeFileSync(join(dir, "state.json"), JSON.stringify({ cwd: workDir, createdAt: updatedAt - 1000, updatedAt }));
+      writeFileSync(join(dir, "agents", "main", "wire.jsonl"), JSON.stringify({ created_at: new Date(updatedAt).toISOString() }) + "\n");
+      const index = join(home, ".kimi-code", "session_index.jsonl");
+      const prev = existsSync(index) ? readFileSync(index, "utf-8") : "";
+      writeFileSync(index, prev + JSON.stringify({ sessionId: id, sessionDir: dir, workDir }) + "\n");
+    }
+    function omp(name: string, cwd: string, mtime?: Date): string {
+      const dir = join(home, ".omp", "agent", "sessions", "-work-proj");
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, name);
+      writeFileSync(file, [JSON.stringify({ type: "session", cwd, timestamp: new Date().toISOString() }), JSON.stringify({ type: "message", timestamp: new Date().toISOString() })].join("\n") + "\n");
+      if (mtime) utimesSync(file, mtime, mtime);
+      return file;
+    }
+    function agy(name: string, mtime?: Date, walMtime?: Date): void {
+      const dir = join(home, ".gemini", "antigravity-cli", "conversations");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, name), "");
+      if (mtime) utimesSync(join(dir, name), mtime, mtime);
+      if (walMtime) {
+        writeFileSync(join(dir, `${name}-wal`), "");
+        utimesSync(join(dir, `${name}-wal`), walMtime, walMtime);
+      }
+    }
+    function discover(format: "json" | "summary" = "json") {
+      const r = spawnSync("bun", ["run", scriptPath, "--since", "1d", "--format", format], {
+        encoding: "utf-8",
+        timeout: 60_000,
+        env: { ...gitEnv(), HOME: home, USERPROFILE: home, CODEX_SESSIONS_DIR: join(home, "no-codex") },
+      });
+      expect(r.status).toBe(0);
+      return { stdout: r.stdout, stderr: r.stderr };
+    }
+
+    test("with no stores, every registered tool is reported with a zero count", () => {
+      const json = JSON.parse(discover().stdout);
+      for (const key of ["claude_code", "codex", "gemini", "kimi_code", "omp", "agy"]) expect(json.tools[key].total_sessions).toBe(0);
+      expect(json.tools.agy.unattributed).toBe(true);
+      expect(json.total_sessions).toBe(0);
+      const { stdout, stderr } = discover("summary");
+      expect(stdout).toContain("Kimi Code: 0");
+      expect(stdout).toContain("OMP: 0");
+      expect(stdout).toContain("Antigravity: 0)");
+      expect(stderr).toContain("Kimi Code: 0");
+    });
+
+    test("Kimi Code sessions count per repo by workDir, inside the window only", () => {
+      const dir = repo("work/kimi-app", "https://github.com/acme/kimi-app.git");
+      kimi("s-new", dir, Date.now());
+      kimi("s-old", dir, old.getTime());
+      const json = JSON.parse(discover().stdout);
+      expect(json.tools.kimi_code).toEqual({ label: "Kimi Code", total_sessions: 1, repos: 1 });
+      const r = json.repos.find((x: any) => x.remote === "https://github.com/acme/kimi-app");
+      expect(r.sessions).toEqual({ claude_code: 0, codex: 0, gemini: 0, kimi_code: 1, omp: 0 });
+    });
+
+    test("OMP sessions count by the cwd in the file and its mtime; a session created before the window but written in it counts; logs never count", () => {
+      const dir = repo("work/omp-app", "https://github.com/acme/omp-app.git");
+      omp("2026-01-01T00-00-00-000Z_aaaa.jsonl", dir);
+      omp("2026-10-01T00-00-00-000Z_bbbb.jsonl", dir, old);
+      mkdirSync(join(home, ".omp", "logs"), { recursive: true });
+      writeFileSync(join(home, ".omp", "logs", "launch.log"), "proxy debug\n");
+      const json = JSON.parse(discover().stdout);
+      expect(json.tools.omp.total_sessions).toBe(1);
+      expect(json.repos.find((x: any) => x.remote === "https://github.com/acme/omp-app").sessions.omp).toBe(1);
+    });
+
+    test("Antigravity sessions count by the later of the .db and -wal mtimes, in total_sessions but in no repo", () => {
+      agy("a.db");
+      agy("b.db", old, new Date());
+      agy("c.db", old);
+      agy("notes.txt");
+      const json = JSON.parse(discover().stdout);
+      expect(json.tools.agy).toEqual({ label: "Antigravity", total_sessions: 2, repos: 0, unattributed: true });
+      expect(json.total_sessions).toBe(2);
+      expect(json.repos).toEqual([]);
+      const summary = discover("summary").stdout;
+      expect(summary).toContain("Sessions: 2 total (CC: 0, Codex: 0, Gemini: 0, Kimi Code: 0, OMP: 0, Antigravity: 2)");
+      expect(summary).toContain("Antigravity sessions are not attributed to a repo");
     });
   });
 
@@ -643,6 +743,105 @@ describe("gstack-global-discover", () => {
       expect(json.tools.claude_code.total_sessions).toBe(3);
       expect(json.repos).toHaveLength(1);
       expect(json.repos[0].sessions.claude_code).toBe(1);
+    });
+
+    // Claude Code worktrees live at <repo>/.claude/worktrees/<name> and are removed once
+    // their branch merges; the session history under ~/.claude/projects stays behind.
+    function removedWorktree(main: string, name = "feat-x"): string {
+      const wt = join(main, ".claude", "worktrees", name);
+      git(main, "worktree", "add", "-q", wt);
+      return wt;
+    }
+
+    test("sessions of a removed Claude worktree count with the repository it was created from", () => {
+      const main = repo("work/ai-blogger-lab", "https://github.com/acme/ai-blogger-lab.git");
+      const wt = removedWorktree(main);
+      session(main, "main-1");
+      session(main, "main-2");
+      session(wt, "wt-1");
+      session(wt, "wt-2");
+      session(wt, "wt-3");
+      git(main, "worktree", "remove", "--force", wt);
+      expect(existsSync(wt)).toBe(false);
+      const json = discover();
+      expect(json.tools.claude_code.total_sessions).toBe(5);
+      expect(json.repos).toHaveLength(1);
+      expect(json.repos[0].sessions.claude_code).toBe(5);
+      expect(json.repos[0].paths).toEqual([main]);
+    });
+
+    test("a session started in a subdirectory of a removed Claude worktree counts too", () => {
+      const main = repo("work/app", "git@github.com:acme/app.git");
+      const wt = removedWorktree(main);
+      mkdirSync(join(wt, "packages", "web"), { recursive: true });
+      session(join(wt, "packages", "web"), "sub-1");
+      git(main, "worktree", "remove", "--force", wt);
+      const r = discover().repos.find((x) => x.remote === "https://github.com/acme/app")!;
+      expect(r.sessions.claude_code).toBe(1);
+      expect(r.paths).toEqual([main]);
+    });
+
+    test("a removed Claude worktree of a repository with no remote counts with its repository", () => {
+      const main = repo("work/local-only");
+      const wt = removedWorktree(main);
+      session(main, "l-1");
+      session(wt, "l-2");
+      git(main, "worktree", "remove", "--force", wt);
+      const local = discover().repos.filter((x) => x.remote.startsWith("local:"));
+      expect(local).toHaveLength(1);
+      expect(local[0].sessions.claude_code).toBe(2);
+    });
+
+    test("a live Claude worktree keeps its own path next to its repository's", () => {
+      const main = repo("work/live", "https://github.com/acme/live.git");
+      const wt = removedWorktree(main);
+      session(main, "m-1");
+      session(wt, "w-1");
+      const r = discover().repos.find((x) => x.remote === "https://github.com/acme/live")!;
+      expect(r.sessions.claude_code).toBe(2);
+      expect(r.paths.sort()).toEqual([main, wt].sort());
+    });
+
+    test("a removed Claude worktree whose repository is also gone is not counted as a repository", () => {
+      const gone = join(home, "work", "gone-repo");
+      session(join(gone, ".claude", "worktrees", "feat-x"), "g-1");
+      const json = discover();
+      expect(json.tools.claude_code.total_sessions).toBe(1);
+      expect(json.repos).toHaveLength(0);
+    });
+
+    test("a removed directory that is not a Claude worktree is not counted as a repository", () => {
+      const main = repo("work/real", "https://github.com/acme/real.git");
+      session(join(main, "some", "deleted-dir"), "d-1");
+      session(join(main, ".claude", "worktrees"), "d-2");
+      session(main, "r-1");
+      const json = discover();
+      expect(json.tools.claude_code.total_sessions).toBe(3);
+      expect(json.repos).toHaveLength(1);
+      expect(json.repos[0].sessions.claude_code).toBe(1);
+    });
+
+    describe("parentRepoOfClaudeWorktree", () => {
+      let parentRepoOfClaudeWorktree: (cwd: string) => string | null;
+      beforeEach(async () => {
+        parentRepoOfClaudeWorktree = (await import("../bin/gstack-global-discover.ts")).parentRepoOfClaudeWorktree;
+      });
+
+      test("returns the repository root for a worktree path, with or without a subdirectory", () => {
+        expect(parentRepoOfClaudeWorktree("/Users/me/code/app/.claude/worktrees/feat-x")).toBe("/Users/me/code/app");
+        expect(parentRepoOfClaudeWorktree("/Users/me/code/app/.claude/worktrees/feat-x/src/lib")).toBe("/Users/me/code/app");
+        expect(parentRepoOfClaudeWorktree("C:\\code\\app\\.claude\\worktrees\\feat-x")).toBe("C:\\code\\app");
+      });
+
+      test("returns null for any other path", () => {
+        for (const p of [
+          "/Users/me/code/app",
+          "/Users/me/code/app/.claude/worktrees",
+          "/Users/me/code/app/.claude/worktrees/",
+          "/Users/me/code/not.claude/worktrees/x",
+          "/.claude/worktrees/x",
+        ]) expect(parentRepoOfClaudeWorktree(p)).toBeNull();
+      });
     });
   });
 });

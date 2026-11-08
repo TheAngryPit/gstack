@@ -1,35 +1,101 @@
 #!/usr/bin/env bash
 # gstack-learnings-search — read and filter project learnings
-# Usage: gstack-learnings-search [--type TYPE] [--query KEYWORD] [--limit N] [--cross-project]
+# Usage: gstack-learnings-search --help
 #
 # Reads ~/.gstack/projects/$SLUG/learnings.jsonl, applies confidence decay,
 # resolves duplicates (latest winner per key+type), and outputs formatted text.
 # Exit 0 silently if no learnings file exists or nothing matches. Missing bun
 # exits 127 and a failed read exits non-zero with its stderr (#2790): "could
 # not read" must never look like "nothing recorded".
+# Heredoc delivery guard: bash 5.2+ pipes heredoc bodies <=64KiB, and on
+# macOS a starved 512-byte pipe hangs bodies >=512B at startup. Compat level
+# 50 restores the tempfile path (test/heredoc-pipe-deadlock.test.ts).
+BASH_COMPAT=50
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
+
+usage() {
+  cat <<'EOF'
+Usage: gstack-learnings-search [--type TYPE] [--query WORDS] [--limit N=10] [--cross-project]
+       gstack-learnings-search --stats
+       gstack-learnings-search --help
+
+Prints this project's learnings, latest entry per key+type, grouped by type.
+  --type TYPE       only one type: pattern pitfall preference architecture tool operational investigation
+  --query WORDS     entries matching any word in key, insight or files, best match first
+  --limit N         at most N entries (default 10)
+  --cross-project   also read up to 5 other projects' user-stated learnings
+  --stats           counts for this project: TOTAL, UNIQUE, RAW_ENTRIES, BY_TYPE, BY_SOURCE,
+                    AVG_CONFIDENCE, or NO_LEARNINGS when nothing is recorded
+Prints nothing when nothing matches. Record a learning with gstack-learnings-log.
+EOF
+}
+
+TYPE=""
+QUERY=""
+LIMIT=10
+CROSS_PROJECT=false
+STATS=false
+
+usage_error() { echo "gstack-learnings-search: $1" >&2; exit 2; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --type|--query|--limit) [[ $# -ge 2 ]] || usage_error "$1 needs a value" ;;
+  esac
+  case "$1" in
+    --type) TYPE="$2"; shift 2 ;;
+    --query) QUERY="$2"; shift 2 ;;
+    --limit) [[ "$2" =~ ^[1-9][0-9]*$ ]] || usage_error "--limit needs a positive integer, got '$2'"; LIMIT="$2"; shift 2 ;;
+    --cross-project) CROSS_PROJECT=true; shift ;;
+    --stats) STATS=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage_error "unknown argument '$1'; valid: --type --query --limit --cross-project --stats --help" ;;
+  esac
+done
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null)"
 . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select
 GSTACK_HOME="$_gstack_sr_root"
 
-TYPE=""
-QUERY=""
-LIMIT=10
-CROSS_PROJECT=false
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --type) TYPE="$2"; shift 2 ;;
-    --query) QUERY="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
-    --cross-project) CROSS_PROJECT=true; shift ;;
-    *) shift ;;
-  esac
-done
-
 LEARNINGS_FILE="$GSTACK_HOME/projects/$SLUG/learnings.jsonl"
+
+if [ "$STATS" = true ]; then
+  if [ ! -f "$LEARNINGS_FILE" ]; then
+    echo "NO_LEARNINGS"
+    exit 0
+  fi
+  command -v bun >/dev/null 2>&1 || { echo "gstack-learnings-search: bun not found on PATH, so learnings could not be read. Fix: install Bun (https://bun.sh), then re-run ./setup." >&2; exit 127; }
+  echo "TOTAL: $(wc -l < "$LEARNINGS_FILE" | tr -d ' ') entries"
+  bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
+const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
+const seen = new Map();
+for (const line of lines) {
+  try {
+    const e = JSON.parse(line);
+    const dk = (e.key || '') + '|' + (e.type || '');
+    const existing = seen.get(dk);
+    if (!existing || new Date(e.ts) > new Date(existing.ts)) seen.set(dk, e);
+  } catch {}
+}
+const byType = Object.create(null);
+const bySource = Object.create(null);
+let totalConf = 0;
+for (const e of seen.values()) {
+  byType[e.type] = (byType[e.type] || 0) + 1;
+  bySource[e.source] = (bySource[e.source] || 0) + 1;
+  totalConf += e.confidence || 0;
+}
+console.log('UNIQUE: ' + seen.size + ' (after dedup)');
+console.log('RAW_ENTRIES: ' + lines.length);
+console.log('BY_TYPE: ' + JSON.stringify(byType));
+console.log('BY_SOURCE: ' + JSON.stringify(bySource));
+console.log('AVG_CONFIDENCE: ' + (seen.size ? (totalConf / seen.size).toFixed(1) : '0.0'));
+" < "$LEARNINGS_FILE"
+  exit 0
+fi
 
 # Collect cross-project JSONL files separately so the trust gate can distinguish
 # current-project rows from rows loaded from other projects.
@@ -40,7 +106,7 @@ if [ "$CROSS_PROJECT" = true ]; then
   while IFS= read -r f; do
     CROSS_FILES+=("$f")
     [ ${#CROSS_FILES[@]} -ge 5 ] && break
-  done < <(find "$GSTACK_HOME/projects" -name "learnings.jsonl" -not -path "*/$SLUG/*" 2>/dev/null)
+  done < <(find "$GSTACK_HOME/projects" -name "learnings.jsonl" -not -path "$GSTACK_HOME/projects/$SLUG/*" 2>/dev/null)
 fi
 
 if [ ! -f "$LEARNINGS_FILE" ] && [ ${#CROSS_FILES[@]} -eq 0 ]; then
@@ -69,7 +135,7 @@ emit_tagged_file() {
       emit_tagged_file cross "$f"
     done
   fi
-} | GSTACK_SEARCH_TYPE="$TYPE" GSTACK_SEARCH_QUERY="$QUERY" GSTACK_SEARCH_LIMIT="$LIMIT" GSTACK_SEARCH_CROSS="$CROSS_PROJECT" bun -e "
+} | GSTACK_SEARCH_TYPE="$TYPE" GSTACK_SEARCH_QUERY="$QUERY" GSTACK_SEARCH_LIMIT="$LIMIT" GSTACK_SEARCH_CROSS="$CROSS_PROJECT" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
 const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
 const now = Date.now();
 const type = process.env.GSTACK_SEARCH_TYPE || '';

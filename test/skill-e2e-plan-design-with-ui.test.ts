@@ -24,7 +24,7 @@ const ROOT = path.resolve(import.meta.dir, '..');
 const FIXTURE = path.join(ROOT, 'test', 'fixtures', 'plans', 'ui-heavy-feature.md');
 
 const designFocusBoundary = (fp: AskUserQuestionFingerprint): boolean =>
-  fp.nativeCall?.answered === true && !fp.nativeCall.failed && fp.nativeCall.questions.some(({ question }) => {
+  fp.nativeCall?.answered === true && !fp.nativeCall.failed && fp.nativeCall.questions.some(({ header, question, options }) => {
     const text = question.trim().replace(/^D\d+(?:\.\d+)?\s*[—–:-]\s*/i, '');
     // A target menu can mention a design system without reviewing this plan.
     // The source Step 0D question, or a native title (first line) that offers all
@@ -32,10 +32,31 @@ const designFocusBoundary = (fp: AskUserQuestionFingerprint): boolean =>
     // count may be a numeral or a word; the title must name design, unless the
     // body carries the step's own design-completeness rating (run 39199692993).
     const title = text.split(/\r?\n/, 1)[0]!;
-    const rated = /\bI(?:['’]ve| have)? rated this plan (?:10(?:\.0+)?|[0-9](?:\.\d+)?)\/10 on design completeness\b/i;
+    // Step 0A's rating is a sentence that scores the plan's design out of 10,
+    // however it is worded ("rated this plan 4/10 for design completeness", run
+    // 39363705692; "This plan is a 3/10 on design completeness", the 0A example;
+    // the ELI10 plain-words "I rated this plan 4/10 on design.", run 39852003387).
+    const rated = (body: string) => body.split(/(?<=[.!?])\s+|\r?\n/).some(sentence =>
+      /\bdesign\b/i.test(sentence) && /(?<![\d./])(?:10(?:\.0+)?|[0-9](?:\.\d+)?)\/10(?!\d|\.\d)/.test(sentence));
+    // Runs 39298269902 a1/a2: a title that only names the focus ("Review focus.",
+    // on one line before Project/branch/task:), with the step's own rating in the
+    // body and an option that offers all seven dimensions against a narrower one.
+    // The option leads with all seven, whatever it calls them ("All 7 areas", run 39363705692).
+    // Run 40664336141 put the offer in the rated title instead ("Should I review all 7 areas
+    // or focus on a few?") and lettered its options ("A) Review all 7 areas"). Either place
+    // carries the offer; issue-numbered options are a finding, never Step 0D. Runs 41178131219
+    // and 41186376825 lettered the leading option itself ("A) All 7 passes (recommended)").
+    // Every captured Step 0D (ten calls, runs 39199692993 to 41414111284) set the native header chip
+    // to "Focus", and no other captured question did; run 41414111284's label put the count second
+    // ("Full review, all 7 (recommended)"). With that header, the rating and an all-7 option suffice.
+    const lead = text.split(/\r?\n|\s+(?=Project\/branch\/task:)/, 1)[0]!;
+    if (/^\s*focus\s*$/i.test(header ?? '') && rated(text) && options.length >= 2 && !issueLabeled(options)
+      && options.some(({ label }) => /\ball (?:7|seven)\b/i.test(label))) return true;
     return /^I(?:['’]ve| have) rated this plan (?:10(?:\.0+)?|[0-9](?:\.\d+)?)\/10 on design completeness\.[\s\S]*\bWant me to focus on specific areas instead(?: of all (?:7|seven))?\?/i.test(text)
       || (/\ball (?:7|seven) (?:design )?(?:dimensions|passes)\b/i.test(title) && /\bfocus\b/i.test(title)
-        && (/\bdesign\b/i.test(title) || rated.test(text.slice(title.length))) && /\?\s*$/.test(title));
+        && (/\bdesign\b/i.test(title) || rated(text.slice(title.length))) && /\?\s*$/.test(title))
+      || (/\bfocus\b/i.test(lead) && rated(text) && options.length >= 2 && !issueLabeled(options)
+        && (/\ball (?:7|seven)\s+[a-z]/i.test(lead) || options.some(({ label }) => /^\s*(?:[A-Z][).:]\s*)?all (?:7|seven)\s+[a-z]/i.test(label))));
   });
 
 // Require a choice about the supplied UI, not a workflow offer after focus.

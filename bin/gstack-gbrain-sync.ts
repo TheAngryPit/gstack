@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * gstack-gbrain-sync — V1 unified sync verb.
  *
@@ -51,6 +51,7 @@ import {
 } from "../lib/gbrain-sources";
 import { detectAutopilot, decideSourceRemove, decideCodeSync } from "../lib/gbrain-guards";
 import { writeReceipt } from "../lib/egress-receipt";
+import { bunIsolationArgs } from "../lib/bun-isolation";
 import { dbUnreachableReason, localEngineStatus, localEngineStatusDetail, type LocalEngineStatus } from "../lib/gbrain-local-status";
 import { buildGbrainEnv, spawnGbrain, spawnGbrainAsync, execGbrainJson, NEEDS_SHELL_ON_WINDOWS, bashScriptInvocation } from "../lib/gbrain-exec";
 import { repoPolicyTier as sharedRepoPolicyTier } from "../lib/gbrain-repo-policy-client";
@@ -1224,6 +1225,18 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     return skipStageForLocalStatus("code", localStatus, t0);
   }
 
+  // #1734: refuse on an active autopilot BEFORE any source-metadata change
+  // (Step 0b rename, Step 1 `sources add`), so a refused stage leaves the
+  // brain's source list untouched. The check right before the destructive walk
+  // below stays: autopilot can start while the steps in between run.
+  const refusedAutopilot = (signal: string | null): StageResult => ({
+    name: "code", ran: true, ok: false, duration_ms: Date.now() - t0,
+    summary: `refused: gbrain autopilot active (${signal}). Stop autopilot, then re-run /sync-gbrain.`,
+    detail: { source_id: sourceId, source_path: root, status: "refused-autopilot" },
+  });
+  const apEarly = detectAutopilot(gbrainEnv);
+  if (apEarly.active) return refusedAutopilot(apEarly.signal);
+
   // Step 0a: Best-effort cleanup of pre-pathhash legacy source (v1.x form).
   // Earlier /sync-gbrain versions registered `gstack-code-<slug>` (no path
   // suffix). On a multi-worktree repo, those collapsed onto a single id
@@ -1307,13 +1320,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   //     --allow-reclone. Both surface a visible reason and fail the stage so the
   //     verdict shows ERR rather than silently skipping protection.
   const apBeforeWalk = detectAutopilot(gbrainEnv);
-  if (apBeforeWalk.active) {
-    return {
-      name: "code", ran: true, ok: false, duration_ms: Date.now() - t0,
-      summary: `refused: gbrain autopilot active (${apBeforeWalk.signal}). Stop autopilot, then re-run /sync-gbrain.`,
-      detail: { source_id: sourceId, source_path: root, status: "refused-autopilot" },
-    };
-  }
+  if (apBeforeWalk.active) return refusedAutopilot(apBeforeWalk.signal);
   const reclone = decideCodeSync(sourceId, gbrainEnv, args.allowReclone);
   if (!reclone.allow) {
     return {
@@ -1611,7 +1618,7 @@ function runMemoryIngest(args: CliArgs, previous: SyncState, consent: Transcript
   }
 
   const ingestPath = join(import.meta.dir, "gstack-memory-ingest.ts");
-  const ingestArgs = ["run", ingestPath];
+  const ingestArgs = [...bunIsolationArgs(), "run", ingestPath];
   if (args.mode === "full") ingestArgs.push("--bulk");
   else ingestArgs.push("--incremental");
   if (args.mode === "full" && consent.affirmative && consent.window !== "recent") ingestArgs.push("--all-history");

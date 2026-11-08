@@ -2,8 +2,8 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fixtureDocs, gitAt, repoSnapshot } from './helpers/docsync-fixture';
-import { docsCommandAllowed, docsNativeInterface, docsSessionOptions, docsToolFailures } from './helpers/docsync-observer';
+import { DOC_PATH, fixtureDocs, gitAt, repoSnapshot } from './helpers/docsync-fixture';
+import { docsCommandAllowed, docsCompletedRead, docsNativeInterface, docsSessionOptions, docsToolFailures, docsWriteFailures } from './helpers/docsync-observer';
 import { parseNDJSON, type SkillTestResult } from './helpers/session-runner';
 
 let fixture: ReturnType<typeof fixtureDocs>;
@@ -57,7 +57,7 @@ test('captured check-ignore read is declared, executes without changing the repo
   expect(result.stdout).toContain('.qa-state');
   expect(docsToolFailures(nativeResult(command, result.stdout), fixture, [], true)).toEqual([]);
   expect(repoSnapshot(fixture.repo)).toEqual(before);
-  for (const denied of ['git check-ignore -v .qa-state; ls', 'git check-ignore -v .qa-state > out.txt']) {
+  for (const denied of ['git check-ignore -v .qa-state; git add .qa-state', 'git check-ignore -v .qa-state > out.txt']) {
     expect(docsCommandAllowed(denied, fixture)).toBe(false);
   }
 });
@@ -72,7 +72,7 @@ test('captured tracked-file listing is a declared read and leaves the repository
   expect(result.status).toBe(0);
   expect(docsToolFailures(nativeResult(command, result.stdout), fixture, [], true)).toEqual([]);
   expect(repoSnapshot(fixture.repo)).toEqual(before);
-  for (const rejected of ['git ls-tree -r HEAD > tree.txt', 'git ls-tree -r HEAD | head', 'git -c core.pager=less ls-tree HEAD']) {
+  for (const rejected of ['git ls-tree -r HEAD > tree.txt', 'git ls-tree -r HEAD | tee tree.txt', 'git -c core.pager=less ls-tree HEAD']) {
     expect(docsCommandAllowed(rejected, fixture)).toBe(false);
   }
 });
@@ -96,8 +96,8 @@ test.each([
   '{ git rev-parse HEAD; }', 'git rev-parse HEAD^{tree,commit}', 'git rev-parse HEAD@{0..2}',
   'git rev-parse HEAD^{tree}{,x}', 'git rev-parse HEAD^{tree', 'git rev-parse HEAD^{tree}}',
   'git rev-parse {HEAD}', 'git rev-parse HEAD$(pwd)', 'git rev-parse "HEAD$(pwd)"',
-  'git rev-parse `pwd`', 'git rev-parse ${HEAD}', 'git rev-parse HEAD; git status',
-  'git rev-parse HEAD && git status', 'git rev-parse HEAD | cat',
+  'git rev-parse `pwd`', 'git rev-parse ${HEAD}', 'git rev-parse HEAD; git add app.ts',
+  'git rev-parse HEAD && git commit -m changed', 'git rev-parse HEAD | sh',
   'git rev-parse HEAD > out.md', 'git rev-parse HEAD 2>/tmp/leak', 'git rev-parse HEAD < in.md',
   'git rev-parse HEAD\ngit status', 'git rev-parse HEAD &', 'git rev-parse HEAD\\^{tree}',
   'git rev-parse "HEAD^{tree}', "git rev-parse 'HEAD^{tree}", 'git rev-parse HEAD*',
@@ -232,6 +232,67 @@ test('the installed docs-candidate helper is admitted only with a private .json 
   ]) expect(docsCommandAllowed(command, fixture), command).toBe(false);
   expect(docsNativeInterface(fixture)).toContain(`${fixture.skills.split(path.sep).join('/')}/bin/gstack-docs-candidate snapshot`);
   expect(docsNativeInterface(fixture)).toContain('compare <that .json> and --help commands');
+});
+
+// Train gate 39904966815 and GSTA-63's focused run joined the candidate's --help onto a line of reads; v1.91.185.0 moved the
+// own-call rule into the sentence naming --help and the slip came back four times (JOINED_READ_LINES below). The --help only
+// prints usage, so it now joins a line of reads like a Git read; every other own-call command stays alone.
+test('a candidate --help joined to reads is a read, and the interface names it as the one exception to the own-call rule', () => {
+  const skills = fixture.skills.split(path.sep).join('/');
+  const candidate = `${skills}/bin/gstack-docs-candidate`;
+  const joined = `git diff; git diff --cached; cat options.ts; ls -la handbook handbook/reference handbook/reference/commands; ${candidate} --help`;
+  expect(docsCommandAllowed(joined, fixture)).toBe(true);
+  for (const command of [`${candidate} --help`, `${candidate} --help 2>&1`, `git status; ${candidate} snapshot --help`, `${candidate} compare --help 2>/dev/null; git log --oneline -3`,
+    `${candidate} --help | head -20`]) expect(docsCommandAllowed(command, fixture), command).toBe(true);
+  const record = path.join(fixture.home, 'c.json');
+  for (const command of [
+    `git status; ${candidate} snapshot --out ${record} --audit-id a --mode edit --base main`, `git status; ${candidate} compare ${record}`,
+    `${candidate} --help; git add app.ts`, `${candidate} --help > ${path.join(fixture.home, 'usage.md')}`, `${candidate} --help | sh`,
+    `echo x | ${candidate} --help`, `git status | ${candidate} --help`, `cd ${fixture.repo} && ${candidate} --help`, `git status; ${candidate} --help snapshot`,
+    `git status; ${candidate} --version`, `git status; ${candidate} -h`, `git status; ${candidate} --help --exec rm`,
+    `git status; ~/.claude/skills/gstack/bin/gstack-docs-candidate --help`, `git status; ${path.join(path.dirname(fixture.home), 'bin/gstack-docs-candidate')} --help`,
+    `git status; ${skills}/bin/gstack-skill-start --help`, `git status; ${skills}/bin/gstack-skill-end --help`,
+  ]) expect(docsCommandAllowed(command, fixture), command).toBe(false);
+  const sentence = docsNativeInterface(fixture).split(/(?<=\.)\s+(?=[A-Z])/).find(part => part.includes('gstack-docs-candidate snapshot'));
+  expect(sentence).toContain('as its own Bash call, with nothing joined before or after it');
+  expect(sentence).not.toContain('a --help is no exception');
+  expect(docsNativeInterface(fixture)).toContain(`So may the installed ${candidate} --help, alone or after snapshot or compare, because it only prints usage (the one exception)`);
+});
+
+// Five red ship-docsync parents, each red only on 'command outside declared docs observation interface', and each with exactly
+// one refused line (every other Bash call of the five captures replays clean): four joined the candidate's --help onto a line of
+// reads, and gate 40643690306 put `git tag` in one. {home} is the fixture home; the sha is the capture file's sha256 prefix.
+const JOINED_READ_LINES: Array<[source: string, scenario: 'current' | 'store', line: string]> = [
+  ['screen 40558235014 slice 5 @ 70cedc3d, capture c73fb9d0b1b0', 'current',
+    'git diff main HEAD; cat personal-note.txt; ls -la; find handbook; {home}/.claude/skills/gstack/bin/gstack-docs-candidate --help'],
+  ['gate 40600731931 slice 4 @ 5fef38a5, capture 606503d8b78a', 'store',
+    'cat handbook/reference/commands/widget.md.tmpl; echo ---; cat CHANGELOG.md TODOS.md VERSION package.json AGENTS.md; echo ---; cat personal-note.txt; echo ---; find handbook; {home}/.claude/skills/gstack/bin/gstack-docs-candidate --help'],
+  ['screen 40627127462 slice 5 @ 76a155d4, capture 67fa4dea377a', 'current',
+    'git diff main...HEAD; cat handbook/reference/commands/widget.md.tmpl; ls -la handbook handbook/reference handbook/reference/commands; cat personal-note.txt | head -3; {home}/.claude/skills/gstack/bin/gstack-docs-candidate --help'],
+  ['screen 40627127462 rerun 1 @ 76a155d4, capture 53d06fea1a89', 'current',
+    'git diff main HEAD; git rev-parse origin/main; {home}/.claude/skills/gstack/bin/gstack-docs-candidate --help 2>&1'],
+  ['gate 40643690306 slice 4 @ c188a78c, capture 6ac1902bd83f', 'store',
+    'git rev-parse HEAD origin/main; git merge-base main HEAD; git tag; cat {home}/fixture-interface.md | head -5; ls {home}'],
+];
+
+test.each(JOINED_READ_LINES)('captured joined read line from %s is a declared read', (_source, scenario, line) => {
+  const owned = fixtureDocs(scenario);
+  try {
+    const command = line.replaceAll('{home}', owned.home);
+    const publish = path.join(owned.home, 'fixture-publish.ts');
+    expect(docsCommandAllowed(command, owned, [publish])).toBe(true);
+    expect(docsToolFailures(nativeResult(command, 'usage: gstack-docs-candidate snapshot ...'), owned, [publish], true)).toEqual([]);
+    expect(docsCommandAllowed(`${command}; git add app.ts`, owned, [publish])).toBe(false);
+  } finally { owned.clean(); }
+});
+
+test('operand-free tag listings are reads, and every tag write stays refused', () => {
+  for (const listing of ['git tag', 'git tag -l', 'git tag --list', 'git status; git tag; git log --oneline -3'])
+    expect(docsCommandAllowed(listing, fixture), listing).toBe(true);
+  for (const write of ['git tag v1', 'git tag -a v1 -m release', 'git tag -d v1', 'git tag -f v1 HEAD~1', 'git tag -s v1', 'git tag -v v1', 'git tag -l "v*"',
+    'git tag --contains HEAD', 'git tag -n', 'git tag --sort=-v:refname', 'git tag -l v1', 'git tag; git tag v2', 'git tag | sh'])
+    expect(docsCommandAllowed(write, fixture), write).toBe(false);
+  expect(docsNativeInterface(fixture)).toContain('tag listings with no operand and only -l/--list');
 });
 
 test('the installed lifecycle helpers are admitted for their own --help, which starts nothing', () => {
@@ -405,4 +466,261 @@ test('describe forms that refresh the index or fall outside the declared set, an
   } finally {
     own.clean();
   }
+});
+
+
+// ship-docsync-current on Opus 5.5: run 39347827595 (PR #3300 @ ca215b0) went red only on the parent's joined Git read,
+// and run 39344306426 (PR #3312 @ c895ab9) only on the child's loop that printed each selected file under a header.
+// Both are pure reads; each still runs as declared and leaves the repository unchanged.
+const CURRENT_COMPOSED_READS = [
+  'cat personal-note.txt; echo ---; git diff main HEAD',
+  'for f in AGENTS.md README.md CHANGELOG.md TODOS.md VERSION app.ts package.json handbook/reference/commands/widget.md.tmpl personal-note.txt; do echo "=== $f"; cat $f; done',
+  'git status --porcelain && git diff --cached | head -5',
+  'for doc in README.md AGENTS.md; do git log --oneline -- $doc; done',
+  'for f in app.ts; do echo "== ${f}"; cat "$f" 2>/dev/null; done',
+  // Focused Opus trial after the first repair (2026-10-20): a loop joined to a find.
+  'for f in AGENTS.md README.md CHANGELOG.md TODOS.md VERSION app.ts package.json handbook/reference/commands/widget.md.tmpl; do echo "== $f"; cat $f; done; find <HOME>/repo -name .gstack -not -path "*/.git/*"',
+  'git status; for f in README.md AGENTS.md; do cat $f; done && git rev-parse HEAD',
+  // Round-1 focused trial and the round-2 ship-docsync-completion trial: NUL-separated paths shown one per line.
+  "git ls-files -z --cached --others --exclude-standard | tr '\\0' '\\n'",
+  "git status --porcelain=v1 --ignored; git rev-parse HEAD; git merge-base main HEAD; git branch --show-current; git ls-files -z --cached --others --exclude-standard | tr '\\0' '\\n'",
+];
+
+test('captured composed reads of ship-docsync-current are declared and leave the repository unchanged (39347827595, 39344306426)', () => {
+  const own = fixtureDocs('current');
+  try {
+    expect(docsNativeInterface(own)).toContain('The Git reads above may join such a line too');
+    expect(docsNativeInterface(own)).toContain('A for loop over literal words');
+    const before = repoSnapshot(own.repo);
+    for (const command of CURRENT_COMPOSED_READS.map(line => line.replaceAll('<HOME>', own.home))) {
+      expect(docsCommandAllowed(command, own), command).toBe(true);
+      expect(docsToolFailures(nativeResult(command, 'output', 'docs-dispatch'), own, [], true), command).toEqual([]);
+      const run = spawnSync('bash', ['-c', command], { cwd: own.repo, encoding: 'utf8', timeout: 10000 });
+      expect(run.status, `${command}: ${run.stderr}`).toBe(0);
+    }
+    expect(repoSnapshot(own.repo)).toEqual(before);
+    const doc = path.join(own.repo, DOC_PATH);
+    const source = fs.readFileSync(doc, 'utf8');
+    const credited = (command: string) => docsCompletedRead(nativeResult(command, source), doc, own);
+    expect(credited(`cat ${DOC_PATH}; git status`)).toBe(true);
+    expect(credited(`git status; cat ${DOC_PATH} | head`)).toBe(false);
+    // The focused trial's child read the document only inside its loop.
+    const loop = `for f in personal-note.txt README.md ${DOC_PATH} app.ts; do echo "=== $f"; cat $f; done`;
+    const looped = spawnSync('bash', ['-c', loop], { cwd: own.repo, encoding: 'utf8', timeout: 10000 }).stdout;
+    expect(docsCompletedRead(nativeResult(loop, looped), doc, own)).toBe(true);
+    expect(docsCompletedRead(nativeResult(`for f in ${DOC_PATH}; do cat $f | head -1; done`, source), doc, own)).toBe(false);
+    expect(docsCompletedRead(nativeResult(`for f in ${DOC_PATH}; do cat $f; cat $HOME; done`, source), doc, own)).toBe(false);
+  } finally {
+    own.clean();
+  }
+});
+
+// Run 39338691964 (PR #3308 @ 8da34e2) keeps failing on purpose: the child's stray assignment, and the parent's reads
+// of agents' session transcripts in the Claude config dir (now named off-limits in the interface). Joined Git reads
+// and loops grant no write, bypass option, pipe sink, cd, glob, variable or denied path.
+test.each([
+  'for_none=1; cat AGENTS.md README.md',
+  'find <HOME>/cc/projects -type f',
+  'grep -o SESSION_KIND <HOME>/cc/projects/session/subagents/agent-a.jsonl',
+  'cat README.md; git add app.ts', 'git diff; git commit -m changed', 'ls && git -c core.pager=less show HEAD',
+  'ls; git -C /tmp status', 'cat app.ts | git hash-object -w --stdin', 'cat app.ts | git hash-object --stdin',
+  'cd .. && git status; ls', 'cd handbook; git status', 'git diff > out.md; ls', 'ls; git diff --output=out.md',
+  'git status & ls', 'git status; rm app.ts', 'git log | sh', 'git log | tee log.md', 'git status; cat <HOME>/cc/.claude.json',
+  'git status; git remote get-url origin', "ls; git show 'HEAD", 'git status; ls $HOME',
+  'for f in README.md; do cat $f > out.md; done', 'for f in app.ts; do rm $f; done', 'for f in $(ls); do cat $f; done',
+  'for f in *; do cat $f; done', 'for f in c*/.claude.json; do cat "$f"; done', 'for PATH in /tmp; do cat README.md; done',
+  'for f in README.md; do cat $f; cat $HOME; done', 'for f in README.md; do cat $f; done; rm app.ts',
+  'for f in README.md; do cat $f; done > out.md', 'for f in "README.md"; do cat $f; done', 'for f in ../../outside; do cat $f; done',
+  'for f in ../cc/.claude.json; do cat $f; done', 'for f in app.ts; do git add $f; done', 'for f in a b; do for g in c; do cat $g; done; done',
+  'for f in README.md; do cat $f; done &', 'for f in {README,AGENTS}.md; do cat $f; done', 'for f in ~/x; do cat $f; done',
+  'ls; for f in README.md; do cat $f; done > out.md', 'for f in README.md; do cat $f; done; for g in app.ts; do rm $g; done',
+  'ls; for f in README.md; do cat $f; done | sh', 'cd ..; for f in README.md; do git status; done', 'for f in README.md; do cat $f && done',
+  "git ls-files -z | tr '\\0' '\\n' | sh", "git ls-files -z | tr '\\0' '\\n' > files.md", 'tr a b', "git ls-files | tr '$x' y",
+])('composed reads stay closed to writes and bypasses: %s', command => {
+  const line = command.replaceAll('<HOME>', fixture.home);
+  expect(docsCommandAllowed(line, fixture), line).toBe(false);
+  expect(docsToolFailures(nativeResult(line, 'successful tool acknowledgment', 'docs-dispatch'), fixture, [], true))
+    .toEqual(['command outside declared docs observation interface']);
+});
+
+test('the docs interface names the Claude config dir and private actor state as unreadable', () => {
+  const guidance = docsNativeInterface(fixture);
+  expect(guidance).toContain(`off ${fixture.env.CLAUDE_CONFIG_DIR} except its settings.json`);
+  expect(guidance).toContain("every agent's session transcript");
+  expect(guidance).toContain('judge a child only by the output it returns');
+  expect(guidance).toContain('Every read stays off actor-state.json');
+});
+
+// /ship Step 14.5's continue path (PR 2 of the convergence lane) runs three own-tree housekeeping commands and writes
+// the receipt's docs record inside the repository. The closed interface declares exactly those, byte for byte with the
+// generated section, and nothing adjacent: a reworded exclude line, a bare rm, another receipt subcommand or another
+// write under .gstack/ stay outside it (gate: ship-docsync-completion/current red twice at 775d9804 before they were declared).
+test('Step 14.5 housekeeping commands and the docs record are declared exactly as the generated section writes them', () => {
+  const { DOCS_AUDIT_RECORD, DOCS_AUDIT_RECORD_PATHS, DOCS_AUDIT_RESET, DOCS_TMP_EXCLUDE, docsCapsCommand } = require('./helpers/docsync-interface') as typeof import('./helpers/docsync-interface');
+  const section = fs.readFileSync(path.resolve(import.meta.dir, '..', 'ship/sections/documentation.md'), 'utf8');
+  expect(section).toContain(DOCS_TMP_EXCLUDE);
+  expect(section).toContain(DOCS_AUDIT_RESET);
+  expect(section).toContain('gstack-ship-receipt docs-caps --base <base>');
+  const skills = fixture.skills.split(path.sep).join('/');
+  const caps = docsCapsCommand(skills);
+  const interfaceText = docsNativeInterface(fixture);
+  for (const command of [DOCS_TMP_EXCLUDE, DOCS_AUDIT_RESET, caps, docsCapsCommand('~/.claude/skills/gstack')]) {
+    if (command === caps) expect(interfaceText).toContain(command);
+    expect(docsCommandAllowed(command, fixture)).toBe(true);
+    expect(docsToolFailures(nativeResult(command, 'DOCS_CAP: none declared'), fixture, [], true)).toEqual([]);
+  }
+  for (const command of [DOCS_TMP_EXCLUDE.replace("'/.gstack/tmp/'", "'/.gstack/'"), `${DOCS_TMP_EXCLUDE}; git add -A`, 'rm -f .gstack/tmp', 'rm -rf .gstack/tmp/docs-audit.json',
+    `${skills}/bin/gstack-ship-receipt docs-caps --base feature/docs`, '~/.claude/skills/other/bin/gstack-ship-receipt docs-caps --base main', `${skills}/bin/gstack-ship-receipt write --docs @${DOCS_AUDIT_RECORD}`, `${skills}/bin/gstack-ship-receipt docs-caps --base main --json`]) {
+    expect(docsCommandAllowed(command, fixture)).toBe(false);
+  }
+  const write = (file: string): SkillTestResult => {
+    const parsed = parseNDJSON([
+      { type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'docs-write', name: 'Write', input: { file_path: file, content: '{"status":"current","scope":"handbook"}' } }] } },
+      { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'docs-write', content: 'ok', is_error: false }] } },
+    ].map(event => JSON.stringify(event)));
+    return { ...parsed, exitReason: 'success' } as unknown as SkillTestResult;
+  };
+  expect(docsToolFailures(write(path.join(fixture.repo, DOCS_AUDIT_RECORD)), fixture, [], false)).toEqual([]);
+  expect(docsToolFailures(write(path.join(fixture.repo, DOCS_AUDIT_RECORD)), fixture, [], true)).toEqual([]);
+  expect(docsToolFailures(write(path.join(fixture.repo, DOC_PATH)), fixture, [], true)).toEqual(['read-only docs write attempt']);
+  // The kernel observer sees the exclude file and the record's directories in every scenario that runs the Entry, the fault cases'
+  // unseeded first attempts included, so the shared list is permitted without each caller naming it; anything else under .git or .gstack is not.
+  const observed = (paths: string[]) => ({ complete: true, failures: [], events: paths.map(p => ({ path: p, mask: 0x2, cookie: 0, at: 0 })), changed: paths, before: {}, after: {}, limits: [] });
+  expect(docsWriteFailures(observed(['.qa-state/.observer-check', ...DOCS_AUDIT_RECORD_PATHS]), [])).toEqual([]);
+  expect(docsWriteFailures(observed(['.git/info/attributes']), [])).toEqual(['forbidden docs write: .git/info/attributes']);
+  expect(docsWriteFailures(observed(['.gstack/tmp/review-loop.json']), [DOC_PATH])).toEqual(['forbidden docs write: .gstack/tmp/review-loop.json']);
+  // The Write tool lands the record through `<record>.tmp.<pid>.<12 hex>` + rename (gate: both lifecycle cases red at 0230fc2 on exactly
+  // that sibling). The sibling is admitted only as the cookie-paired source of a move onto the record that leaves nothing behind.
+  const temp = `${DOCS_AUDIT_RECORD}.tmp.564.6161e6c7f0b7`;
+  const moved = (edits: { path: string; mask: number; cookie?: number }[], after: Record<string, string> = {}) => ({
+    complete: true, failures: [], events: edits.map((e, at) => ({ path: e.path, mask: e.mask, cookie: e.cookie ?? 0, at })), changed: Object.keys(after), before: {}, after, limits: [],
+  });
+  const landing = [{ path: temp, mask: 0x100 }, { path: temp, mask: 0x2 }, { path: temp, mask: 0x8 }, { path: temp, mask: 0x40, cookie: 7 }, { path: DOCS_AUDIT_RECORD, mask: 0x80, cookie: 7 }];
+  expect(docsWriteFailures(moved(landing), [])).toEqual([]);
+  expect(docsWriteFailures(moved(landing.slice(1)), [])).toEqual([]);
+  expect(docsWriteFailures(moved(landing, { [temp]: '0:' + 'a'.repeat(64) }), [])).toEqual([`forbidden docs write: ${temp}`]);
+  expect(docsWriteFailures(moved(landing.slice(0, 3)), [])).toEqual([`forbidden docs write: ${temp}`]);
+  expect(docsWriteFailures(moved([...landing.slice(0, 4), { path: '.gstack/tmp/other.json', mask: 0x80, cookie: 7 }]), [])).toEqual([`forbidden docs write: ${temp}`, 'forbidden docs write: .gstack/tmp/other.json']);
+  expect(docsWriteFailures(moved([...landing.slice(0, 3), { path: temp, mask: 0x40, cookie: 7 }, { path: DOCS_AUDIT_RECORD, mask: 0x80, cookie: 7 }, { path: temp, mask: 0x100 }]), [])).toEqual([`forbidden docs write: ${temp}`]);
+  expect(docsWriteFailures(moved([{ path: `${DOC_PATH}.tmp.564.6161e6c7f0b7`, mask: 0x40, cookie: 9 }, { path: DOCS_AUDIT_RECORD, mask: 0x80, cookie: 9 }]), [])).toEqual([`forbidden docs write: ${DOC_PATH}.tmp.564.6161e6c7f0b7`]);
+  expect(docsToolFailures(write(path.join(fixture.repo, '.gstack/tmp/review-loop.json')), fixture, [], false)).toEqual(['non-document product write attempt', 'write outside docs fixture authority']);
+  expect(docsToolFailures(write(path.join(fixture.repo, '.gstack/ship-policy.json')), fixture, [], false)).toEqual(['non-document product write attempt', 'write outside docs fixture authority']);
+  expect(gitAt(fixture.repo, 'rev-parse', '--verify', 'origin/main')).toBe(gitAt(fixture.repo, 'rev-parse', '--verify', 'main'));
+  // The declared gate must run from the fixture install: bin/gstack-ship-receipt imports ../lib/*, so the install carries lib/ too.
+  const gate = spawnSync('bun', ['--no-env-file', '--config=/dev/null', path.join(fixture.skills, 'bin/gstack-ship-receipt'), 'docs-caps', '--base', 'main'],
+    { cwd: fixture.repo, encoding: 'utf8', env: { ...process.env, ...fixture.env, HOME: fixture.home }, timeout: 60_000 });
+  expect(gate.stderr).toBe('');
+  expect(gate.stdout.trim()).toBe('DOCS_CAP: none declared');
+  expect(gate.status).toBe(0);
+});
+
+// Gates 40458489644 and 40477638211 (ship-docsync-store, both red on the fourth call, both green on the in-run rerun): each
+// parent oriented with one line of reads that ended in `git branch -a`, and the grammar admitted only `branch --show-current`.
+// A branch listing reads refs, so every operand-free listing form is a Git read; an operand or any other option still writes.
+test.skipIf(process.platform === 'win32')('the captured store orientations with git branch -a replay clean, and branch writes stay refused', () => {
+  const store = fixtureDocs('store');
+  try {
+    const captured = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-branch-listing-public.json'), 'utf8')) as
+      { runs: Array<{ sourceRun: string; calls: SkillTestResult['toolCalls'] }> };
+    const publish = path.join(store.home, 'fixture-publish.ts');
+    const fill = (text: string) => text.replaceAll('{home}', store.home).replaceAll('{shard}', path.dirname(path.dirname(store.home)));
+    expect(captured.runs).toHaveLength(2);
+    for (const run of captured.runs) {
+      const replayed = run.calls.map(call => ({ ...call, input: Object.fromEntries(Object.entries(call.input).map(([key, value]) =>
+        [key, typeof value === 'string' ? fill(value) : value])), output: fill(call.output) }));
+      const orientation = replayed.find(call => /;\s*git branch -a(?:;|$)/.test(String(call.input?.command ?? '')));
+      expect(orientation, run.sourceRun).toBeDefined();
+      expect(docsToolFailures({ toolCalls: replayed, exitReason: 'success' } as SkillTestResult, store, [publish], true), run.sourceRun).toEqual([]);
+      const narrowed = String(orientation!.input.command).replace(/git branch -a/, 'git branch --show-current');
+      expect(docsCommandAllowed(narrowed, store, [publish])).toBe(true);
+    }
+    for (const listing of ['git branch', 'git branch -a', 'git branch -avv', 'git branch -r', 'git branch --list', 'git branch --all --no-color', 'git status; git branch -a; git log --oneline -3'])
+      expect(docsCommandAllowed(listing, store, [publish]), listing).toBe(true);
+    for (const write of ['git branch feature', 'git branch -d feature', 'git branch -D feature', 'git branch -m old new', 'git branch -M main', 'git branch -f main HEAD~1',
+      'git branch --set-upstream-to=origin/main', 'git branch -u origin/main', 'git branch -c a b', 'git branch --edit-description', 'git branch --list "feat*"',
+      'git branch --contains HEAD', 'git branch -ad feature', 'git branch -a; rm -rf handbook'])
+      expect(docsCommandAllowed(write, store, [publish]), write).toBe(false);
+    expect(docsNativeInterface(store, [publish], false, true)).toContain('branch listings with no operand and only --show-current, -a/--all, -r/--remotes, -v/--verbose, -l/--list, --no-color or --no-abbrev (no --merged, --sort, --format or --contains)');
+  } finally { store.clean(); }
+});
+
+// Screens 40822033640 and 40815828320 and gate 40809051510 (ship-docsync-current, -completion and -store, each green on the
+// in-run rerun): each parent joined `cat <installed gstack-docs-candidate> --help 2>&1 | head -N` to a line of reads. GNU cat
+// printed its own usage and read nothing; a BSD cat would read the operand, which stays checked as a read either way.
+test.skipIf(process.platform === 'win32')('the captured lines joining a read command\'s --help replay clean, and --help grants nothing else', () => {
+  const captured = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-read-help-public.json'), 'utf8')) as
+    { runs: Array<{ sourceRun: string; scenario: 'current' | 'updated' | 'store'; calls: SkillTestResult['toolCalls'] }> };
+  expect(captured.runs.map(run => run.scenario)).toEqual(['current', 'updated', 'store']);
+  for (const run of captured.runs) {
+    const fixture = fixtureDocs(run.scenario);
+    try {
+      const publish = path.join(fixture.home, 'fixture-publish.ts');
+      const fill = (text: string) => text.replaceAll('{home}', fixture.home).replaceAll('{shard}', path.dirname(path.dirname(fixture.home)));
+      const replayed = run.calls.map(call => ({ ...call, input: Object.fromEntries(Object.entries(call.input).map(([key, value]) =>
+        [key, typeof value === 'string' ? fill(value) : value])), output: fill(call.output) }));
+      const joined = replayed.filter(call => /; cat \S+\/bin\/gstack-docs-candidate --help 2>&1 \| head -\d+(?:;|$)/.test(String(call.input?.command ?? '')));
+      expect(joined, run.sourceRun).toHaveLength(1);
+      expect(docsToolFailures({ toolCalls: replayed, exitReason: 'success' } as SkillTestResult, fixture, [publish], run.scenario !== 'updated'), run.sourceRun).toEqual([]);
+    } finally { fixture.clean(); }
+  }
+  const fixture = fixtureDocs('current');
+  try {
+    const publish = path.join(fixture.home, 'fixture-publish.ts');
+    const candidate = path.join(fixture.skills, 'bin/gstack-docs-candidate');
+    for (const line of [`git status; cat ${candidate} --help 2>&1 | head -5`, 'cat README.md --help', 'git status; cat README.md --help', 'ls handbook --help; git status', 'git status; cat --help 2>&1 | head -5'])
+      expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(true);
+    for (const line of ['git status; cat /etc/hostname --help | head -5', 'git status; cat README.md --help > out.txt', 'git status; echo x | cat README.md --help',
+      `git status; cat ${path.join(fixture.home, 'actor-state.json')} --help`, 'cd handbook; git status; cat README.md --help', 'git status; cat README.md --help; rm -rf handbook',
+      'git status; cat README.md --help $(pwd)', 'git status; tee out.txt --help', 'git status; find . --help -delete'])
+      expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
+  } finally { fixture.clean(); }
+});
+
+// Main backstop 41817566885 (b244e6d1, paid-slice-5-a1, ship-docsync-current, green on the in-run rerun): the parent ran
+// `mkdir -p <home>/ship2` as its own call, then snapshotted into it. The interface lets a private artifact live "in a new
+// directory you create there", and gstack-docs-candidate snapshot does not create the parent of its --out.
+test.skipIf(process.platform === 'win32')('the captured private-directory mkdir replays clean, and mkdir grants nothing else', () => {
+  const captured = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-private-mkdir-public.json'), 'utf8')) as
+    { scenario: 'current'; calls: SkillTestResult['toolCalls'] };
+  const fixture = fixtureDocs(captured.scenario);
+  try {
+    const publish = path.join(fixture.home, 'fixture-publish.ts');
+    const fill = (text: string) => text.replaceAll('{home}', fixture.home).replaceAll('{shard}', path.dirname(path.dirname(fixture.home)));
+    const replayed = captured.calls.map(call => ({ ...call, input: Object.fromEntries(Object.entries(call.input).map(([key, value]) =>
+      [key, typeof value === 'string' ? fill(value) : value])), output: fill(call.output) }));
+    expect(replayed.filter(call => /^mkdir /.test(String(call.input?.command ?? ''))).map(call => call.input.command))
+      .toEqual([`mkdir -p ${fixture.home}/ship2`]);
+    expect(docsToolFailures({ toolCalls: replayed, exitReason: 'success' } as SkillTestResult, fixture, [publish], true)).toEqual([]);
+    for (const line of [`mkdir -p ${fixture.home}/ship2`, `mkdir ${fixture.home}/docs-audit`, `mkdir -p '${fixture.home}/audit-a1'`])
+      expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(true);
+    const outside = fs.mkdtempSync(path.join(path.dirname(fixture.home), 'ds-mkdir-outside-'));
+    try {
+      fs.symlinkSync(outside, path.join(fixture.home, 'linked'));
+      for (const line of [`mkdir -p ${fixture.repo}/notes`, `mkdir -p ${fixture.repo}`, `mkdir -p ${fixture.home}/state`, `mkdir -p ${fixture.home}/state/x`,
+        `mkdir -p ${fixture.home}/.claude`, `mkdir -p ${fixture.skills}/x`, `mkdir -p ${fixture.env.CLAUDE_CONFIG_DIR}`, `mkdir -p ${fixture.home}/remote.git`,
+        `mkdir -p ${fixture.home}/a/b`, `mkdir -p ${fixture.home}/..`, `mkdir -p ${fixture.home}/x/..`, `mkdir -p ${fixture.home}`, `mkdir -p ${fixture.home}/linked`,
+        `mkdir -p ${outside}/x`, 'mkdir -p ship2', 'mkdir -p ~/ship2', 'mkdir -p $HOME/ship2', `mkdir -p ${fixture.home}/ship*`, `mkdir -m 777 ${fixture.home}/x`,
+        `mkdir -p ${fixture.home}/x ${fixture.home}/y`, `mkdir -p ${fixture.home}/x && git status`, `git status; mkdir -p ${fixture.home}/x`,
+        `mkdir -p ${fixture.home}/x; rm -rf ${fixture.repo}`, `mkdir -p ${fixture.home}/x > ${fixture.repo}/out.md`, `mkdir -pv ${fixture.home}/x`])
+        expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
+    } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+  } finally { fixture.clean(); }
+});
+
+// Value: protects=the interface says how the private directory it offers is made, the form the observer admits; fails_when=the
+//   sentence stops naming the own-call mkdir; why_new=ship-docsync-store went red twice (#3997 screen 41850017482 slice 2, census
+//   41987975678 slice 4) on one read line each that carried a no-op mkdir stand-in; seam=none; no_claim=that the model now never
+//   probes, which only paid runs measure
+test('the interface names its one mkdir form, and both captured mkdir stand-ins stay refused', () => {
+  const fixture = fixtureDocs('store');
+  try {
+    const publish = path.join(fixture.home, 'fixture-publish.ts');
+    const sentence = docsNativeInterface(fixture, [publish]).split(/(?<=\.)\s+/).find(part => part.startsWith('A private JSON/Markdown artifact'));
+    expect(sentence).toContain(`(with one mkdir ${fixture.home}/<name>, optionally -p, as its own Bash call: the only mkdir this interface admits`);
+    expect(docsCommandAllowed(`mkdir ${fixture.home}/docs-store`, fixture, [publish])).toBe(true);
+    for (const line of [
+      `git rev-parse HEAD; git merge-base main HEAD; git rev-parse origin/main; mkdir -p /dev/null 2>/dev/null; ls ${fixture.home}/state`,
+      `git tag --list; git log --oneline --all; mkdir_check=1; ls ${fixture.home}`,
+    ]) expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
+  } finally { fixture.clean(); }
 });

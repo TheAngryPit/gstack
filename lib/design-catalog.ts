@@ -12,13 +12,14 @@
 //     │                                          design-html anti-slop line (catalogEntries)
 //     ├─ scripts/resolvers/design-checklist.ts   review/design-checklist.md (generated)
 //     ├─ bin/gstack-design-detect.ts             normalizes engine findings by impeccableId
+//     ├─ lib/design-lint/rules/ids.ts            copy-tier ids but empty-mount-node print the catalog's `fix` (test-enforced)
 //     └─ design/src/brief.ts                     MOCKUP_NEVER_NAMES in the image-generation prompt
 //
 // Rule ids. An entry's `impeccableId` is set only when that id exists in
 // test/fixtures/impeccable-antipatterns.json (test-enforced), and rendered
 // prose brackets an id only in that case, so a reader never meets a bracketed
 // id the detector cannot emit. Everything else is a gstack-only tell that the
-// LLM pass judges. The four lists this file replaced (constants.ts, the
+// LLM pass judges (or, for an entry with a `fix`, the design lint's copy tier reports). The four lists this file replaced (constants.ts, the
 // consultation proposal section, design-html's blacklist, and the review
 // checklist) had drifted apart; they now render from here.
 
@@ -59,6 +60,10 @@ export interface DesignSlopEntry {
   /** roles the values are banned for; present iff values is */
   roles?: FontRole[];
   handoff?: Handoff;
+  /** one-line fix the design lint's copy tier prints beside this id (lib/design-lint/rules/copy.ts) */
+  fix?: string;
+  /** reported only by gstack-design-lint, with its fix; never rendered into skill prose (token weight) */
+  checkerOnly?: true;
   source: 'gstack' | 'impeccable' | 'both';
   /** the 11 originals; AI_SLOP_BLACKLIST derives from these verbatim */
   legacyBlacklist?: true;
@@ -299,7 +304,7 @@ export const DESIGN_SLOP_CATALOG: DesignSlopEntry[] = [
     prose: '"Seamless", "effortless", "supercharge", "streamline": words that describe nothing. Say what the product does.',
     category: 'copy', kind: 'slop', detect: ['engine', 'grep'], confidence: 'MEDIUM', tier: 'ask', impact: 'medium',
     heuristic: 'Grep visible copy for seamless, effortless, supercharge, streamline, revolutionize, unlock, empower, elevate.',
-    handoff: 'clarify', source: 'impeccable',
+    handoff: 'clarify', source: 'impeccable', fix: 'say the specific thing',
   },
   {
     id: 'aphoristic-cadence', impeccableId: 'aphoristic-cadence', name: 'Aphoristic cadence',
@@ -459,6 +464,122 @@ export const DESIGN_SLOP_CATALOG: DesignSlopEntry[] = [
     handoff: 'harden', source: 'gstack',
   },
 
+  // ── Craft tells (GSTA-92): grep-checkable; the design lint's copy tier (lib/design-lint/rules/copy.ts)
+  // prints each id with its `fix`. checkerOnly keeps them out of the rendered skill lists. Adapted from Elaya's landing-page-design and
+  // redesign-skill (MIT); see NOTICE.md.
+  {
+    id: 'placeholder-name', name: 'Placeholder people',
+    prose: 'John Doe and Jane Doe in quotes, team rows and demo data. A supplied name, or one that fits the product.',
+    category: 'copy', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep visible copy for "John Doe" and "Jane Doe".',
+    handoff: 'clarify', source: 'gstack', checkerOnly: true, fix: 'use a supplied name, or one that fits the product in sample data',
+  },
+  {
+    id: 'placeholder-brand', name: 'Placeholder brands',
+    prose: 'Acme, Nexus and SmartFlow as the customers in logos, quotes and sample data. A supplied customer, or none.',
+    category: 'copy', kind: 'slop', detect: ['grep'], confidence: 'MEDIUM', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep visible copy for Acme, Nexus, SmartFlow.',
+    handoff: 'clarify', source: 'gstack', checkerOnly: true, fix: 'use a supplied customer, or a fitting name in sample data',
+  },
+  {
+    id: 'lorem', name: 'Lorem ipsum',
+    prose: 'Lorem ipsum where a visitor can read it. Write the draft copy.',
+    category: 'copy', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'high',
+    heuristic: 'Grep visible copy for "lorem ipsum".',
+    handoff: 'clarify', source: 'gstack', checkerOnly: true, fix: 'write real copy',
+  },
+  {
+    id: 'round-number', name: 'Round sample numbers',
+    prose: '99.9% uptime, 50% faster, 10x, 10,000+ users: round figures nobody measured. The supplied number, or no claim.',
+    category: 'copy', kind: 'slop', detect: ['grep'], confidence: 'MEDIUM', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep copy for 99.9%, a round percentage before faster, more or uptime, 10x, and "<n>0+ users".',
+    handoff: 'clarify', source: 'gstack', checkerOnly: true, fix: 'use the supplied figure, or drop the claim',
+  },
+  {
+    id: 'needs-proof', name: 'Unresolved proof marker',
+    prose: 'A `[Needs proof: …]` marker still on the page. Supply the proof or cut the claim before it ships.',
+    category: 'copy', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'high',
+    heuristic: 'Grep for `[Needs proof:`.',
+    handoff: 'clarify', source: 'gstack', checkerOnly: true, fix: 'supply the proof or remove the claim before publishing',
+  },
+  {
+    id: 'oops', name: '"Oops" errors',
+    prose: '"Oops!" in place of what happened and what to do next.',
+    category: 'copy', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'polish',
+    heuristic: 'Grep visible copy for "oops".',
+    handoff: 'clarify', source: 'gstack', checkerOnly: true, fix: 'say what happened and what to do',
+  },
+  {
+    id: 'scroll-listener', name: 'Scroll-listener reveals',
+    prose: 'Reveals driven by an unthrottled `scroll` listener. IntersectionObserver for reveals; scroll-linked effects read scroll inside requestAnimationFrame.',
+    category: 'motion', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep scripts for `addEventListener(\'scroll\'`.',
+    handoff: 'animate', source: 'gstack', checkerOnly: true, fix: 'use IntersectionObserver; read scroll inside requestAnimationFrame for a scroll-linked effect',
+  },
+  {
+    id: 'dead-link', name: 'Dead links',
+    prose: '`href="#"` on links and buttons that go nowhere. Link it, or render the control disabled.',
+    category: 'states', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep markup for `href="#"`.',
+    handoff: 'harden', source: 'gstack', checkerOnly: true, fix: 'link it, or render the control disabled',
+  },
+  {
+    id: 'alert', name: 'alert() messages',
+    prose: '`alert()` for errors and confirmations. Show the message inline, next to what it is about.',
+    category: 'states', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep scripts and inline handlers for `alert(`.',
+    handoff: 'harden', source: 'gstack', checkerOnly: true, fix: 'show the message inline',
+  },
+  {
+    id: 'img-no-alt', name: 'Image without alt',
+    prose: 'An `<img>` with no alt attribute. Describe a meaningful image; `alt=""` on a decorative one.',
+    category: 'imagery', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep markup for `<img` tags with no `alt=`.',
+    handoff: 'harden', source: 'gstack', checkerOnly: true, fix: 'add alt text (alt="" when decorative)',
+  },
+  {
+    id: 'vh-height', name: '100vh sections',
+    prose: 'Full-height sections on `100vh`, which jump under mobile browser chrome. `min-height: 100dvh`.',
+    category: 'layout', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'polish',
+    heuristic: 'Grep CSS for `height: 100vh` with no later `100dvh`, and for `h-screen`.',
+    handoff: 'layout', source: 'gstack', checkerOnly: true, fix: 'use min-height: 100dvh (a 100vh line followed by a 100dvh fallback is fine)',
+  },
+  {
+    id: 'missing-title', name: 'Missing title',
+    prose: 'A full HTML document with no `<title>`. The tab, the bookmark and the search result all read it.',
+    category: 'browser-surface', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep each full document for a non-empty `<title>`.',
+    handoff: 'harden', source: 'gstack', checkerOnly: true, fix: 'add a <title>',
+  },
+  {
+    id: 'missing-meta-description', name: 'Missing meta description',
+    prose: 'A full HTML document with no meta description. Search results and link previews make one up.',
+    category: 'browser-surface', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Grep each full document for `<meta name="description"`.',
+    handoff: 'harden', source: 'gstack', checkerOnly: true, fix: 'add <meta name="description">',
+  },
+  {
+    id: 'missing-favicon', name: 'Missing favicon',
+    prose: 'No favicon, so every tab shows the browser default. A mark from the brand; an inline SVG when no file exists.',
+    category: 'browser-surface', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'polish',
+    heuristic: 'Grep each full document for `<link rel="icon"`.',
+    handoff: 'polish', source: 'gstack', checkerOnly: true, fix: 'add a favicon <link rel="icon">',
+  },
+  {
+    id: 'missing-skip-link', name: 'Missing skip link',
+    prose: 'No "Skip to content" link as the first focusable element, targeting `<main>`. Keyboard users tab through the whole header on every page.',
+    category: 'scaffold', kind: 'slop', detect: ['grep'], confidence: 'HIGH', tier: 'ask', impact: 'medium',
+    heuristic: 'Check that the first focusable element in `<body>` links to the id on `<main>`.',
+    handoff: 'harden', source: 'gstack', checkerOnly: true, fix: 'add a "Skip to content" link first in <body> whose #id exists on <main>',
+  },
+  {
+    id: 'missing-aria-current', name: 'Unmarked current page',
+    prose: 'Route navigation with no `aria-current="page"` on the current link. Mark it and style it; in-page section links stay unmarked.',
+    category: 'states', kind: 'slop', detect: ['grep'], confidence: 'MEDIUM', tier: 'ask', impact: 'polish',
+    heuristic: 'Grep `<nav>` blocks with two or more route links for `aria-current="page"`.',
+    handoff: 'harden', source: 'gstack', checkerOnly: true, fix: 'mark the current nav link aria-current="page"',
+  },
+
   // ── Quality rules the detector knows. ──
   {
     id: 'organic-clip-path', impeccableId: 'organic-clip-path', name: 'Organic clip-path',
@@ -525,7 +646,7 @@ export const DESIGN_SLOP_CATALOG: DesignSlopEntry[] = [
     prose: '`transition: all`, or transitions on width, height, top, left. Animate transform and opacity.',
     category: 'motion', kind: 'quality', detect: ['engine', 'grep'], confidence: 'HIGH', tier: 'auto-fix', impact: 'polish',
     heuristic: 'Grep `transition` for `all` or layout properties.',
-    handoff: 'animate', source: 'impeccable',
+    handoff: 'animate', source: 'impeccable', fix: 'list the transitioned properties',
   },
   {
     id: 'line-length', impeccableId: 'line-length', name: 'Line length',
@@ -707,8 +828,11 @@ export interface RenderCatalogOptions {
   omitImpact?: Impact[];
 }
 
+/** Entries skill prose renders: everything except the lint-only craft ids. */
+export const RENDERED: readonly DesignSlopEntry[] = DESIGN_SLOP_CATALOG.filter(e => !e.checkerOnly);
+
 export function selectCatalog(o: RenderCatalogOptions): DesignSlopEntry[] {
-  return DESIGN_SLOP_CATALOG.filter(e =>
+  return RENDERED.filter(e =>
     (!o.kind || e.kind === o.kind)
     && !(o.omitImpact && o.omitImpact.includes(e.impact)),
   );
@@ -721,12 +845,12 @@ export function renderCatalog(o: RenderCatalogOptions): string {
 
 /** Slop the detector knows, minus the 11 legacy lines: what design doctrine renders as bracketed ids. */
 export function detectorSlopEntries(o: { omitPolish?: boolean } = {}): DesignSlopEntry[] {
-  return DESIGN_SLOP_CATALOG.filter(e => e.kind === 'slop' && e.impeccableId && !e.legacyBlacklist && !(o.omitPolish && e.impact === 'polish'));
+  return RENDERED.filter(e => e.kind === 'slop' && e.impeccableId && !e.legacyBlacklist && !(o.omitPolish && e.impact === 'polish'));
 }
 
 /** gstack-only slop tells (no detector rule), minus the legacy lines: the LLM pass is the detector. */
 export function judgmentTellEntries(o: { omitPolish?: boolean } = {}): DesignSlopEntry[] {
-  return DESIGN_SLOP_CATALOG.filter(e => e.kind === 'slop' && !e.impeccableId && !e.legacyBlacklist && !(o.omitPolish && e.impact === 'polish'));
+  return RENDERED.filter(e => e.kind === 'slop' && !e.impeccableId && !e.legacyBlacklist && !(o.omitPolish && e.impact === 'polish'));
 }
 
 /** Catalog entries by id, throwing with the id when one is missing (a rename must fail loudly at gen time). */

@@ -2,7 +2,7 @@
 # gstack-doctor-check.sh — `gstack-doctor --check`: the one-line install verdict.
 #
 # Sourced by bin/gstack-doctor after its prelude (ROOT, ROOT_REAL, BIN, SRC,
-# DOCS, STATE_ROOT, EXE, clamp, the launch probe, the codex status helpers)
+# DOCS, STATE_ROOT, EXE, clamp, cfg, the launch probe, the codex status helpers)
 # and never executed on its own. Prints `required: <ids>`, one
 # `PASS | FAIL | SKIP <id>` row per component in bin/gstack-doctor-components.sh
 # (generated from lib/doctor-components.ts; the same ids feed --for, --require
@@ -19,6 +19,7 @@
 # remote's capy/support.env, `unknown` when its fetch failed, or ""), LIVE.
 # GSTACK_CAPY_WRAPPER_PATH (optional) names the wrapper a below-minimum fix runs.
 
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 . "$BIN/gstack-doctor-components.sh" || { echo "gstack-doctor: $BIN/gstack-doctor-components.sh is missing; reinstall with cd $SRC && ./setup" >&2; exit 1; }
 . "$BIN/gstack-install-registry.sh" 2>/dev/null || { echo "gstack-doctor: $BIN/gstack-install-registry.sh is missing; reinstall with cd $SRC && ./setup" >&2; exit 1; }
 . "$BIN/gstack-bun-version.sh" 2>/dev/null || { echo "gstack-doctor: $BIN/gstack-bun-version.sh is missing; reinstall with cd $SRC && ./setup" >&2; exit 1; }
@@ -37,7 +38,9 @@ _dc_has() { case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
 _dc_url() { printf '(%s; %s#%s)' "$1" "$DOCS" "$(gstack_result_anchor "$1")"; }
 
 # _dc_row STATUS ID DETAIL [FIX] [CODE] — record and (in text mode) print one
-# row. WARN is an owner action that never fails the run.
+# row. WARN never fails the run: its FIX is printed as given, so a row whose
+# action belongs to the owner says `owner action: ...` and one the lane can run
+# itself says `fix: ...` (the floor, a skipped upgrade, a Node pin).
 _dc_row() {
   local status="$1" id="$2" detail="$3" fix="${4:-}" code="${5:-}"
   _dc_rows="$_dc_rows$status	$id	$detail	$fix	$code
@@ -47,7 +50,7 @@ _dc_row() {
   case "$status" in
     PASS) printf 'PASS %s%s\n' "$id" "${detail:+ $detail}" ;;
     SKIP) printf 'SKIP %s (%s)\n' "$id" "$detail" ;;
-    WARN) printf 'WARN %s — %s; owner action: %s %s\n' "$id" "$detail" "$fix" "$(_dc_url "$code")" ;;
+    WARN) printf 'WARN %s — %s; %s %s\n' "$id" "$detail" "$fix" "$(_dc_url "$code")" ;;
     FAIL) printf 'FAIL %s — %s; fix: %s %s\n' "$id" "$detail" "$fix" "$(_dc_url "$code")" ;;
   esac
 }
@@ -137,7 +140,11 @@ _dc_check_patch() {
     _dc_fail_or_skip patch "no review skill in the Codex render at $_dc_hs_dest" "$fix" COMPONENT_MISSING "not needed; no Codex review render"
     return
   fi
-  model=$(grep -F 'Model-Specific Behavioral Patch (' "$file" 2>/dev/null | head -1 | sed 's/.*Model-Specific Behavioral Patch (\([^)]*\)).*/\1/' | clamp 'A-Za-z0-9._:/-' 60)
+  # A tier 2+ render keeps the patch in the shared sections/preamble.md its SKILL.md points to.
+  for f in "$file" "${file%/SKILL.md}/sections/preamble.md"; do
+    model=$(grep -F 'Model-Specific Behavioral Patch (' "$f" 2>/dev/null | sed 's/.*Model-Specific Behavioral Patch (\([^)]*\)).*/\1/' | clamp 'A-Za-z0-9._:/-' 60)
+    [ -n "$model" ] && { file="$f"; break; }
+  done
   if [ -n "$model" ]; then
     _dc_row PASS patch "$model (${file#"$_dc_hs_dest"/})"
   else
@@ -147,7 +154,7 @@ _dc_check_patch() {
 
 _dc_check_codex_cli() {
   local probe="$BIN/gstack-codex-probe" reviews sel rc model out state optional_note="optional; a Claude subagent serves as the outside voice"
-  reviews=$("$BIN/gstack-config" get codex_reviews 2>/dev/null || echo enabled)
+  cfg codex_reviews enabled; reviews=$_cfg
   if ! command -v codex >/dev/null 2>&1; then
     _dc_fail_or_skip codex-cli "Codex CLI not installed" "npm install -g @openai/codex, then codex login" COMPONENT_MISSING "$optional_note; Codex CLI not installed"
     return
@@ -213,7 +220,7 @@ _dc_check_browser() {
     out=$(cd "$ROOT" && { command -v timeout >/dev/null 2>&1 && timeout 90 node -e "$script" </dev/null 2>&1 || node -e "$script" </dev/null 2>&1; }); rc=$?
   elif command -v bun >/dev/null 2>&1; then
     engine=bun
-    out=$(cd "$ROOT" && bun -e "$script" </dev/null 2>&1); rc=$?
+    out=$(cd "$ROOT" && bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "$script" </dev/null 2>&1); rc=$?
   else
     _dc_row FAIL browser "neither node nor bun is on PATH to launch Chromium" "install Node.js (https://nodejs.org) or Bun, then $fix" BROWSER_UNAVAILABLE
     return
@@ -221,7 +228,7 @@ _dc_check_browser() {
   if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^RENDER_OK'; then
     _dc_row PASS browser "Chromium $(printf '%s\n' "$out" | sed -n 's/^RENDER_OK //p' | clamp '0-9.' 20) launched and rendered ($engine)"
   else
-    _dc_row FAIL browser "Chromium did not launch and render via $engine (exit $rc: $(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -1 | clamp ' -~' 160))" "$fix" BROWSER_UNAVAILABLE
+    _dc_row FAIL browser "Chromium did not launch and render via $engine (exit $rc: $(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | clamp ' -~' 160))" "$fix" BROWSER_UNAVAILABLE
   fi
 }
 
@@ -231,7 +238,7 @@ _dc_check_cso() {
     _dc_row PASS cso "native helper built"
     return
   fi
-  [ -f "$file" ] && reason=$(sed -n 's/^reason=//p' "$file" 2>/dev/null | head -1 | clamp ' -~' 100)
+  [ -f "$file" ] && reason=$(sed -n 's/^reason=//p' "$file" 2>/dev/null | clamp ' -~' 100)
   _dc_fail_or_skip cso "native helper not built${reason:+ ($reason)}" "cd $SRC && ./setup (it names any missing build prerequisite)" COMPONENT_MISSING "optional; toolchain absent or helper not built${reason:+: $reason}"
 }
 
@@ -329,7 +336,7 @@ _dc_check_pins() {
     return
   fi
   node=$(node --version </dev/null 2>/dev/null | clamp 'v0-9.' 20); node="${node#v}"
-  out=$(bun "$BIN/gstack-runtime-pins.ts" --project "$project" ${_dc_bun:+--bun "$_dc_bun"} ${node:+--node "$node"} </dev/null 2>&1); rc=$?
+  out=$(bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$BIN/gstack-runtime-pins.ts" --project "$project" ${_dc_bun:+--bun "$_dc_bun"} ${node:+--node "$node"} </dev/null 2>&1); rc=$?
   verdict=$(printf '%s\n' "$out" | sed -n 's/^PINS_VERDICT: //p' | tail -1 | clamp 'a-z' 8)
   summary=$(printf '%s\n' "$out" | sed -n 's/^PIN_SUMMARY: //p' | tr '\n' '|' | sed 's/|$//; s/|/; /g')
   case "$verdict" in
@@ -357,11 +364,19 @@ _dc_check_pins() {
             fi
           fi
           if [ -n "$_dc_ln_dir" ] && [ "$_dc_ln_ver" != "$_dc_bun" ] \
-             && bun "$BIN/gstack-runtime-pins.ts" --project "$project" --bun "$_dc_ln_ver" ${node:+--node "$node"} </dev/null 2>/dev/null | grep -q '^PINS_VERDICT: pass'; then
+             && bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$BIN/gstack-runtime-pins.ts" --project "$project" --bun "$_dc_ln_ver" ${node:+--node "$node"} </dev/null 2>/dev/null | grep -q '^PINS_VERDICT: pass'; then
             note="; bun $_dc_ln_ver found at $_dc_ln_dir (not on PATH) satisfies them" fix="$_dc_ln_fix"
           fi
+          # Only the Node pin unmet: a WARN, never a FAIL. gstack itself runs
+          # on Bun, and the project's tests may select their own Node (nvm, a
+          # CI matrix), so the image's Node must not fail the session; the row
+          # still names the Node read and the fix.
+          if ! printf '%s\n' "$out" | grep -v '^PIN_FAIL: node ' | grep -q '^PIN_FAIL: '; then
+            _dc_row WARN pins "$failline$note (node pin only; bun pins pass)" "fix: $fix" PROJECT_NODE_PIN_UNMET
+            return
+          fi
           _dc_row FAIL pins "$failline$note" "$fix" PROJECT_PIN_MISMATCH ;;
-    *) _dc_row SKIP pins "gstack-runtime-pins could not evaluate $project (exit $rc: $(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -1 | clamp ' -~' 120))" ;;
+    *) _dc_row SKIP pins "gstack-runtime-pins could not evaluate $project (exit $rc: $(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | clamp ' -~' 120))" ;;
   esac
 }
 
@@ -379,7 +394,7 @@ _dc_check_state_root() {
 }
 
 # _dc_cfg KEY DEFAULT — a clamped config value, never the file or a message.
-_dc_cfg() { local v; v=$("$BIN/gstack-config" get "$1" 2>/dev/null </dev/null | clamp 'a-z0-9_-' 24); printf '%s' "${v:-$2}"; }
+_dc_cfg() { local v; cfg "$1" "$2"; v=$(printf '%s' "$_cfg" | clamp 'a-z0-9_-' 24); printf '%s' "${v:-$2}"; }
 
 _dc_check_privacy() {
   _dc_row PASS privacy "telemetry=$(_dc_cfg telemetry off) artifacts_sync=$(_dc_cfg artifacts_sync_mode off) codex_reviews=$(_dc_cfg codex_reviews enabled) update_check=$(_dc_cfg update_check true)"
@@ -393,7 +408,7 @@ _dc_check_cores() {
   local n backend
   n=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)
   n=$(printf '%s' "$n" | clamp '0-9' 6)
-  backend=$("$BIN/gstack-config" get test_backend 2>/dev/null </dev/null | clamp 'a-z' 8); backend=${backend:-local}
+  cfg test_backend local; backend=$(printf '%s' "$_cfg" | clamp 'a-z' 8); backend=${backend:-local}
   case "$n" in ''|0) _dc_row PASS cores "unknown CPU count test_backend=$backend"; return ;; esac
   if [ "$n" -lt 8 ] && [ "$backend" = local ]; then
     _dc_row PASS cores "$n test_backend=local (under 8: run full unit and E2E tiers on a remote gate; set gstack-config set test_backend ubicloud, scripts/ubicloud/ubi-runner.sh)"
@@ -439,7 +454,7 @@ _dc_check_min_revision() {
 
 _dc_check_revision() {
   local installed head="" want="$CHECK_REVISION" target=""
-  installed=$(head -1 "$ROOT/VERSION" 2>/dev/null | clamp '0-9A-Za-z.+-' 40)
+  installed=$(clamp '0-9A-Za-z.+-' 40 2>/dev/null <"$ROOT/VERSION")
   head=$(git -C "$ROOT_REAL" rev-parse --short HEAD 2>/dev/null | clamp '0-9a-f' 12)
   _dc_revision="${installed:-unknown}"
   _dc_check_min_revision "${installed:-0}" "$head" || return
@@ -459,6 +474,105 @@ _dc_check_revision() {
   _dc_row FAIL revision "installed ${installed:-unknown}${head:+ at $head} (requested $want)" "cd $SRC && git fetch origin && git checkout $want && ./setup, or run $SRC/bin/gstack-upgrade to move to the latest release (interactive: /gstack-upgrade)" REVISION_UNMET
 }
 
+# _dc_check_floor — the project's own gstack floor: `min_gstack_version` in
+# its .gstack/ship-policy.json (GSTACK_PROJECT_FLOOR_FILE/FIELD, the field
+# gstack-ship-queue already validates). A consuming repo raises it in one
+# commit instead of broadcasting a minimum to every thread; the next session
+# check on each machine then WARNs with the upgrade as its fix. It is a
+# project rule, never a security minimum, so the row is PASS, SKIP or WARN
+# and never fails the run (the supported minimum is _dc_check_min_revision).
+_dc_check_floor() {
+  local project="$CHECK_PROJECT" file flat floor installed fix running known as stable
+  if [ -z "$project" ]; then
+    project=$(git rev-parse --show-toplevel 2>/dev/null)
+    [ -n "$project" ] && [ "$(cd "$project" && pwd -P)" = "$ROOT_REAL" ] && project=""
+  fi
+  if [ -z "$project" ] || [ ! -d "$project" ]; then
+    _dc_row SKIP floor "no project to read $GSTACK_PROJECT_FLOOR_FILE from (pass --project <path>)"
+    return
+  fi
+  file="$project/$GSTACK_PROJECT_FLOOR_FILE"
+  if [ ! -f "$file" ]; then
+    _dc_row SKIP floor "$project declares none ($GSTACK_PROJECT_FLOOR_FILE absent; set $GSTACK_PROJECT_FLOOR_FIELD there to require a gstack version)"
+    return
+  fi
+  # Whitespace-insensitive (the value may sit on the line after its field), the
+  # first occurrence wins (the top-level field in a policy file), and only the
+  # first 64 KiB are read: a real policy is a few KB.
+  flat=$(head -c 65536 "$file" 2>/dev/null | tr '\n\r\t' '   ')
+  floor=$(printf '%s' "$flat" | grep -o '"'"$GSTACK_PROJECT_FLOOR_FIELD"'" *: *"[0-9][0-9.]*"' | sed 's/.*"\([0-9][0-9.]*\)"$/\1/' | clamp '0-9.' 32)
+  if [ -z "$floor" ]; then
+    if printf '%s' "$flat" | grep -q '"'"$GSTACK_PROJECT_FLOOR_FIELD"'" *: *"'; then
+      _dc_row SKIP floor "$file sets $GSTACK_PROJECT_FLOOR_FIELD to something other than a plain dotted version"
+    else
+      _dc_row SKIP floor "$file sets no $GSTACK_PROJECT_FLOOR_FIELD (null or absent)"
+    fi
+    return
+  fi
+  installed=$(clamp '0-9A-Za-z.+-' 40 2>/dev/null <"$ROOT/VERSION")
+  # The version this checkout reads policies as, the one validatePolicy compares
+  # (runningGstackVersion): VERSION, or the newest policy key it knows when that
+  # is later, so an unstamped main checkout that already reads a key is not told
+  # to upgrade to read it. lib/ship-policy-keys.ts writes every newer key in the
+  # `_KEY_VERSION = '<version>'` form its stamp pattern moves.
+  running="${installed:-0}"
+  for known in $(sed -n "s/.*_KEYS\{0,1\}_VERSION = '\([0-9][0-9.]*\)'.*/\1/p" "$ROOT/lib/ship-policy-keys.ts" 2>/dev/null); do
+    _dc_version_below "$running" "$known" && running="$known"
+  done
+  as=""
+  [ "$running" != "${installed:-0}" ] && as=", reads policies as $running"
+  if _dc_version_below "$running" "$floor"; then
+    stable=$(_dc_newest_stable)
+    if [ -n "$stable" ] && _dc_version_below "$stable" "$floor"; then
+      _dc_row WARN floor "installed ${installed:-unknown}$as is below the floor $floor that $file declares ($GSTACK_PROJECT_FLOOR_FIELD), and no release meets this floor yet: the newest stable gstack is $stable, so upgrading or rerunning the install cannot clear this row" "fix: none here; the project lowers $GSTACK_PROJECT_FLOOR_FIELD to $stable or below (gstack-ship-policy validate refuses a floor above stable)" PROJECT_FLOOR_UNMET
+      return
+    fi
+    if [ -n "${GSTACK_CAPY_WRAPPER_PATH:-}" ]; then
+      fix="bash $GSTACK_CAPY_WRAPPER_PATH${CHECK_FOR:+ --for $CHECK_FOR} (fast-forwards a clean checkout to origin and reinstalls), or $SRC/bin/gstack-upgrade"
+    else
+      fix="$SRC/bin/gstack-upgrade (fast-forwards to the remote default branch, then reinstalls; interactive: /gstack-upgrade)"
+    fi
+    _dc_row WARN floor "installed ${installed:-unknown}$as is below the floor $floor that $file declares ($GSTACK_PROJECT_FLOOR_FIELD)" "fix: $fix" PROJECT_FLOOR_UNMET
+    return
+  fi
+  _dc_row PASS floor "$floor declared by $file (installed ${installed:-unknown}$as)"
+}
+
+# _dc_newest_stable — the newest stable gstack release, as lib/stable-release.ts
+# resolves it: the highest v<version> release tag at origin's stable commit (one
+# ls-remote bounded by timeout, skipped where timeout is missing, as on stock
+# macOS; any tag when origin has no stable branch), else VERSION at the stable
+# ref (origin/stable, then stable), else the highest local release tag. Prints
+# nothing when none resolves, or when the root is not the top of its own git
+# checkout (a vendored copy).
+_dc_newest_stable() {
+  local repo="${GSTACK_STABLE_REPO:-$ROOT_REAL}" best="" v ref listed="" top stable_sha
+  top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || return 0
+  [ "$(cd "$top" 2>/dev/null && pwd -P)" = "$(cd "$repo" 2>/dev/null && pwd -P)" ] || return 0
+  _dc_higher() { [ -z "$best" ] || _dc_version_below "$best" "$1" && best="$1"; }
+  if command -v timeout >/dev/null 2>&1; then
+    listed=$(GIT_TERMINAL_PROMPT=0 timeout 15 git -C "$repo" ls-remote origin refs/heads/stable 'refs/tags/v[0-9]*' 2>/dev/null)
+  fi
+  stable_sha=$(printf '%s\n' "$listed" | awk -F'\t' '$2 == "refs/heads/stable" { print $1; exit }')
+  for v in $(printf '%s\n' "$listed" | awk -F'\t' -v s="$stable_sha" '
+      index($2, "refs/tags/v") == 1 { n = substr($2, 11); p = 0
+        if (substr(n, length(n) - 2) == "^{}") { n = substr(n, 1, length(n) - 3); p = 1 }
+        if (p || !(n in at)) at[n] = $1 }
+      END { for (n in at) if (s == "" || at[n] == s) print n }' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)$/\1/p'); do _dc_higher "$v"; done
+  if [ -z "$best" ]; then
+    for ref in refs/remotes/origin/stable refs/heads/stable; do
+      git -C "$repo" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || continue
+      v=$(git -C "$repo" show "$ref:VERSION" 2>/dev/null | head -1 | clamp '0-9.' 32)
+      case "$v" in [0-9]*.[0-9]*.[0-9]*) _dc_higher "$v" ;; esac
+      break
+    done
+  fi
+  if [ -z "$best" ]; then
+    for v in $(git -C "$repo" tag --list 'v[0-9]*' 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)$/\1/p'); do _dc_higher "$v"; done
+  fi
+  printf '%s' "$best"
+}
+
 # _dc_wrapper_rev FILE — the GSTACK_CAPY_WRAPPER revision a Capy skill copy
 # declares; 0 for a copy without one (the pre-bootstrapper wrapper).
 _dc_wrapper_rev() {
@@ -476,19 +590,21 @@ _dc_wrapper_rev() {
 # ~/.capy/drive/*/skills/gstack/scripts/install.sh, failing only when each is
 # stale. The workaround runs the checkout's own copy, which certifies.
 _dc_check_wrapper() {
-  local min copy rev stale="" current="" active="${GSTACK_CAPY_WRAPPER_PATH:-}" workaround owner
+  local min copy rev stale="" current="" pre="" active="${GSTACK_CAPY_WRAPPER_PATH:-}" workaround owner
   min=$(sed -n 's/^GSTACK_CAPY_MIN_WRAPPER=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$SRC/capy/support.env" 2>/dev/null | head -1); min="${min:-1}"
   workaround="bash $SRC/capy/skill/gstack/scripts/install.sh --check${CHECK_FOR:+ --for $CHECK_FOR} (this session)"
-  owner="copy $SRC/capy/skill/gstack/ over the Drive skill folder, or have Capy re-sync it; this recurs every session until the Drive copy changes"
+  owner="owner action: copy $SRC/capy/skill/gstack/ over the Drive skill folder, or have Capy re-sync it; this recurs every session until the Drive copy changes"
   for copy in "$HOME"/.capy/drive/*/skills/gstack/scripts/install.sh; do
     [ -f "$copy" ] || continue
     [ -n "${GSTACK_CAPY_WRAPPER_REV:-}" ] && [ "$copy" = "$active" ] && continue
     [ -z "${GSTACK_CAPY_WRAPPER_REV:-}" ] && [ -n "$active" ] && [ -f "$active" ] && [ "$copy" != "$active" ] && continue
     rev=$(_dc_wrapper_rev "$copy")
+    [ "$rev" -eq 0 ] 2>/dev/null && pre=1
     if [ "$rev" -lt "$min" ] 2>/dev/null; then stale="${stale:+$stale, }$copy (wrapper $rev)"; else current="${current:+$current, }$copy (wrapper $rev)"; fi
   done
   if [ -z "${GSTACK_CAPY_WRAPPER_REV:-}" ] && [ -n "$active" ] && [ -f "$active" ] && [ -z "$stale$current" ]; then
     rev=$(_dc_wrapper_rev "$active")
+    [ "$rev" -eq 0 ] 2>/dev/null && pre=1
     if [ "$rev" -lt "$min" ] 2>/dev/null; then stale="$active (wrapper $rev)"; else current="$active (wrapper $rev)"; fi
   fi
   if [ -n "${GSTACK_CAPY_WRAPPER_REV:-}" ]; then
@@ -501,8 +617,12 @@ _dc_check_wrapper() {
     fi
   elif [ -n "$current" ]; then
     _dc_row PASS wrapper "Drive copy $current (minimum $min)${stale:+; stale copies: $stale}"
+  elif [ -n "$stale" ] && [ -z "$pre" ]; then
+    # Every copy is a bootstrapper below the minimum: it still works (a direct
+    # run has no provenance to say so), so the row is the owner action, not a FAIL.
+    _dc_row WARN wrapper "every Capy skill copy is below the minimum wrapper $min (it still works): $stale" "$owner" CAPY_WRAPPER_STALE
   elif [ -n "$stale" ]; then
-    _dc_row FAIL wrapper "every Capy skill copy is stale (minimum wrapper $min): $stale" "$workaround; owner: $owner" CAPY_WRAPPER_STALE
+    _dc_row FAIL wrapper "every Capy skill copy is stale (minimum wrapper $min): $stale" "$workaround; owner: ${owner#owner action: }" CAPY_WRAPPER_STALE
   else
     _dc_row SKIP wrapper "no Capy skill copy in ~/.capy/drive and no active wrapper (not a Capy machine)"
   fi
@@ -561,6 +681,7 @@ gstack_doctor_check() {
       privacy) _dc_check_privacy ;;
       cores) _dc_check_cores ;;
       revision) _dc_check_revision ;;
+      floor) _dc_check_floor ;;
       wrapper) _dc_check_wrapper ;;
       *) _dc_row FAIL "$id" "no check implemented for component '$id'" "report this gstack bug" COMPONENT_MISSING ;;
     esac

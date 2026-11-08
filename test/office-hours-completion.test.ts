@@ -4,7 +4,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { validateOfficeHoursCompletion, validateOfficeHoursDesignDraft, validateOfficeHoursReviewerHandoffs, validateOfficeHoursReviewArtifacts, validateOfficeHoursReviewPreservation, type OfficeHoursCompletionEvidence } from './helpers/office-hours-completion';
+import { observedSpecFixes, validateOfficeHoursCompletion, validateOfficeHoursDesignDraft, validateOfficeHoursReviewerHandoffs, validateOfficeHoursReviewArtifacts, validateOfficeHoursReviewPreservation, type OfficeHoursCompletionEvidence } from './helpers/office-hours-completion';
 import { E2E_TOUCHFILES } from './helpers/touchfiles-data';
 import { selectTests } from './helpers/test-selection';
 import { expectMentions } from './helpers/prompt-structure';
@@ -954,6 +954,42 @@ Next: /plan-eng-review after observing the workflow. The user declined launching
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
+  test('cap fixes the agent saved and passed to finalize validate; without them the report mismatches (marathon rerun 2026-10-19)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'office-hours-cap-fixes-'));
+    try {
+      const { evidence, artifacts } = JSON.parse(JSON.stringify(structured())
+        .replaceAll('/tmp/office-hours-fixture', dir.replaceAll('\\', '/')));
+      evidence.toolCalls.filter((call: { output?: string }) => call.output?.startsWith('OFFICE_HOURS_VERDICT '))
+        .forEach((call: { output?: string }, i: number) => { call.output = officeHoursVerdictReceipt(i + 1, artifacts[i].path, artifacts[i].content); });
+      const applied = 'An absent mapped column stops the import and names the missing column.';
+      const fixes = [{ id: 'R2-1', applied_text: applied }];
+      const reviewDir = path.dirname(artifacts[0].path);
+      const fixesPath = path.join(reviewDir, 'fixes.json');
+      const reportPath = path.join(dir, 'REPORT.md');
+      fs.mkdirSync(path.dirname(evidence.designPath), { recursive: true });
+      fs.writeFileSync(evidence.designPath, evidence.designContent.replace('# Design: RosterCheck\n', `# Design: RosterCheck\n\n${applied}\n`));
+      fs.writeFileSync(reportPath, evidence.output);
+      fs.mkdirSync(reviewDir, { recursive: true });
+      for (const artifact of artifacts) fs.writeFileSync(artifact.path, artifact.content);
+      const snapshots = snapshotsIn(reviewDir);
+      for (const snapshot of snapshots) fs.writeFileSync(snapshot.path, snapshot.content);
+      fs.writeFileSync(fixesPath, JSON.stringify(fixes));
+      const result = Bun.spawnSync([process.execPath, path.resolve(import.meta.dir, '../bin/gstack-office-hours-review'),
+        'finalize', '--design', evidence.designPath, '--report', reportPath, '--fixes', fixesPath, ...artifacts.map((artifact: { path: string }) => artifact.path)],
+      { cwd: dir, timeout: 5000 });
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+      expect(JSON.parse(result.stdout.toString()).cap.verified).toEqual(['R2-1']);
+      evidence.output = fs.readFileSync(reportPath, 'utf8');
+      evidence.designContent = fs.readFileSync(evidence.designPath, 'utf8');
+      evidence.toolCalls.push({ tool: 'Write', input: { file_path: fixesPath, content: JSON.stringify(fixes) } });
+      expect(observedSpecFixes(evidence.toolCalls)).toEqual(fixes);
+      expect(() => checkArtifacts({ ...evidence, fixes: observedSpecFixes(evidence.toolCalls) }, artifacts, snapshots)).not.toThrow();
+      expect(() => checkArtifacts(evidence, artifacts, snapshots)).toThrow('Spec Review does not match');
+      expect(() => checkArtifacts({ ...evidence, fixes: [{ id: 'R2-2', applied_text: applied }] }, artifacts, snapshots)).toThrow('Spec Review does not match');
+      expect(observedSpecFixes(evidence.toolCalls.filter((call: { input?: { file_path?: string } }) => call.input?.file_path !== fixesPath))).toBeNull();
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('allows a Markdown separator after the exact block, without hiding extra outcome prose', () => {
     const { evidence, artifacts } = structured();
     evidence.output = evidence.output.replace('## Handoff', '---\n\n## Handoff');
@@ -1002,6 +1038,20 @@ Next: /plan-eng-review after observing the workflow. The user declined launching
     const { evidence, artifacts } = structured();
     evidence.toolCalls = evidence.toolCalls.filter(call => call.input?.file_path !== artifacts[1].path);
     expect(() => checkArtifacts(evidence, artifacts)).toThrow('observed JSON Write');
+  });
+
+  test('a seal error recovered by a complete re-Write passes; the same recovery by Edit is not the observed Write', () => {
+    const recovered = structured();
+    const final = recovered.evidence.toolCalls.findLastIndex(call => call.input?.file_path === recovered.artifacts[1].path);
+    recovered.evidence.toolCalls.splice(final, 0,
+      { tool: 'Write', input: { file_path: recovered.artifacts[1].path, content: recovered.artifacts[1].content.replace('"round":2', '"round":3') } },
+      { tool: 'Bash', input: { command: 'gstack-office-hours-review seal --design design.md --verdict round-2.json round-1.json' }, output: 'Error: verdict round does not match' });
+    expect(() => checkArtifacts(recovered.evidence, recovered.artifacts)).not.toThrow();
+    const patched = structured();
+    const write = patched.evidence.toolCalls.findLast(call => call.input?.file_path === patched.artifacts[1].path)!;
+    write.input!.content = patched.artifacts[1].content.replace('"round":2', '"round":3');
+    patched.evidence.toolCalls.push({ tool: 'Edit', input: { file_path: patched.artifacts[1].path, old_string: '"round":3', new_string: '"round":2' } });
+    expect(() => checkArtifacts(patched.evidence, patched.artifacts)).toThrow('artifact differs from its observed Write');
   });
 
   test('accepts relative and dot-segment Writes to the assigned artifact', () => {

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 // compare-pr-version — CI gate helper. Validates the PR's branch VERSION
 // against the queue of other open PRs' claimed versions. Exits 0 (pass)
 // or 1 (confirmed collision).
@@ -16,6 +16,7 @@
 // only blocks actual collisions.
 
 import { readFileSync } from "node:fs";
+import { classifyTrainHead } from "../lib/version-gate-train";
 
 const [, , jsonPath, prNumber] = process.argv;
 if (!jsonPath) {
@@ -29,6 +30,41 @@ try {
 } catch (e) {
   console.log("::warning::could not parse util output; failing open");
   process.exit(0);
+}
+
+const tag = prNumber ? `PR #${prNumber}` : "this PR";
+const prVersionEnv = (process.env.PR_VERSION ?? "").trim();
+
+// Merge trains: when the base's ship policy declares a `train` block, a READY
+// head is unstamped and the lane stamps at its slot (docs/ship-policy.md#run-a-merge-train).
+// The workflow passes BASE_REF and HEAD_SHA with the PR head checked out as cwd.
+if (process.env.BASE_REF && process.env.HEAD_SHA) {
+  const train = classifyTrainHead({ repoRoot: process.cwd(), baseRef: process.env.BASE_REF, head: process.env.HEAD_SHA, author: process.env.PR_AUTHOR });
+  if (train.kind === "unstamped") {
+    if (train.entry === "kept") {
+      console.log(`✓ ${tag} keeps its merge base's VERSION and package.json version, as the base's ship policy (bump never) requires.`);
+      process.exit(0);
+    }
+    const entry = train.entry === "fragment" ? `its entry is ${train.fragments} CHANGELOG fragment(s)` : train.entry === "none-bot" ? "it is a bot PR with no entry (the merge step writes one from its title)" : "the CHANGELOG change is confined to [Unreleased]";
+    console.log(`✓ ${tag} is unstamped under the base's ship policy: VERSION and package.json match its merge base, any changed release output is what the release tool generates at the merge base's VERSION, and ${entry}. The merge step stamps it.`);
+    process.exit(0);
+  }
+  if (train.kind === "release") {
+    console.log(`✓ ${tag} is the release stamp of its merge base: v${train.version} folds its ${train.fragments} changelog fragment(s), and everything else it changes is the stamp (docs/ship-policy.md#release-stamp).`);
+    process.exit(0);
+  }
+  if (train.kind === "invalid") {
+    console.log(`::error::${tag}: ${train.reason}.`);
+    process.exit(1);
+  }
+  if (train.kind === "stamped" && prVersionEnv !== train.expected) {
+    console.log(`::error::${tag} claims v${prVersionEnv}, but under the base's ship policy a stamped head must carry v${train.expected} (base + the effective bump, what gstack-restamp --next allocates at the merge step). Leave VERSION, package.json and the release outputs at the base's values until the merge step stamps them.`);
+    process.exit(1);
+  }
+  if (train.kind === "stamped" && train.fragments) {
+    console.log(`✓ ${tag} carries v${train.expected}, what the merge step allocates under changelog_fragments; the land lock serializes allocation, so open claims do not apply.`);
+    process.exit(0);
+  }
 }
 
 if (parsed.offline === true) {
@@ -62,7 +98,6 @@ if (!pPR || !pNext) {
   process.exit(0);
 }
 
-const tag = prNumber ? `PR #${prNumber}` : "this PR";
 const claimed = (parsed.claimed ?? []) as Array<{ pr: number; branch: string; version: string; url?: string }>;
 
 // Emit a GitHub step summary (always helpful, even on pass).

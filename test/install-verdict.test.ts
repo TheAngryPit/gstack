@@ -110,6 +110,72 @@ describe('install verdict keyed by (checkout, project): both twins', () => {
     expect(both('review', b, { GSTACK_STATE_ROOT: legacySr })).toMatchObject({ refuse: false, status: 'ok' });
   });
 
+  test("GSTA-85: an installer run from the skill's own folder (no project) leaves /ship from the project with no verdict; both twins name the project directory to run the installer from", () => {
+    const sr = tmp();
+    const env = { GSTACK_STATE_ROOT: sr };
+    const proj = project('lane');
+    writeVerdict(sr, { project: '', bun_path: BUN, bun_version: '1.4.2', schema_version: 2, for: 'ship' });
+    const r = both('ship', proj, env);
+    expect(r).toMatchObject({ refuse: true, status: 'verdict', code: 'INSTALL_UNVERIFIED' });
+    expect(r.detail).toBe(`no install verdict at ${installVerdictPath(REAL, sr, proj)} for ${REAL}`);
+    const fix = `fix: run the Capy skill installer (scripts/install.sh --for ship) from ${proj}: the verdict is keyed by the project directory the installer runs in, so a run from the skill's own folder does not cover ${proj}; then launch with the GSTACK_LAUNCH line it prints (INSTALL_UNVERIFIED)`;
+    expect(r.line).toContain(fix);
+    expect(bashAdmit('ship', proj, { _GH: sr, ...env }).line).toContain(fix);
+    const file = installVerdictPath(REAL, sr, proj);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{not json\n');
+    const corrupt = both('ship', proj, env);
+    expect(corrupt).toMatchObject({ refuse: true, status: 'verdict', code: 'INSTALL_UNVERIFIED' });
+    expect(corrupt.detail).toBe(`the install verdict at ${file} is unreadable or has an unsupported schema_version; rerun the installer`);
+    expect(bashAdmit('ship', proj, { _GH: sr, ...env }).line).toContain(`the install verdict at ${file} is unreadable or has an unsupported schema_version; rerun the installer`);
+    writeVerdict(sr, { project: proj, bun_path: BUN, bun_version: '1.4.2', schema_version: 3, for: 'ship' });
+    const future = both('ship', proj, env);
+    expect(future).toMatchObject({ refuse: true, status: 'verdict' });
+    expect(future.detail).toContain('unsupported schema_version');
+  });
+
+  test('GST-1161: a review-voice install on a shared machine never shadows the verdict the session launched with', () => {
+    const sr = tmp();
+    const proj = project('evals');
+    const launched = writeVerdict(sr, { project: '', bun_path: BUN, bun_version: '1.4.2', schema_version: 2, for: 'autoplan' });
+    const env = { GSTACK_STATE_ROOT: sr, GSTACK_INSTALL_VERDICT: launched };
+    expect(both('autoplan', proj, env)).toMatchObject({ refuse: false, status: 'ok' });
+    writeVerdict(sr, { project: proj, bun_path: BUN, bun_version: '1.4.2', schema_version: 2, for: 'review-voice',
+      required: ['patch', 'runtime', 'helpers', 'state-root', 'privacy', 'cores', 'revision'], trailer: 'gstack: ok 9.9.9.9 for=review-voice' });
+    expect(both('autoplan', proj, env)).toMatchObject({ refuse: false, status: 'ok' });
+    const alone = both('autoplan', proj, { GSTACK_STATE_ROOT: sr });
+    expect(alone).toMatchObject({ refuse: true, status: 'verdict', code: 'INSTALL_UNVERIFIED' });
+    expect(alone.detail).toContain('certified for=review-voice');
+    const gone = both('autoplan', proj, { GSTACK_STATE_ROOT: sr, GSTACK_INSTALL_VERDICT: path.join(sr, 'gone.json') });
+    expect(gone.detail).toContain('certified for=review-voice');
+    writeVerdict(sr, { project: proj, schema_version: 3, for: 'review-voice' });
+    expect(both('autoplan', proj, env).detail).toContain('unsupported schema_version');
+  });
+
+  test("GST-1233: a later install for another workflow replaced the shared verdict; both twins admit from the workflow's own record, never from a stale one", () => {
+    const sr = tmp();
+    const proj = project('truther');
+    const shared = writeVerdict(sr, { project: proj, bun_path: '/opt/child/bun', bun_version: '1.4.2', schema_version: 2, for: 'document-release',
+      required: ['claude', 'runtime'], trailer: 'gstack: ok 9.9.9.9 for=document-release' });
+    const own = shared.replace(/\.json$/, '.for/ship.json');
+    const env = { GSTACK_STATE_ROOT: sr };
+    const without = both('ship', proj, env);
+    expect(without).toMatchObject({ refuse: true, status: 'verdict', code: 'INSTALL_UNVERIFIED', detail: 'the install verdict certified for=document-release, which does not cover codex that ship needs' });
+    writeVerdict(sr, { project: proj, bun_path: BUN, bun_version: '1.4.2', schema_version: 2, for: 'ship', trailer: 'gstack: ok 9.9.9.9 for=ship' }, own);
+    expect(both('ship', proj, env)).toMatchObject({ refuse: false, status: 'ok' });
+    expect(bashAdmit('ship', proj, { _GH: sr, ...env }).line).toBe('INSTALL_VERDICT: ok gstack: ok 9.9.9.9 for=ship');
+    const setupFailed = { project: proj, bun_path: '/opt/child/bun', bun_version: '1.4.2', schema_version: 2, for: 'document-release', ok: false, trailer: 'gstack: fail setup' };
+    writeVerdict(sr, setupFailed);
+    expect(both('ship', proj, env)).toMatchObject({ refuse: true, status: 'verdict', detail: 'the install verdict says: gstack: fail setup' });
+    writeVerdict(sr, { ...setupFailed, trailer: 'gstack: fail codex' });
+    expect(both('ship', proj, env)).toMatchObject({ refuse: false, status: 'ok' });
+    writeVerdict(sr, { project: proj, bun_path: '/opt/child/bun', bun_version: '1.4.2', schema_version: 2, for: 'document-release', required: ['claude', 'runtime'], trailer: 'gstack: ok 9.9.9.9 for=document-release' });
+    writeVerdict(sr, { project: proj, bun_path: BUN, bun_version: '1.4.2', schema_version: 2, for: 'ship', head: 'f'.repeat(40) }, own);
+    const stale = both('ship', proj, env);
+    expect(stale).toMatchObject({ refuse: true, status: 'verdict', code: 'INSTALL_UNVERIFIED', detail: without.detail });
+    expect(bashAdmit('ship', proj, { _GH: sr, ...env }).line).toBe(without.line);
+  });
+
   test('a running Bun other than the recorded one refuses with BUN_RESOLUTION_DRIFT and names both', () => {
     const sr = tmp();
     const a = project('a');

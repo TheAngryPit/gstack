@@ -10,6 +10,7 @@
 # Optional: branch, outcome, duration_s, session, ts.
 # Validation failure → skip silently (non-blocking).
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null)"
 . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
@@ -19,21 +20,33 @@ mkdir -p "$GSTACK_HOME/projects/$SLUG"
 
 INPUT="$1"
 
-# Validate: input must be parseable JSON with required fields
-if ! printf '%s' "$INPUT" | bun -e "
-  const j = JSON.parse(await Bun.stdin.text());
-  if (!j.skill || !j.event) process.exit(1);
-" 2>/dev/null; then
-  exit 0  # skip silently, non-blocking
+# Validate: input must be parseable JSON with required fields. The validator
+# prints its verdict; a non-zero exit means Bun itself failed (#3415). An exit
+# code cannot carry the verdict: a Bun crash on Windows exits 3.
+VALIDATE_RC=0
+VALIDATE_OUT=$(printf '%s' "$INPUT" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
+  const text = await Bun.stdin.text();
+  let j;
+  try { j = JSON.parse(text); } catch {}
+  console.log(j && j.skill && j.event ? 'valid' : 'invalid');
+") || VALIDATE_RC=$?
+if [ "$VALIDATE_RC" -ne 0 ]; then
+  echo "gstack-timeline-log: bun exited $VALIDATE_RC before the event was validated; nothing was logged" >&2
+  exit "$VALIDATE_RC"
 fi
+case "$VALIDATE_OUT" in
+  valid) ;;
+  invalid) exit 0 ;;  # skip silently, non-blocking
+  *) echo "gstack-timeline-log: bun printed no verdict while validating the event; nothing was logged" >&2; exit 1 ;;
+esac
 
 # Inject timestamp if not present
-if ! printf '%s' "$INPUT" | bun -e "const j=JSON.parse(await Bun.stdin.text()); if(!j.ts) process.exit(1)" 2>/dev/null; then
-  INPUT=$(printf '%s' "$INPUT" | bun -e "
+if ! printf '%s' "$INPUT" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "const j=JSON.parse(await Bun.stdin.text()); if(!j.ts) process.exit(1)" 2>/dev/null; then
+  STAMPED=$(printf '%s' "$INPUT" | bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "
     const j = JSON.parse(await Bun.stdin.text());
     j.ts = new Date().toISOString();
     console.log(JSON.stringify(j));
-  " 2>/dev/null) || true
+  " 2>/dev/null) && [ -n "$STAMPED" ] && INPUT=$STAMPED || true
 fi
 
 echo "$INPUT" >> "$GSTACK_HOME/projects/$SLUG/timeline.jsonl"

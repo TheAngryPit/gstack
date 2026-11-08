@@ -16,12 +16,19 @@
  */
 import { randomBytes } from 'node:crypto';
 import { DISPATCH_INPUTS, awaitNonceRun, dispatchWorkflow, listDispatchRuns, makeNonce, runForNonce, type WorkflowDispatch } from '../scripts/eval-bg';
-import { mergeChangelogs, parseChangelog, type ChangelogSection } from './changelog-check';
+import { carryReleasedParent, changelogDamage, mergeChangelogs, parseChangelog, type ChangelogSection } from './changelog-check';
 import type { ResultStatus } from './headless-artifacts';
+import { baseOverlapLine } from './pr-wait';
 import { versionAtRef, versionFiles } from './restamp';
 import type { LoadedPolicy, ShipPolicy, TrainPolicy } from './ship-policy';
 import { loadBasePolicy, type QueueContext } from './ship-queue';
+import { mergeManifest } from './ship-queue-land';
 import { git, sha256, withIndex, type QueueFailure } from './ship-queue-gate';
+import { recordVerdict, screenVerdict, verdictLines } from './ship-queue-screen';
+import { stackTestLine, stackTests } from './ship-queue-stack-tests';
+import { stampChain } from './ship-queue-train-stamp';
+import { WAVE_TRIGGER, checkWavePin } from './ship-queue-wave';
+import { advanceGeneric, baseRedAdmission, bindTrainReceipt, gatedChain, genericNext } from './ship-queue-train-gate';
 import { asRun, execFor, newestBranchRun, prInfo, remoteBranchSha, repoSlug, runView, checkRun } from './ship-queue-train-github';
 import {
   TERMINAL_STATES, activeFreeze, attemptsOf, listTrains, loadBisect, loadReady, loadTrain, nowIso, persist, rebuildFromNotes, repoIdentity, trainFile,
@@ -34,7 +41,7 @@ export const outRefused = (failure: QueueFailure, lines: string[], next: string,
 export const outFailed = (failure: QueueFailure, lines: string[], next: string, run: string): TrainOut => ({ exit: 1, status: 'refused', lines, next, failure, run });
 export const outPending = (failure: QueueFailure, lines: string[], next: string, run: string): TrainOut => ({ exit: 3, status: 'incomplete', lines, next, failure, run });
 
-export interface TrainEnv { ctx: QueueContext; policy: LoadedPolicy; train: TrainPolicy; repo: { key: string; url: string }; remote: string }
+export interface TrainEnv { ctx: QueueContext; policy: LoadedPolicy; train: TrainPolicy; repo: { key: string; url: string; keys: string[] }; remote: string }
 
 const HEX = /^[0-9a-f]{40,64}$/;
 const Q = 'gstack-ship-queue';
@@ -50,7 +57,7 @@ export function trainEnv(ctx: QueueContext): TrainEnv | QueueFailure {
 export function fetchBase(ctx: QueueContext): string | null {
   const remote = ctx.remote ?? 'origin';
   const f = git(ctx.repoRoot, ['fetch', '--no-tags', '-q', remote, `+refs/heads/${ctx.base}:refs/remotes/${remote}/${ctx.base}`]);
-  return f.ok ? null : `git fetch ${remote} ${ctx.base} failed: ${f.err.slice(0, 160)}`;
+  return f.ok ? null : `git fetch ${remote} ${ctx.base} failed: ${f.err.replace(/\s+/g, ' ').trim().slice(0, 160)}`;
 }
 
 /** Make the train's prefix commits local (another machine built them): fetch train/<nonce>. */
@@ -92,15 +99,26 @@ export function parsePins(spec: string | undefined): Array<{ pr: string; sha: st
 }
 
 export const pinList = (slots: Array<{ pr: string; head: string }>) => slots.map(s => `${s.pr}@${s.head}`).join(',');
+/** `--prs <pins>` for a rebuild of these slots, plus `--order` when the train was built with an explicit order. */
+export const prsArgs = (slots: Array<{ pr: string; head: string }>, explicit?: boolean) => `--prs ${pinList(slots)}${explicit ? ` --order ${slots.map(s => s.pr).join(',')}` : ''}`;
 
-/** Slot order: screened PRs first, then unscreened, each in READY order; enough unscreened PRs form their own train. */
-export function orderSlots(slots: TrainSlot[], max: number): { train: TrainSlot[]; held: TrainSlot[]; split: boolean } {
+/**
+ * Slot order: screened PRs first, then unscreened PRs fill the remaining
+ * seats, each in READY order (GSTA-165: most PRs ride unscreened, so a
+ * screened-only train would hold the pool). An explicit order (`--order`,
+ * every admitted PR once) replaces that rule: slots follow it, the first
+ * `max` ride and the rest are held.
+ */
+export function orderSlots(slots: TrainSlot[], max: number, explicit?: readonly string[]): { train: TrainSlot[]; held: TrainSlot[] } {
+  if (explicit) {
+    const all = explicit.map(pr => slots.find(s => s.pr === pr)!);
+    return { train: all.slice(0, max), held: all.slice(max) };
+  }
   const byReady = (a: TrainSlot, b: TrainSlot) => a.ready_at.localeCompare(b.ready_at) || Number(a.pr) - Number(b.pr);
   const screened = slots.filter(s => s.screen.choice === 'screen').sort(byReady);
   const unscreened = slots.filter(s => s.screen.choice !== 'screen').sort(byReady);
-  if (screened.length && unscreened.length >= max) return { train: screened.slice(0, max), held: [...screened.slice(max), ...unscreened], split: true };
   const all = [...screened, ...unscreened];
-  return { train: all.slice(0, max), held: all.slice(max), split: false };
+  return { train: all.slice(0, max), held: all.slice(max) };
 }
 
 /** When a train under its size may dispatch: its oldest READY plus the fill time; null when it may dispatch now. */
@@ -128,9 +146,15 @@ function unionChangelog(ours: string, theirs: string): string {
 
 /**
  * One train merge, in object storage: the PR head onto the previous prefix.
- * Version files take the prefix's side; the CHANGELOG merges by section (the
- * gate-ahead rule, else a union of sections, since each heading is restamped
- * at merge). Any other conflict is reported with every conflicting path.
+ * VERSION takes the prefix's side, a manifest merges three-way with the prefix's
+ * version (mergeManifest), and the CHANGELOG merges by section (the
+ * gate-ahead rule with the merge base, which also carries a stacked child
+ * past its released parent, else a union of sections, since each heading is
+ * restamped at merge; the union takes the carried side too, so a prefix that
+ * already holds an earlier slot's [Unreleased] never duplicates the released
+ * parent's text under the child's heading), unless a side damaged released history
+ * (changelogDamage), which is a conflict the lane resolves. Any other
+ * conflict is reported with every conflicting path.
  */
 export function mergeStep(repoRoot: string, pred: string, head: string, policy: ShipPolicy): { tree: string } | { conflicts: string[] } {
   const r = git(repoRoot, ['merge-tree', '--write-tree', head, pred]);
@@ -157,10 +181,21 @@ export function mergeStep(repoRoot: string, pred: string, head: string, policy: 
     if (!ours || !theirs) conflicts.push(file);
     else if (file === policy.changelog) {
       const text = (sha: string) => git(repoRoot, ['cat-file', 'blob', sha]).out + '\n';
-      const merged = mergeChangelogs(text(ours), text(theirs)) ?? unionChangelog(text(ours), text(theirs));
-      const blob = git(repoRoot, ['hash-object', '-w', '--stdin'], undefined, merged);
+      const base = entry.get(1);
+      const merged = mergeChangelogs(text(ours), text(theirs), base ? text(base) : undefined);
+      const damage = merged ? null : changelogDamage(text(ours), text(theirs), base ? text(base) : undefined);
+      if (damage) { conflicts.push(`${file} (${damage})`); continue; }
+      const own = (base && carryReleasedParent(text(ours), text(theirs), text(base))?.text) || text(ours);
+      const blob = git(repoRoot, ['hash-object', '-w', '--stdin'], undefined, merged ?? unionChangelog(own, text(theirs)));
       if (blob.ok) resolved.push({ path: file, blob: blob.out }); else conflicts.push(file);
-    } else if (stampFiles.includes(file)) resolved.push({ path: file, blob: theirs });
+    } else if (file === stampFiles[0]) resolved.push({ path: file, blob: theirs });
+    else if (stampFiles.includes(file)) {
+      const base = entry.get(1);
+      const text = (sha: string) => git(repoRoot, ['cat-file', 'blob', sha]).out + '\n';
+      const merged = base ? mergeManifest(text(base), text(ours), text(theirs)) : null;
+      const blob = merged === null ? null : git(repoRoot, ['hash-object', '-w', '--stdin'], undefined, merged);
+      if (blob?.ok) resolved.push({ path: file, blob: blob.out }); else conflicts.push(file);
+    }
     else conflicts.push(file);
   }
   if (conflicts.length) return { conflicts: conflicts.sort() };
@@ -175,8 +210,54 @@ export function mergeStep(repoRoot: string, pred: string, head: string, policy: 
   return 'error' in out ? { conflicts: [`(${out.error})`] } : { tree: out.tree };
 }
 
+export interface BaseOverlap { touched: string[]; conflicts: string[] | null; unknown: boolean; line: string | null }
+
+/**
+ * What gstack-pr-wait's base-overlap event tells a lane, read from git at
+ * READY and at train build (handoff GSTA-119): the files the base changed
+ * since this head forked that the head also changes and, when `verdict` is
+ * asked for, whether the train's own merge of the head onto the base is
+ * clean. A base that moved onto nothing the PR touches is one line of fact; a
+ * conflict is what QUEUE_TRAIN_CONFLICT would otherwise discover at the
+ * scratch merge. A git read that fails is `unknown`, said so, never "no
+ * overlap". Train build asks for no verdict: its own chain merges each pin
+ * onto its prefix, and a merge onto the bare base would contradict it for T2+.
+ */
+export function baseOverlap(repoRoot: string, base: string, baseSha: string, head: string, policy: ShipPolicy, verdict = true): BaseOverlap {
+  const fork = git(repoRoot, ['merge-base', baseSha, head]);
+  const none = { touched: [] as string[], conflicts: null, unknown: false };
+  if (fork.ok && fork.out === baseSha) return { ...none, line: null };
+  const theirs = fork.ok && fork.out ? git(repoRoot, ['diff', '--name-only', fork.out, baseSha]) : fork;
+  const ours = fork.ok && fork.out ? git(repoRoot, ['diff', '--name-only', fork.out, head]) : fork;
+  if (!fork.ok || !fork.out || !theirs.ok || !ours.ok) {
+    const why = [fork, theirs, ours].find(r => !r.ok)?.out.split('\n')[0] || 'git read failed';
+    return { ...none, unknown: true, line: `BASE_OVERLAP: could not compare ${base}@${baseSha.slice(0, 12)} with ${head.slice(0, 12)} (${why}); conflicts unknown` };
+  }
+  const changed = new Set(theirs.out.split('\n').filter(Boolean));
+  const touched = ours.out.split('\n').filter(f => f && changed.has(f)).sort();
+  if (!touched.length) return { ...none, line: `BASE: ${base} moved to ${baseSha.slice(0, 7)} since this PR forked; its new commits touch no file this PR changes` };
+  if (!verdict) return { touched, conflicts: null, unknown: false, line: `BASE_OVERLAP: ${baseOverlapLine(base, baseSha, touched)}` };
+  const m = mergeStep(repoRoot, baseSha, head, policy);
+  const conflicts = 'conflicts' in m ? m.conflicts : null;
+  const said = conflicts ? `the train's merge onto ${base} conflicts beyond the CHANGELOG and the stamp files (${conflicts.join(', ')})` : `the train's merge onto ${base} is clean`;
+  return { touched, conflicts, unknown: false, line: `BASE_OVERLAP: ${baseOverlapLine(base, baseSha, touched)}; ${said}` };
+}
+
 const TRAIN_IDENTITY = { GIT_AUTHOR_NAME: 'gstack-ship-queue', GIT_AUTHOR_EMAIL: 'ship-queue@gstack.local', GIT_COMMITTER_NAME: 'gstack-ship-queue',
   GIT_COMMITTER_EMAIL: 'ship-queue@gstack.local', GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' };
+
+/**
+ * One train merge as a commit with a fixed identity and date: parents are the
+ * predecessor (first, as GitHub's merge ref) and the PR head. Prefix commits
+ * and the scratch merge a screen is planned on (`ready --screen` when
+ * GitHub's refs/pull/<n>/merge lags the head) are both built here.
+ */
+export function mergeCommit(repoRoot: string, pred: string, head: string, policy: ShipPolicy, message: string): { commit: string; tree: string } | { conflicts: string[] } {
+  const m = mergeStep(repoRoot, pred, head, policy);
+  if ('conflicts' in m) return m;
+  const c = git(repoRoot, ['commit-tree', m.tree, '-p', pred, '-p', head, '-m', message], { ...process.env, ...TRAIN_IDENTITY });
+  return c.ok ? { commit: c.out, tree: m.tree } : { conflicts: [`(commit-tree failed: ${c.err.slice(0, 120)})`] };
+}
 
 /** Build T1..Tk on T0 = base; a conflict stops at the PR that conflicts. */
 export function buildChain(repoRoot: string, baseSha: string, slots: TrainSlot[], policy: ShipPolicy):
@@ -184,17 +265,16 @@ export function buildChain(repoRoot: string, baseSha: string, slots: TrainSlot[]
   const prefixes: TrainRecord['prefixes'] = [{ index: 0, commit: baseSha, tree: git(repoRoot, ['rev-parse', `${baseSha}^{tree}`]).out, pr: null }];
   for (const [i, slot] of slots.entries()) {
     const pred = prefixes[i]!.commit;
-    const m = mergeStep(repoRoot, pred, slot.head, policy);
+    const m = mergeCommit(repoRoot, pred, slot.head, policy, `train T${i + 1}: merge #${slot.pr} at ${slot.head.slice(0, 12)}`);
     if ('conflicts' in m) return { stoppedAt: slot.pr, conflicts: m.conflicts, merged: slots.slice(0, i).map(s => s.pr) };
-    const c = git(repoRoot, ['commit-tree', m.tree, '-p', pred, '-p', slot.head, '-m', `train T${i + 1}: merge #${slot.pr} at ${slot.head.slice(0, 12)}`], { ...process.env, ...TRAIN_IDENTITY });
-    if (!c.ok) return { stoppedAt: slot.pr, conflicts: [`(commit-tree failed: ${c.err.slice(0, 120)})`], merged: slots.slice(0, i).map(s => s.pr) };
-    prefixes.push({ index: i + 1, commit: c.out, tree: m.tree, pr: slot.pr });
+    prefixes.push({ index: i + 1, commit: m.commit, tree: m.tree, pr: slot.pr });
   }
   return { prefixes };
 }
 
 /** NEXT for a train in its current state. */
 export function nextFor(t: TrainRecord): string {
+  if (t.gated) return genericNext(t);
   const n = t.nonce;
   const unmerged = t.slots.filter(s => !t.merged.some(m => m.pr === s.pr));
   switch (t.state) {
@@ -207,12 +287,12 @@ export function nextFor(t: TrainRecord): string {
     case 'attributed': {
       const drop = loadBisect(n)?.outcome?.prs ?? [];
       const keep = t.slots.filter(s => !drop.includes(s.pr));
-      return keep.length ? `${Q} train build --prs ${pinList(keep)}` : 'none (every PR was dropped)';
+      return keep.length ? `${Q} train build ${prsArgs(keep, t.explicit_order)}` : 'none (every PR was dropped)';
     }
-    case 'red-on-main': return `fix forward on main first, then ${Q} train build --prs ${pinList(t.slots)}`;
+    case 'red-on-main': return `fix forward on main first, then ${Q} train build ${prsArgs(t.slots, t.explicit_order)}`;
     case 'unattributed': return loadBisect(n)?.outcome?.all_green && !attemptsOf(t).some(a => a.purpose === 'rebuild')
       ? `${Q} train rebuild --train ${n}`
-      : `route the red cases to a repair lane (GStack Minder); once the repair merges: ${Q} train build --prs ${pinList(t.slots)}`;
+      : `route the red cases to a repair lane (GStack Minder); once the repair merges: ${Q} train build ${prsArgs(t.slots, t.explicit_order)}`;
     default: return `${Q} train prune --train ${n}`;
   }
 }
@@ -249,15 +329,33 @@ export function gateDispatch(env: TrainEnv, train: TrainRecord, nonce: string): 
   return { workflow: env.train.gate_workflow, inputs: { [DISPATCH_INPUTS.evalsAll]: 'true', [DISPATCH_INPUTS.expectedSha]: train.head, [DISPATCH_INPUTS.nonce]: nonce } };
 }
 
-export interface BuildOptions { pins?: string; resume?: string; dryRun: boolean; urgent: boolean; repair: boolean; freeTimeoutSec: number; pollMs: number }
+export interface BuildOptions {
+  pins?: string; order?: string; resume?: string; dryRun: boolean; urgent: boolean; repair: boolean; freeTimeoutSec: number; pollMs: number;
+  /** `--dry-run --stack-tests`: run each PR's new test files on its integrated prefix (lib/ship-queue-stack-tests.ts); the command's words when `--stack-tests-command` names one. */
+  stackTests?: string[] | true;
+  /** Stamping S_i runs the base policy's restamp_command or release_tool (changelog_fragments trains). */
+  allowRepoCommands?: boolean;
+}
+
+/** `--order <pr>,<pr>,...`: every pinned PR exactly once (a leading # allowed). */
+export function parseOrder(spec: string | undefined, pins: Array<{ pr: string }>): string[] | undefined | { error: string } {
+  if (spec === undefined) return undefined;
+  const order = spec.split(',').map(s => s.trim().replace(/^#/, '')).filter(Boolean);
+  const want = pins.map(p => p.pr).sort((a, b) => Number(a) - Number(b));
+  const got = [...order].sort((a, b) => Number(a) - Number(b));
+  if (order.some(pr => !/^\d+$/.test(pr)) || got.join(',') !== want.join(',')) return { error: `--order must list every PR in --prs exactly once (--prs has ${want.map(p => '#' + p).join(',')}; got ${spec})` };
+  return order;
+}
 
 /** The slots a new train would carry: trusted, unmoved, READY PRs, in slot order. */
-function admitSlots(env: TrainEnv, pins: Array<{ pr: string; sha: string }>): { slots: TrainSlot[]; lines: string[] } | TrainOut {
+function admitSlots(env: TrainEnv, pins: Array<{ pr: string; sha: string }>, dryRun: boolean): { slots: TrainSlot[]; lines: string[] } | TrainOut {
   const { ctx } = env;
   const specs = pins.map(p => `+refs/pull/${p.pr}/head:refs/gstack/train/pr-${p.pr}`);
   const f = git(ctx.repoRoot, ['fetch', '--no-tags', '-q', env.remote, ...specs]);
   if (!f.ok) return outRefused({ code: 'QUEUE_PROOF_MISSING', message: `git fetch of the PR heads failed: ${f.err.slice(0, 160)}` }, [], 'none', 'none');
   const slots: TrainSlot[] = [];
+  const lines: string[] = [];
+  let slug: string | null | undefined;
   for (const p of pins) {
     const info = prInfo(ctx, p.pr);
     if ('error' in info) return outRefused({ code: 'QUEUE_PROOF_MISSING', message: info.error }, [], 'none', 'none');
@@ -267,11 +365,34 @@ function admitSlots(env: TrainEnv, pins: Array<{ pr: string; sha: string }>): { 
     if (!info.headRefOid.startsWith(p.sha) || fetched !== info.headRefOid) {
       return outRefused({ code: 'QUEUE_TRAIN_MOVED', message: `PR #${p.pr} moved: pinned ${p.sha.slice(0, 12)}, head is now ${info.headRefOid.slice(0, 12)}` }, [], `ask #${p.pr}'s lane for READY on ${info.headRefOid.slice(0, 12)}, then ${Q} train build --prs <pins>`, 'none');
     }
-    const ready = loadReady(env.repo.key, p.pr, info.headRefOid);
+    const ready = loadReady(env.repo.keys, p.pr, info.headRefOid);
+    const shipped = bindTrainReceipt(ctx.repoRoot, `refs/remotes/${env.remote}/${ctx.base}`, info.body, p.pr, [info.headRefOid], !!ready?.base_red);
+    if (!shipped.ok) return outRefused({ code: shipped.code, message: shipped.message }, [shipped.line, ...(shipped.depthLine ? [shipped.depthLine] : []), ...(shipped.targetedLine ? [`${shipped.targetedLine} pr=${p.pr}`] : [])], `#${p.pr}'s lane runs /ship, then ${Q} ready --pr ${p.pr} --screen|--no-screen; then ${Q} train build --prs <pins>`, 'none');
+    lines.push(`${shipped.targetedLine} pr=${p.pr}`);
     if (!ready) return outRefused({ code: 'QUEUE_NOT_READY', message: `no READY receipt for #${p.pr} at ${info.headRefOid.slice(0, 12)} (local state or ${'refs/notes/gstack-trains'})` }, [], `the lane runs ${Q} ready --pr ${p.pr} --screen|--no-screen`, 'none');
-    slots.push({ pr: p.pr, head: info.headRefOid, ready_at: ready.ready_at, screen: ready.screen });
+    let screen = ready.screen;
+    if (screen.choice === 'screen' && screen.run && slug === undefined) slug = repoSlug(ctx);
+    const read = screen.choice === 'screen' && screen.run ? (slug ? screenVerdict(ctx, slug, screen.run) : { kind: 'unknown' as const, detail: 'the repository slug is unreadable' }) : null;
+    if (read && screen.run && recordVerdict(ready.screen, read) && !dryRun) { ready.updated_at = nowIso(); persist(ctx.repoRoot, [ready], { remote: env.remote }); }
+    if (read?.kind === 'red') {
+      return outRefused({ code: 'QUEUE_SCREEN_RED', message: `#${p.pr}'s screen run ${screen.run} is RED on ${read.red.join(', ') || 'its gate binding'} (${read.detail}); a red head is not seated` },
+        [...lines, ...verdictLines(p.pr, screen.run!, read)], without ? `${Q} train build --prs ${without}` : 'none', 'none');
+    }
+    const wave = checkWavePin(env, p.pr, info);
+    if (wave && 'failure' in wave) return outRefused(wave.failure, lines, without ? `${Q} train build --prs ${without} (or rebuild the wave: ${Q} wave status)` : `${Q} wave status`, 'none');
+    if (wave) lines.push(...wave.lines);
+    if (read?.kind === 'not-run' || read?.kind === 'incomplete') { lines.push(`SCREEN: #${p.pr} ${read.detail}; counted as not-run, the slot rides unscreened`); screen = { ...screen, choice: 'no-screen' }; }
+    else if (read?.kind === 'unknown') lines.push(`SCREEN: #${p.pr} ${read.detail}; counted as screened, unverified`);
+    else if (read?.kind === 'green') lines.push(`SCREEN: #${p.pr} run ${screen.run} GREEN${read.flaky.length ? ` (flaky: ${read.flaky.join(', ')})` : ''}`);
+    else if (read?.kind === 'pending') lines.push(`SCREEN: #${p.pr} run ${screen.run} still running; counted as screened`);
+    slots.push({ pr: p.pr, head: info.headRefOid, ready_at: ready.ready_at, screen, ...(ready.base_red ? { base_red: ready.base_red } : {}), ...(ready.fixes_base_red ? { fixes_base_red: ready.fixes_base_red } : {}), ...(wave ? { wave: { nonce: wave.wave.nonce, constituents: wave.wave.constituents.map(c => c.pr) } } : {}) });
   }
-  return { slots, lines: [] };
+  const seen = new Map(slots.map(s => [s.pr, `its own slot`]));
+  for (const s of slots) for (const c of s.wave?.constituents ?? []) {
+    if (seen.has(c)) return outRefused({ code: 'QUEUE_WAVE_DUPLICATE', message: `#${c} would land twice: in wave #${s.pr} and in ${seen.get(c)}` }, lines, `${Q} train build --prs <pins with each PR once>`, 'none');
+    seen.set(c, `wave #${s.pr}`);
+  }
+  return { slots, lines };
 }
 
 /** Start a new train from --prs, or find the live train with the same pins and base. */
@@ -280,36 +401,57 @@ async function newTrain(env: TrainEnv, o: BuildOptions): Promise<{ t: TrainRecor
   if (typeof pins === 'string') return outRefused({ code: 'QUEUE_PROOF_MISSING', message: pins }, [], 'none', 'none');
   if ((o.urgent || o.repair) && pins.length !== 1) return outRefused({ code: 'QUEUE_PROOF_MISSING', message: `${o.repair ? '--repair' : '--urgent'} admits exactly one PR` }, [], 'none', 'none');
   rebuildFromNotes(env.ctx.repoRoot, env.remote);
-  const freeze = activeFreeze(env.repo.key);
+  const freeze = activeFreeze(env.repo.keys);
   if (freeze && !o.repair) return outRefused({ code: 'QUEUE_TRAIN_FROZEN', message: `the queue is frozen since ${freeze.created_at}: train ${freeze.train} stopped after merging ${freeze.merged.map(p => '#' + p).join(',')} (${freeze.reason})` },
     frozenLines(freeze), `${Q} train build --repair --prs <repair-pr>@<sha>`, 'none');
-  const admitted = admitSlots(env, pins);
+  const explicit = parseOrder(o.order, pins);
+  if (explicit && 'error' in explicit) return outRefused({ code: 'QUEUE_PROOF_MISSING', message: explicit.error }, [], 'none', 'none');
+  const admitted = admitSlots(env, pins, o.dryRun);
   if ('exit' in admitted) return admitted;
-  const order = orderSlots(admitted.slots, o.repair ? 1 : env.train.max_size);
+  const ordered = orderSlots(admitted.slots, o.repair ? 1 : env.train.max_size, explicit);
+  const admission = baseRedAdmission(ordered.train, !!env.train.gates, !!explicit);
+  if ('code' in admission) return outRefused(admission, admitted.lines, `seat the fixer at slot 1 of a train with gates, or drop the conditional PR: ${Q} train build --prs <pins>`, 'none');
+  const order = { train: admission.slots, held: ordered.held };
   const lines = [
-    `ORDER: ${order.train.map((s, i) => `${i + 1}:#${s.pr}(${s.screen.choice === 'screen' ? 'screened' : 'unscreened'})`).join(' ')}`,
-    ...(order.held.length ? [`HELD: ${order.held.map(s => '#' + s.pr).join(',')} (${order.split ? 'unscreened PRs form their own train' : `over the train size ${env.train.max_size}`})`] : []),
+    ...admitted.lines, ...admission.lines,
+    `ORDER: ${order.train.map((s, i) => `${i + 1}:#${s.pr}(${s.screen.choice === 'screen' ? 'screened' : 'unscreened'})`).join(' ')}${explicit ? ' (explicit --order)' : ''}`,
+    ...(order.held.length ? [`HELD: ${order.held.map(s => '#' + s.pr).join(',')} (over the train size ${env.train.max_size})`] : []),
+    ...(pins.length > WAVE_TRIGGER ? [`WAVE_ADVISED: ${pins.length} READY PRs over the wave trigger ${WAVE_TRIGGER}; group same-area PRs into wave PRs: ${Q} wave plan`] : []),
   ];
-  const due = fillDue(order.train, env.train, nowIso(), o.urgent || o.repair);
-  if (due && !o.dryRun) return outPending({ code: 'QUEUE_TRAIN_WAITING', message: `${order.train.length} of ${env.train.max_size} PRs; the oldest READY dispatches at ${due}` }, lines, `${Q} train build --prs ${pinList(order.train)} (after ${due}, or with more PRs, or --urgent for one)`, 'none');
   const baseSha = git(env.ctx.repoRoot, ['rev-parse', `${env.remote}/${env.ctx.base}`]).out;
   const key = sha256(JSON.stringify({ base: baseSha, slots: order.train.map(s => `${s.pr}@${s.head}`) }));
-  const live = listTrains(env.repo.key).find(t => t.key === key && !TERMINAL_STATES.includes(t.state) && t.state !== 'red' && t.state !== 'unattributed');
-  if (live) return { t: Object.assign(live, { held: order.held.map(s => s.pr) }), lines };
+  // The scratch merges run before the fill rule (#3485): a QUEUE_TRAIN_WAITING result is also a clean dry-run merge of
+  // every seated pin, and a pin the base moved onto is named (files only; the chain below is the merge verdict) before the
+  // train is refused for it.
+  for (const s of order.train) {
+    const overlap = baseOverlap(env.ctx.repoRoot, env.ctx.base, baseSha, s.head, env.policy.policy, false);
+    if (overlap.touched.length || overlap.unknown) lines.push(`#${s.pr} ${overlap.line}`);
+  }
   const chain = buildChain(env.ctx.repoRoot, baseSha, order.train, env.policy.policy);
   if ('stoppedAt' in chain) {
     const without = order.train.filter(s => s.pr !== chain.stoppedAt);
     return outFailed({ code: 'QUEUE_TRAIN_CONFLICT', message: `#${chain.stoppedAt} conflicts with the prefix before it` }, [...lines,
-      `QUEUE_TRAIN_CONFLICT: train ${key.slice(0, 12)} stopped at #${chain.stoppedAt} (conflicts: ${chain.conflicts.join(', ')}) after merging ${chain.merged.map(p => '#' + p).join(',') || '(none)'}; nothing dispatched, no branch pushed; fix: ${Q} train build --prs ${pinList(without)}`],
-    without.length ? `${Q} train build --prs ${pinList(without)}` : 'none', 'none');
+      `QUEUE_TRAIN_CONFLICT: train ${key.slice(0, 12)} stopped at #${chain.stoppedAt} (conflicts: ${chain.conflicts.join(', ')}) after merging ${chain.merged.map(p => '#' + p).join(',') || '(none)'}; nothing dispatched, no branch pushed; fix: ${Q} train build ${prsArgs(without, !!explicit)}`],
+    without.length ? `${Q} train build ${prsArgs(without, !!explicit)}` : 'none', 'none');
   }
-  const head = chain.prefixes.at(-1)!;
+  lines.push(`MERGE_CHECK: T1..T${order.train.length} merge clean onto ${env.ctx.base}@${baseSha.slice(0, 12)} (dry run in object storage; nothing pushed)`);
+  const due = fillDue(order.train, env.train, nowIso(), o.urgent || o.repair);
+  if (due && !o.dryRun) return outPending({ code: 'QUEUE_TRAIN_WAITING', message: `${order.train.length} of ${env.train.max_size} PRs; the oldest READY dispatches at ${due}` }, lines, `${Q} train build ${prsArgs(order.train, !!explicit)} (after ${due}, or with more PRs, or --urgent for one)`, 'none');
+  const live = listTrains(env.repo.keys).find(t => t.key === key && !TERMINAL_STATES.includes(t.state) && t.state !== 'red' && t.state !== 'unattributed' && !(t.gated && t.state === 'incomplete'));
+  if (live) return { t: Object.assign(live, { held: order.held.map(s => s.pr) }), lines };
+  const policy = env.policy.policy;
+  const stamps = !!policy.changelog_fragments || (!!env.train.gates && policy.queue_mode === 'stamp-at-merge');
+  const stamped = stamps ? stampChain({ repoRoot: env.ctx.repoRoot, base: env.ctx.base, policy, policyLabel: env.policy.source.label, baseSha, slots: order.train, plain: chain.prefixes, allowRepoCommands: !!o.allowRepoCommands, now: new Date(nowIso()) }) : null;
+  if (stamped && 'code' in stamped) return outFailed(stamped, lines, `${Q} train build ${prsArgs(order.train, !!explicit)} --allow-repo-commands (after the named slot is fixed or dropped)`, 'none');
+  if (stamped) lines.push(...stamped.lines);
+  const head = stamped ? stamped.stamped.at(-1)! : chain.prefixes.at(-1)!;
   const nonce = makeNonce('gate', head.commit, baseSha, randomBytes(3).toString('hex'), { purpose: 'train' });
   const now = nowIso();
+  const gated = env.train.gates ? gatedChain(nonce, chain.prefixes, stamped?.stamped) : undefined;
   return { lines, t: {
     schema: 1, kind: 'train', nonce, key, repo_key: env.repo.key, repo: env.repo.url, base: { ref: env.ctx.base, sha: baseSha }, policy: env.policy.source.label,
-    slots: order.train, held: order.held.map(s => s.pr), prefixes: chain.prefixes, head: head.commit, tree: head.tree, branch: `train/${nonce}`,
-    urgent: o.urgent, repair: o.repair, state: 'built', free: null, attempts: [], merged: [], superseded_by: null, effects: [], error: null,
+    slots: order.train, held: order.held.map(s => s.pr), prefixes: chain.prefixes, head: head.commit, tree: head.tree, branch: gated ? gated.at(-1)!.ref : `train/${nonce}`, ...(gated ? { gated } : {}),
+    urgent: o.urgent, repair: o.repair, ...(explicit ? { explicit_order: true } : {}), ...(stamped ? { stamped: stamped.stamped } : {}), state: 'built', free: null, attempts: [], merged: [], superseded_by: null, effects: [], error: null,
     created_at: now, updated_at: now,
   } };
 }
@@ -318,6 +460,7 @@ export function frozenLines(f: NonNullable<ReturnType<typeof activeFreeze>>): st
   return [
     `QUEUE_TRAIN_FROZEN: train ${f.train} merged ${f.merged.map(p => '#' + p).join(',') || '(none)'}; main ${f.main.sha.slice(0, 12)} tree ${f.main.tree.slice(0, 12)}; backstop ${f.backstop ? `${f.backstop.state} run ${f.backstop.run ?? 'unknown'} (nonce ${f.backstop.nonce})` : 'not dispatched'}`,
     `freeze: ${f.reason}; unmerged ${f.unmerged.map(u => '#' + u.pr).join(',') || '(none)'}; repair ${f.repair ? `#${f.repair.pr}@${f.repair.head.slice(0, 12)}` : 'none admitted'}`,
+    ...(f.unreadable?.length ? [`unreadable: ${f.unreadable.map(u => `#${u.pr}@${u.head.slice(0, 12)}`).join(', ')} (GitHub did not answer at the freeze; neither merged nor unmerged)`] : []),
   ];
 }
 
@@ -326,7 +469,8 @@ function describe(t: TrainRecord): string[] {
     `TRAIN: ${t.nonce} state=${t.state} prs=${t.slots.map(s => '#' + s.pr).join(',')} head=${t.head} tree=${t.tree}`,
     `base: origin/${t.base.ref}@${t.base.sha}`,
     ...t.prefixes.map(p => `PREFIX: T${p.index} ${p.commit} tree=${p.tree}${p.pr ? ` (+#${p.pr})` : ' (main)'}`),
-    ...t.slots.map((s, i) => `SLOT: ${i + 1} #${s.pr} head=${s.head} ${s.screen.choice === 'screen' ? `screened (${s.screen.policy ?? 'narrow'}${s.screen.run ? `, run ${s.screen.run}` : ''})` : 'unscreened'} ready_at=${s.ready_at}`),
+    ...t.slots.map((s, i) => `SLOT: ${i + 1} #${s.pr} head=${s.head} ${s.screen.choice === 'screen' ? `screened (${s.screen.policy ?? 'narrow'}${s.screen.run ? `, run ${s.screen.run}` : ''})` : 'unscreened'} ready_at=${s.ready_at}${s.base_red ? ` conditional(fixer #${s.base_red.fixer})` : ''}${s.fixes_base_red ? ` FIXES_BASE_RED: ${s.fixes_base_red.join(',')}` : ''}`),
+    ...(t.gated ?? []).map(p => `GATED: T${p.index} ${p.ref} ${p.commit} tree=${p.tree}`),
   ];
 }
 
@@ -342,7 +486,7 @@ async function freePhase(env: TrainEnv, slug: string, t: TrainRecord, o: BuildOp
       t.state = 'free-red';
       effect(t, `${env.train.free_workflow} dispatch refused by gh`);
       save(env, t);
-      return outFailed({ code: 'QUEUE_TRAIN_FREE_RED', message: `gh could not dispatch ${env.train.free_workflow} on ${t.branch}` }, describe(t), `${Q} train build --prs ${pinList(t.slots)}`, run);
+      return outFailed({ code: 'QUEUE_TRAIN_FREE_RED', message: `gh could not dispatch ${env.train.free_workflow} on ${t.branch}` }, describe(t), `${Q} train build ${prsArgs(t.slots, t.explicit_order)}`, run);
     }
     t.state = 'free-pending';
     effect(t, `${env.train.free_workflow} dispatched on ${t.branch}`);
@@ -374,6 +518,7 @@ async function freePhase(env: TrainEnv, slug: string, t: TrainRecord, o: BuildOp
 
 /** Push the branch, gate it with the free tests, then dispatch the paid gate once. */
 async function advance(env: TrainEnv, t: TrainRecord, o: BuildOptions, lines: string[]): Promise<TrainOut> {
+  if (t.gated) return env.train.gates ? advanceGeneric(env, t, lines, describe) : outRefused({ code: 'QUEUE_TRAIN_OFF', message: `train ${t.nonce} has gated prefixes, but the base policy's train block no longer declares gates` }, lines, 'none', trainFile(t.nonce));
   const run = trainFile(t.nonce);
   const slug = repoSlug(env.ctx);
   if (!slug) return outRefused({ code: 'QUEUE_PROOF_MISSING', message: 'gh repo view could not name the repository' }, lines, `${Q} train build --train ${t.nonce}`, run);
@@ -411,7 +556,7 @@ export async function buildTrain(ctx: QueueContext, o: BuildOptions): Promise<Tr
   if (o.resume) {
     t = findTrain(env, o.resume) ?? outRefused({ code: 'QUEUE_PROOF_MISSING', message: `no train record ${o.resume} here or in refs/notes/gstack-trains` }, [], `${Q} train status`, 'none');
     if ('kind' in t && TERMINAL_STATES.includes(t.state)) return outRefused({ code: 'QUEUE_PROOF_MISSING', message: `train ${t.nonce} is ${t.state}; it never dispatches again` }, describe(t), nextFor(t), trainFile(t.nonce));
-    if ('kind' in t && t.state !== 'free-pending' && t.state !== 'dispatch-absent' && t.state !== 'dispatch-unknown' && t.state !== 'built' && t.state !== 'pushed' && t.state !== 'free-green') {
+    if ('kind' in t && t.state !== 'free-pending' && t.state !== 'dispatch-absent' && t.state !== 'dispatch-unknown' && t.state !== 'built' && t.state !== 'pushed' && t.state !== 'free-green' && !(t.gated && t.state === 'gate-pending')) {
       return outOk(describe(t), nextFor(t), trainFile(t.nonce));
     }
   } else {
@@ -421,13 +566,24 @@ export async function buildTrain(ctx: QueueContext, o: BuildOptions): Promise<Tr
   }
   if (!('kind' in t)) return t;
   if (o.dryRun) {
-    return outOk([...lines, ...describe(t), `ESTIMATE: one ${env.train.gate_workflow} full gate (evals_all) on T${t.prefixes.length - 1} plus ${env.train.free_workflow}; dollar figure pending the T0 cost replay (lib/gate-cost.ts)`,
-      'DRY-RUN: nothing written, pushed or dispatched'], `${Q} train build --prs ${pinList(t.slots)}`, 'none');
+    const dry = [...lines, ...describe(t), env.train.gates ? `ESTIMATE: ${env.train.gates.length} gate(s) on each of ${t.prefixes.length} prefixes (T0..T${t.prefixes.length - 1}, every one gated)`
+      : `ESTIMATE: one ${env.train.gate_workflow} full gate (evals_all) on T${t.prefixes.length - 1} plus ${env.train.free_workflow}; dollar figure pending the T0 cost replay (lib/gate-cost.ts)`];
+    if (o.stackTests) {
+      const results = stackTests(env.ctx.repoRoot, t.prefixes[0]!.commit, t.slots, t.prefixes, o.stackTests === true ? undefined : o.stackTests);
+      dry.push(...results.map(stackTestLine));
+      const red = results.filter(r => !r.ok);
+      if (red.length) {
+        const again = `${Q} train build ${prsArgs(t.slots, t.explicit_order)} --dry-run --stack-tests`;
+        return outFailed({ code: 'QUEUE_TRAIN_STACK_RED', message: red.map(r => `#${r.pr}'s new tests fail on the integrated prefix T${r.prefix} (${r.files.join(', ')})`).join('; ') + '; they pass on the PR head alone only if nothing before it in the train changes what they read' },
+          [...dry, 'DRY-RUN: nothing written, pushed or dispatched'], `fix ${red.map(r => `#${r.pr}'s tests against T${r.prefix}`).join(' and ')}, or reorder with --order, then ${again}`, 'none');
+      }
+    }
+    return outOk([...dry, 'DRY-RUN: nothing written, pushed or dispatched'], `${Q} train build ${prsArgs(t.slots, t.explicit_order)}`, 'none');
   }
   if (t.state === 'built' && !t.attempts.length && !loadTrain(t.nonce)) {
     effect(t, 'train.json written');
     save(env, t);
-    for (const old of listTrains(env.repo.key)) {
+    for (const old of listTrains(env.repo.keys)) {
       if (old.nonce === t.nonce || TERMINAL_STATES.includes(old.state) || old.state === 'green' || old.state === 'merging') continue;
       if (!old.slots.some(s => t.slots.some((n: TrainSlot) => n.pr === s.pr))) continue;
       old.state = 'superseded';
@@ -435,7 +591,7 @@ export async function buildTrain(ctx: QueueContext, o: BuildOptions): Promise<Tr
       save(env, old);
     }
     if (o.repair) {
-      const f = activeFreeze(env.repo.key)!;
+      const f = activeFreeze(env.repo.keys)!;
       f.repair = { pr: t.slots[0]!.pr, head: t.slots[0]!.head, train: t.nonce };
       f.updated_at = nowIso();
       persist(env.ctx.repoRoot, [f], { remote: env.remote });
@@ -454,14 +610,14 @@ export function trainStatus(ctx: QueueContext, o: { train?: string }): TrainOut 
   if ('code' in env) return outRefused(env, [], 'none', 'none');
   const restored = rebuildFromNotes(ctx.repoRoot, env.remote);
   const lines = [`NOTES: read ${restored.read} record(s), restored ${restored.restored} (${restored.detail})`];
-  const trains = o.train ? [loadTrain(o.train)].filter((t): t is TrainRecord => !!t) : listTrains(env.repo.key).filter(t => !TERMINAL_STATES.includes(t.state));
+  const trains = o.train ? [loadTrain(o.train)].filter((t): t is TrainRecord => !!t) : listTrains(env.repo.keys).filter(t => !TERMINAL_STATES.includes(t.state));
   if (o.train && !trains.length) return outRefused({ code: 'QUEUE_PROOF_MISSING', message: `no train record ${o.train} here or in refs/notes/gstack-trains` }, lines, `${Q} train status`, 'none');
   const slug = trains.length ? repoSlug(ctx) : null;
   const exec = execFor(ctx);
   for (const t of trains) {
     lines.push(...describe(t));
     for (const a of attemptsOf(t)) {
-      if (slug && (a.state === 'dispatching' || a.state === 'unknown')) {
+      if (slug && a.workflow !== 'command' && (a.state === 'dispatching' || a.state === 'unknown')) {
         const runs = listDispatchRuns(a.workflow, exec, slug, 100);
         const hit = runs ? runForNonce(runs, a.nonce) : null;
         if (runs) {
@@ -475,35 +631,82 @@ export function trainStatus(ctx: QueueContext, o: { train?: string }): TrainOut 
       const view = slug && a.run && !a.outcome ? runView(ctx, slug, a.run.id) : null;
       lines.push(`ATTEMPT: ${a.id} ${a.purpose} state=${a.state} nonce=${a.nonce} run=${a.run?.id ?? '-'}${view ? ` ${view.status}/${view.conclusion ?? '-'}` : ''} outcome=${a.outcome ?? '-'}`);
     }
-    if (slug && (t.state === 'green' || t.state === 'merging')) {
+    if (slug && !t.gated && (t.state === 'green' || t.state === 'merging')) {
       const c = checkRun(ctx, t.head, env.train.full_gate_check);
       lines.push(`CHECK: ${env.train.full_gate_check} on ${t.head.slice(0, 12)}: ${c ? `${c.status}/${c.conclusion ?? '-'}` : 'missing'}`);
     }
     lines.push(`NEXT(${t.nonce}): ${nextFor(t)}`);
   }
   if (!trains.length) lines.push('TRAIN: none live');
-  const freeze = activeFreeze(env.repo.key);
+  const freeze = activeFreeze(env.repo.keys);
   if (freeze) lines.push(...frozenLines(freeze));
   const single = trains.length === 1 ? trains[0]! : null;
   const next = freeze && !freeze.repair ? `${Q} train build --repair --prs <repair-pr>@<sha>` : single ? nextFor(single) : trains.length ? 'see each NEXT(<nonce>) line' : 'none';
   return outOk(lines, next, single ? trainFile(single.nonce) : 'none');
 }
 
-/** `train prune`: delete train/<nonce> on the remote for every finished (merged, superseded, dropped) train. */
-export function pruneTrains(ctx: QueueContext, o: { dryRun: boolean; train?: string }): TrainOut {
+/** A PR's state on GitHub for the stale check: MERGED, CLOSED, OPEN, or unreadable. */
+export function prState(ctx: QueueContext, pr: string): string {
+  const info = prInfo(ctx, pr);
+  return 'error' in info ? 'unreadable' : info.state.toUpperCase();
+}
+
+/**
+ * `--stale`: a merging or green train whose every PR is MERGED or CLOSED on
+ * GitHub (merged elsewhere, closed, or merged outside the train) never
+ * finishes on its own; it becomes `stale` (terminal) and is pruned, with
+ * each PR's state in the log. Any OPEN or unreadable PR keeps the train.
+ */
+function staleCheck(ctx: QueueContext, t: TrainRecord): { stale: true; detail: string } | { stale: false; detail: string } {
+  const unmerged = t.slots.filter(s => !t.merged.some(m => m.pr === s.pr));
+  const states = unmerged.map(s => `#${s.pr} ${prState(ctx, s.pr)}`);
+  const open = states.filter(s => !/ (MERGED|CLOSED)$/.test(s));
+  const detail = `${t.merged.map(m => `#${m.pr} merged by the train`).concat(states).join(', ')}`;
+  return open.length ? { stale: false, detail: `${open.join(', ')} still ${open.length === 1 ? 'needs' : 'need'} the train` } : { stale: true, detail };
+}
+
+/** `train prune`: delete train/<nonce> on the remote for every finished (merged, superseded, dropped, stale) train; `--stale` first settles merging and green trains whose PRs all merged or closed elsewhere, and the screen/<pr>-* branches of merged or closed PRs. */
+export function pruneTrains(ctx: QueueContext, o: { dryRun: boolean; train?: string; stale?: boolean }): TrainOut {
   const env = trainEnv(ctx);
   if ('code' in env) return outRefused(env, [], 'none', 'none');
   rebuildFromNotes(ctx.repoRoot, env.remote);
   const lines: string[] = [];
   const rgit = (args: string[]) => git(ctx.repoRoot, args);
-  for (const t of listTrains(env.repo.key).filter(x => !o.train || x.nonce === o.train)) {
+  const remove = (branch: string, label: string, after?: () => void) => {
+    if (!remoteBranchSha(rgit, env.remote, branch)) { lines.push(`GONE: ${branch} (${label})`); return; }
+    if (o.dryRun) { lines.push(`WOULD-DELETE: ${branch} (${label})`); return; }
+    const d = git(ctx.repoRoot, ['push', '-q', env.remote, '--delete', `refs/heads/${branch}`]);
+    lines.push(d.ok ? `DELETED: ${branch} (${label})` : `FAILED: ${branch}: ${d.err.slice(0, 120)}`);
+    if (d.ok) after?.();
+  };
+  for (const t of listTrains(env.repo.keys).filter(x => !o.train || x.nonce === o.train)) {
+    if (o.stale && (t.state === 'merging' || t.state === 'green')) {
+      const s = staleCheck(ctx, t);
+      if (s.stale) {
+        lines.push(`STALE: ${t.nonce} (${t.state}): ${s.detail}${o.dryRun ? '; would mark stale' : ''}`);
+        if (!o.dryRun) { t.state = 'stale'; effect(t, `marked stale by train prune --stale: ${s.detail}`); save(env, t); }
+        for (const p of (t.gated ?? []).filter(g => g.ref !== t.branch)) remove(p.ref, o.dryRun ? 'stale' : t.state);
+        remove(t.branch, o.dryRun ? 'stale' : t.state, () => { effect(t, `branch deleted: ${t.branch}`); save(env, t); });
+        continue;
+      }
+      lines.push(`KEEP: ${t.branch} (${t.state}; ${s.detail})`);
+      continue;
+    }
     if (!TERMINAL_STATES.includes(t.state)) { lines.push(`KEEP: ${t.branch} (${t.state})`); continue; }
-    if (!remoteBranchSha(rgit, env.remote, t.branch)) { lines.push(`GONE: ${t.branch} (${t.state})`); continue; }
-    if (o.dryRun) { lines.push(`WOULD-DELETE: ${t.branch} (${t.state})`); continue; }
-    const d = git(ctx.repoRoot, ['push', '-q', env.remote, '--delete', `refs/heads/${t.branch}`]);
-    lines.push(d.ok ? `DELETED: ${t.branch} (${t.state})` : `FAILED: ${t.branch}: ${d.err.slice(0, 120)}`);
-    if (d.ok) { effect(t, `branch deleted: ${t.branch}`); save(env, t); }
+    const waiting = t.gated && t.verdict ? t.slots.slice(0, t.verdict.landable).filter(s => !t.merged.some(m => m.pr === s.pr)) : [];
+    if (waiting.length) { lines.push(`KEEP: ${t.branch} (${t.state}; ${waiting.map(s => '#' + s.pr).join(', ')} landable, not merged)`); continue; }
+    for (const p of (t.gated ?? []).filter(g => g.ref !== t.branch)) remove(p.ref, t.state);
+    remove(t.branch, t.state, () => { effect(t, `branch deleted: ${t.branch}`); save(env, t); });
+  }
+  if (o.stale && !o.train) {
+    const refs = git(ctx.repoRoot, ['ls-remote', env.remote, 'refs/heads/screen/*']);
+    for (const ref of refs.ok ? refs.out.split('\n') : []) {
+      const m = /refs\/heads\/(screen\/(\d+)-[0-9a-f]{12})$/.exec(ref.split(/\s/)[1] ?? '');
+      if (!m) continue;
+      const state = prState(ctx, m[2]!);
+      if (state === 'MERGED' || state === 'CLOSED') remove(m[1]!, `#${m[2]} ${state}`); else lines.push(`KEEP: ${m[1]} (#${m[2]} ${state})`);
+    }
   }
   if (!lines.length) lines.push('PRUNE: no trains');
-  return outOk(lines, o.dryRun ? `${Q} train prune` : 'none', 'none');
+  return outOk(lines, o.dryRun ? `${Q} train prune${o.stale ? ' --stale' : ''}` : 'none', 'none');
 }

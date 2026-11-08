@@ -6,17 +6,22 @@ import { spawnSync } from 'child_process';
 const SCRIPT_PATH = path.join(import.meta.dir, '../../bin/gstack-learnings-search');
 const SCRIPT = fs.readFileSync(SCRIPT_PATH, 'utf-8');
 const BIN_DIR = path.join(import.meta.dir, '../../bin');
+const BUN_BLOCK_AT = SCRIPT.indexOf('bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e');
 
 describe('gstack-learnings-search injection safety', () => {
+  it('finds the bun -e block the checks below read', () => {
+    expect(BUN_BLOCK_AT).toBeGreaterThanOrEqual(0);
+  });
+
   it('must not interpolate variables into JS string literals', () => {
-    const jsBlock = SCRIPT.slice(SCRIPT.indexOf('bun -e'));
+    const jsBlock = SCRIPT.slice(BUN_BLOCK_AT);
     expect(jsBlock).not.toMatch(/const \w+ = '\$\{/);
     expect(jsBlock).not.toMatch(/= \$\{[A-Z_]+\};/);
     expect(jsBlock).not.toMatch(/'\$\{CROSS_PROJECT\}'/);
   });
 
   it('must use process.env for parameters', () => {
-    const jsBlock = SCRIPT.slice(SCRIPT.indexOf('bun -e'));
+    const jsBlock = SCRIPT.slice(BUN_BLOCK_AT);
     expect(jsBlock).toContain('process.env');
   });
 });

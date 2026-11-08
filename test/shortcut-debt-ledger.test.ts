@@ -17,6 +17,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { readSkillStartup } from './helpers/skill-startup';
 
 const ROOT = path.join(import.meta.dir, '..');
 const read = (p: string) => fs.readFileSync(path.join(ROOT, p), 'utf-8');
@@ -39,7 +40,7 @@ describe('writer: AUQ format preamble mandates the marker', () => {
 
   test('rendered tier-2+ skeletons carry the trail rule (always-loaded, like the AUQ format itself)', () => {
     for (const skill of ['plan-ceo-review', 'ship', 'retro']) {
-      const body = read(`${skill}/SKILL.md`);
+      const body = readSkillStartup(path.join(ROOT, skill, 'SKILL.md'));
       expect(body).toContain('Accepted shortcuts leave a trail');
       expect(body).toContain('gstack-shortcut(dec-<id>)');
     }

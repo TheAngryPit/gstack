@@ -12,11 +12,12 @@
  *       frontmatter + the named `## <section>` blocks, concatenated in the
  *       order given. For tests that exercise specific workflow steps.
  *   - extractSkillBody(skillDir)
- *       frontmatter + intro + everything AFTER the shared generated preamble
- *       ("## Preamble (run first)" or "## Preamble (after scope gate)"
- *       .. end of "## Plan Status Footer").
+ *       frontmatter + intro + everything AFTER the generated preamble (tier 1:
+ *       "## Preamble (run first)" or "## Preamble (after scope gate)" .. end of
+ *       "## Plan Status Footer"; tier 2+: the shared-preamble pointer .. this
+ *       skill's own preamble sections through Telemetry).
  *       For tests that exercise the skill's ENTIRE specific flow but never
- *       touch the ~780-line shared preamble.
+ *       touch the generated preamble.
  *   - extractSkillHead(skillDir, bodyLineCount)
  *       frontmatter + the first N body lines. For ROUTING / discovery tests,
  *       where the agent only reads the frontmatter (name + description) to
@@ -31,6 +32,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { SHARED_POINTER_HEADING, readSharedSections, readSkillEffective } from './skill-startup';
 
 // ─── Section lists shared by E2E fixtures and the free pin test ────────────
 // Keep these verbatim against the H2 headings in the generated SKILL.md files.
@@ -39,11 +41,10 @@ import * as path from 'path';
 /** /review E2E (sql-injection, enum-completeness, design-lite): the core
  *  review workflow without the shared preamble, Review Army, or Fix-First. */
 export const REVIEW_E2E_SECTIONS = [
-  'When to invoke this skill',
   'Step 0: Detect platform and base branch',
   'Step 1: Check branch',
   'Step 2: Read the checklist',
-  'Step 2.5: Check for Greptile review comments',
+  'Step 2.5: Check for review bot comments',
   'Step 3: Get the diff',
   'Step 4: Critical pass (core review)',
   'Confidence Calibration',
@@ -54,12 +55,11 @@ export const REVIEW_E2E_SECTIONS = [
  *  (delivery-audit test) + Step 4.5 specialist dispatch (quality score,
  *  JSON findings schema, MULTI-SPECIALIST consensus, Red Team). */
 export const REVIEW_ARMY_E2E_SECTIONS = [
-  'When to invoke this skill',
   'Step 0: Detect platform and base branch',
   'Step 1: Check branch',
   'Step 1.5: Scope Drift Detection',
   'Step 2: Read the checklist',
-  'Step 2.5: Check for Greptile review comments',
+  'Step 2.5: Check for review bot comments',
   'Step 3: Get the diff',
   'Step 4: Critical pass (core review)',
   'Confidence Calibration',
@@ -72,7 +72,6 @@ export const REVIEW_ARMY_E2E_SECTIONS = [
  *  + the narrative report template. Global mode and Compare mode are not
  *  exercised by the E2E tests and are dropped. */
 export const RETRO_E2E_SECTIONS = [
-  'When to invoke this skill',
   'Step 0: Detect platform and base branch',
   'User-invocable',
   'Arguments',
@@ -86,8 +85,7 @@ export const RETRO_E2E_SECTIONS = [
 
 /** codex-review-findings E2E against the Codex host variant
  *  (.agents/skills/gstack-review/SKILL.md). Same core workflow as
- *  REVIEW_E2E_SECTIONS, minus "When to invoke this skill" (the Codex host
- *  adapter does not emit that section). */
+ *  REVIEW_E2E_SECTIONS. */
 export const CODEX_REVIEW_E2E_SECTIONS = [
   'Step 0: Detect platform and base branch',
   'Step 1: Check branch',
@@ -100,10 +98,12 @@ export const CODEX_REVIEW_E2E_SECTIONS = [
 
 // ─── Parsing internals ──────────────────────────────────────────────────────
 
-/** First/last H2 headings of the shared preamble block that gen-skill-docs
- *  emits into every tier >= 2 skill. extractSkillBody drops this range. */
+/** First/last H2 headings of an inline (tier 1) preamble block. extractSkillBody
+ *  drops this range; a hoisted tier 2+ preamble is bounded by its pointer instead. */
 const SHARED_PREAMBLE_FIRST = ['Preamble (run first)', 'Preamble (after scope gate)'];
 const SHARED_PREAMBLE_LAST = 'Plan Status Footer';
+/** Preamble sections a hoisted SKILL.md keeps inline because they name the skill. */
+const INLINE_PREAMBLE = [...SHARED_PREAMBLE_FIRST, 'Question Tuning', 'Repo Ownership', 'Search Before Building', 'Telemetry (run last)'];
 
 interface H2Section {
   heading: string;
@@ -190,14 +190,14 @@ function scanH2Sections(bodyLines: string[], stopAtH1 = false): H2Section[] {
   return sections;
 }
 
-function loadSkill(skillDirOrFile: string, stopAtH1 = false): {
+function loadSkill(skillDirOrFile: string, stopAtH1 = false, effective = false): {
   file: string;
   frontmatter: string;
   bodyLines: string[];
   sections: H2Section[];
 } {
   const file = resolveSkillMd(skillDirOrFile);
-  const raw = fs.readFileSync(file, 'utf-8');
+  const raw = effective ? readSkillEffective(file) : fs.readFileSync(file, 'utf-8');
   const { frontmatter, bodyLines } = splitFrontmatter(raw, file);
   return { file, frontmatter, bodyLines, sections: scanH2Sections(bodyLines, stopAtH1) };
 }
@@ -225,7 +225,7 @@ function findSection(sections: H2Section[], name: string, file: string): H2Secti
  * concatenated in the order given. Throws loudly on a missing section.
  */
 export function extractSkillSections(skillDir: string, sections: string[]): string {
-  const { file, frontmatter, bodyLines, sections: all } = loadSkill(skillDir);
+  const { file, frontmatter, bodyLines, sections: all } = loadSkill(skillDir, false, true);
   const parts: string[] = [frontmatter, ''];
   for (const name of sections) {
     const hit = findSection(all, name, file);
@@ -237,8 +237,9 @@ export function extractSkillSections(skillDir: string, sections: string[]): stri
 /**
  * Frontmatter + intro/scope gate (everything before either exact preamble heading) + the
  * full skill-specific body (everything after the "## Plan Status Footer"
- * section). Use when a test exercises the whole skill flow: this drops the
- * ~780-line shared generated preamble and nothing else.
+ * section; in a hoisted SKILL.md, the shared-preamble pointer through the
+ * skill's own preamble sections ending at Telemetry). Use when a test exercises the whole skill flow: this drops the
+ * generated preamble and nothing else.
  */
 export function extractSkillBody(skillDir: string): string {
   const { file, frontmatter, bodyLines, sections: all } = loadSkill(skillDir, true);
@@ -249,16 +250,30 @@ export function extractSkillBody(skillDir: string): string {
     if (matches.length !== 1) throw new Error(`skill-fixture: ambiguous section ${label} in ${file}.`);
     return matches[0];
   };
-  const first = boundary(SHARED_PREAMBLE_FIRST);
-  const last = boundary([SHARED_PREAMBLE_LAST]);
+  const pointer = all.findIndex(section => `## ${section.heading}` === SHARED_POINTER_HEADING);
+  let first: H2Section, last: H2Section;
+  if (pointer >= 0) {
+    // Hoisted preamble: the pointer, then this skill's own preamble sections up to Telemetry.
+    const shared = new Set(readSharedSections(file).map(section => section.split('\n', 1)[0]!.slice(3)));
+    let end = pointer;
+    while (end + 1 < all.length && (shared.has(all[end + 1].heading)
+      || INLINE_PREAMBLE.some(name => all[end + 1].heading.startsWith(name)))) end++;
+    if (!all.slice(pointer, end + 1).some(section => section.heading === 'Telemetry (run last)')) {
+      throw new Error(`skill-fixture: no "## Telemetry (run last)" closes the preamble in ${file}.`);
+    }
+    [first, last] = [all[pointer], all[end]];
+  } else {
+    first = boundary(SHARED_PREAMBLE_FIRST);
+    last = boundary([SHARED_PREAMBLE_LAST]);
+  }
   if (first.start >= last.start) {
-    throw new Error(`skill-fixture: "## ${SHARED_PREAMBLE_LAST}" precedes the preamble in ${file}.`);
+    throw new Error(`skill-fixture: "## ${last.heading}" precedes the preamble in ${file}.`);
   }
   const intro = bodyLines.slice(0, first.start).join('\n').trimEnd();
   const tail = bodyLines.slice(last.end).join('\n').trimEnd();
   if (!tail) {
     throw new Error(
-      `skill-fixture: ${file} has no content after "## ${SHARED_PREAMBLE_LAST}" — `
+      `skill-fixture: ${file} has no content after "## ${last.heading}" — `
       + 'refusing to write a preamble-only fixture.',
     );
   }

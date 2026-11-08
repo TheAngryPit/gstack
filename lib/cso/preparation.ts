@@ -5,8 +5,8 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
-/** 'java' (Maven or Gradle) is detected so it is reported as itself; no runtime prepares it. */
-export type CsoStack = 'node' | 'bun' | 'python' | 'rails' | 'java';
+/** 'java' (Maven or Gradle) and 'go' (go.mod) are detected so they are reported as themselves; no runtime prepares them. */
+export type CsoStack = 'node' | 'bun' | 'python' | 'rails' | 'java' | 'go';
 export interface PreparationPrerequisite {
   code: string;
   message: string;
@@ -1205,12 +1205,15 @@ export function inspectPreparation(snapshotPath: string, stack?: CsoStack): Prep
       detectedStacks.push('node');
     if (read(root, 'Gemfile.lock', true) !== undefined || read(root, 'Gemfile', true) !== undefined)
       detectedStacks.push('rails');
-    // A root Maven or Gradle build names the repository's language; Python
-    // metadata beside it is helper tooling, not a second application stack.
+    // A root Maven or Gradle build, or a root go.mod with no other supported
+    // stack, names the repository's language; Python metadata beside it is
+    // helper tooling, not a second application stack.
     const jvmBuild = ['pom.xml', 'build.gradle', 'build.gradle.kts'].find(
       (file) => read(root, file, true) !== undefined,
     );
     if (jvmBuild) detectedStacks.push('java');
+    else if (detectedStacks.length === 0 && read(root, 'go.mod', true) !== undefined)
+      detectedStacks.push('go');
     else if (
       read(root, 'uv.lock', true) !== undefined ||
       read(root, 'requirements.txt', true) !== undefined ||
@@ -1231,10 +1234,16 @@ export function inspectPreparation(snapshotPath: string, stack?: CsoStack): Prep
         `Java (${jvmBuild ?? 'Maven or Gradle'}) is not a supported runtime stack yet; supported runtime stacks are Node, Bun, Python, and Rails.`,
         jvmBuild,
       );
+    if (detected === 'go')
+      fail(
+        'UNSUPPORTED_STACK',
+        'Go (go.mod) is not a supported runtime stack yet; supported runtime stacks are Node, Bun, Python, and Rails.',
+        'go.mod',
+      );
     if (!['node', 'bun', 'python', 'rails'].includes(detected))
       fail('UNSUPPORTED_STACK', 'Supported runtime stacks are Node, Bun, Python, and Rails.');
     ({ node: inspectNode, bun: inspectBun, python: inspectPython, rails: inspectRails })[
-      detected as Exclude<CsoStack, 'java'>
+      detected as Exclude<CsoStack, 'java' | 'go'>
     ](root, plan);
   } catch (error) {
     plan.status = 'prerequisites';

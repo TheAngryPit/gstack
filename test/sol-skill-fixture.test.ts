@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { readSkillStartup } from './helpers/skill-startup';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-sol-generation-test-'));
@@ -80,7 +81,7 @@ test('private Sol render matches the full in-place artifact and leaves cache byt
   const fixture = await createFixture(temporaryParent);
   try {
     expect(inventory(fixture.skillDir, false)).toEqual(fullSkill);
-    const skill = fs.readFileSync(path.join(fixture.skillDir, 'SKILL.md'), 'utf8');
+    const skill = readSkillStartup(path.join(fixture.skillDir, 'SKILL.md'));
     expect(skill).toContain('name: gstack-investigate');
     expect(skill).toContain('Model-Specific Behavioral Patch (gpt-5.6-sol)');
     expect(skill).not.toContain(fixture.outputRoot);

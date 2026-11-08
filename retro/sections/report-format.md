@@ -35,10 +35,13 @@ Narrative covering:
 - Fix-chain detection (sequences of fix commits on the same subsystem)
 - Version bump discipline
 
+### Factory scorecard
+(from Step 7.5 when it ran; the table as printed, `unavailable (...)` lines kept; omit the section when the step was skipped)
+
 ### Code Quality Signals
 - Test LOC ratio trend
 - Hotspot analysis (are the same files churning?)
-- Greptile signal ratio and trend (if history exists): "Greptile: X% signal (Y valid catches, Z false positives)"
+- Review bot signal ratio and trend per bot (if history exists): "<bot>: X% signal (Y valid catches, Z false positives)"
 
 ### Test Health
 - Total test files: N (`TEST_FILES_TOTAL`)

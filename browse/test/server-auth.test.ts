@@ -514,7 +514,7 @@ describe('Server auth security', () => {
     // parent-PID watchdog.
     const connectBlock = sliceBetween(CLI_SRC, 'Launching headed Chromium', 'Terminal agent started');
     expect(connectBlock).toContain('startServer(buildHeadedServerEnv(globalFlags))');
-    expect(buildHeadedServerEnv({ proxyUrl: null, configHash: '' }).BROWSE_PARENT_PID).toBe('0');
+    expect(buildHeadedServerEnv({ proxyUrl: null, configHash: '', explicitDirect: false }).BROWSE_PARENT_PID).toBe('0');
   });
 
   // Regression: newtab returned 403 for scoped tokens because the tab ownership

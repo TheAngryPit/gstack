@@ -185,6 +185,22 @@ describe('ship/SKILL.md — Plan Completion gate invariants', () => {
     expect(entry).not.toMatch(/Step 15\.[012]/);
   });
 
+  test('one owner per release commit and a defined result for a version Step 12 does not write', () => {
+    // Value: protects=the ship workflow judge's 6/6 cited conflict (Step 15 committed release metadata by hand while Step 16 finish also commits it) and its 3/6 undefined stamp-at-merge/kept result; fails_when=Step 15 regains a manual release commit or Step 12 drops the skipped/kept route; why_new=no pin covered commit ownership; seam=none; no_claim=judge scores
+    const entry = fs.readFileSync(path.join(SHIP_DIR, 'SKILL.md'), 'utf8');
+    const commit = entry.slice(entry.indexOf('## Step 15:'), entry.indexOf('## Step 16:'));
+    expect(commit).not.toContain('git commit');
+    expect(commit.replace(/\s+/g, ' ')).toMatch(/TODOS\.md and the digest uncommitted: Step 16's `finish` commits them last/);
+    const finish = entry.slice(entry.indexOf('## Step 16:'), entry.indexOf('### 1. Finish writers'));
+    expect(finish).toContain("makes Step 15's item-3 commit");
+    const version = entry.slice(entry.indexOf('## Step 12:'), entry.indexOf('1. **Classify state**')).replace(/\s+/g, ' ');
+    expect(version).not.toContain('replaces items 1–4');
+    expect(version).toContain('`VERSION: skipped`');
+    expect(version).toContain('`VERSION: <v> kept (…; no write)` ends Step 12 with `NEW_VERSION` unset');
+    expect(version).toContain('ALREADY_BUMPED derives it in item 1');
+    expect(version).toContain("Steps 18 and 20 take NO_VERSION's branch");
+  });
+
   test('a rejected push stops publication and routes changed content back through verification', () => {
     const entry = fs.readFileSync(path.join(SHIP_DIR, 'SKILL.md'), 'utf8');
     const push = entry.slice(entry.indexOf('## Step 17:'), entry.indexOf('## Step 20:'));
@@ -199,9 +215,13 @@ describe('ship/SKILL.md — Plan Completion gate invariants', () => {
   });
 });
 
+// GSTA-167 PR 4: Step 17's idempotency block moved into gstack-ship-release push; this runs the
+// bin the prose names, with the same remote states the block was tested against.
 test('push idempotency requires the live remote SHA and fails closed on transport errors', () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'ship-push-state-'));
-  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ship-push-root-'));
+  fs.writeFileSync(path.join(state, '.redact-prepush-prompted'), '');
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GSTACK_STATE_ROOT: state, GSTACK_HOME: state,
     GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
     GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' };
   const git = (...args: string[]) => {
@@ -215,25 +235,20 @@ test('push idempotency requires the live remote SHA and fails closed on transpor
     const remote = path.join(cwd, '.git/remote.git');
     git('init', '--bare', remote); git('remote', 'add', 'origin', remote);
     const source = fs.readFileSync(path.join(SHIP_DIR, 'SKILL.md.tmpl'), 'utf8');
-    const block = source.slice(source.indexOf('**Idempotency check:** Check if the branch'))
-      .match(/```bash\n([\s\S]*?)\n```/)![1].replaceAll('<branch-name>', 'feature');
-    const inspect = () => {
-      const r = spawnSync('bash', ['-c', block], { cwd, env, encoding: 'utf8', timeout: 30_000 });
-      if (r.error) throw new Error(`idempotency check did not run: ${r.error.message}; stderr: ${r.stderr}`);
-      return r;
-    };
-    expect(inspect().stdout).toContain('PUSH_NEEDED');
-    git('push', '-u', 'origin', 'feature');
-    expect(inspect().stdout).toContain('ALREADY_PUSHED');
+    const step17 = source.slice(source.indexOf('## Step 17:'), source.indexOf('## Step 18:'));
+    expect(step17).toContain('gstack-ship-release push');
+    expect(step17).toContain('a failed lookup STOPs');
+    const push = () => spawnSync(path.join(SHIP_DIR, '..', 'bin', 'gstack-ship-release'), ['push', '--branch', 'feature'], { cwd, env, encoding: 'utf8', timeout: 60_000 });
+    expect(push().stdout).toMatch(/PUSH: pushed [0-9a-f]{12} to origin\/feature/);
+    expect(push().stdout).toContain('PUSH: ALREADY_PUSHED');
     fs.appendFileSync(path.join(cwd, 'app'), 'new\n'); git('commit', '-am', 'new');
-    expect(inspect().stdout).toContain('PUSH_NEEDED');
-    git('push', 'origin', 'feature');
+    expect(push().stdout).toMatch(/PUSH: pushed /);
     fs.renameSync(remote, remote + '-offline');
-    const unavailable = inspect();
-    expect(unavailable.status).toBe(1);
+    const unavailable = push();
+    expect(unavailable.status).toBe(3);
     expect(unavailable.stdout).not.toContain('ALREADY_PUSHED');
-    expect(unavailable.stdout).toContain('BLOCKED');
-  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+    expect(unavailable.stdout).toContain('STOP: cannot verify the remote branch');
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); fs.rmSync(state, { recursive: true, force: true }); }
 }, 120_000);
 
 // F1 (#2768, #2800): the Plan Completion Audit used to fall back to "the newest

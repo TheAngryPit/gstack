@@ -1,0 +1,36 @@
+PREGATE_HEARTBEAT: remote gate pregate.json/remote_gate running 60s; last file none reported; log 972 bytes, last growth 31s ago (/tmp/gstack-pregate-remote-8Y6W83/remote.log)
+PREGATE_HEARTBEAT: remote gate pregate.json/remote_gate running 120s; last file none reported; log 31995 bytes, last growth 1s ago (/tmp/gstack-pregate-remote-8Y6W83/remote.log)
+PREGATE_HEARTBEAT: remote gate pregate.json/remote_gate running 180s; last file none reported; log 35723 bytes, last growth 7s ago (/tmp/gstack-pregate-remote-8Y6W83/remote.log)
+PREGATE_REMOTE_SPEND: spent $0.04, reserved $0, unknown $0 (cap $2)
+PREGATE: tests requires-remote (2 uncleared) in 222.3s — lanes: remote gate pregate.json/remote_gate: 9660 tests, 0 failed on tree 46b75c23704f; spend: spent $0.04, reserved $0, unknown $0 (cap $2)
+pregate: policy origin/main@8d9501373b55:.gstack/pregate.json; registry origin/main@8d9501373b55:.gstack/generated.json; base origin/main@8d9501373b55; 10 touched file(s); platform linux
+stage      check     status            time  detail
+tests      lanes     requires-remote  222297 ms  remote gate pregate.json/remote_gate: 9660 tests, 0 failed on tree 46b75c23704f; spend: spent $0.04, reserved $0, unknown $0 (cap $2)
+    lanes: requires-remote free-tests.yml/macos-named-regressions (macos): 2 test(s) — test/plan-count-file-permission.test.ts test/spec-quality-gate-secret-sink.test.ts
+    lanes: requires-remote windows-free-tests.yml/windows-free-shard (windows): 269 test(s) — test/approval-classes.test.ts test/arm-benchmark-selftest.test.ts test/auq-mode-capture.test.ts test/auq-native-capture.test.ts test/auq-substance-panel.test.ts test/auto-decide-fixture.test.ts test/autoplan-dual-voice-fixture.test.ts test/autoplan-review-discovery.test.ts …
+    lanes: Tiers ran: e2e unit; requires-remote: macos windows
+    lanes: remote gate: bash scripts/ubicloud/pregate-remote.sh
+    lanes: log: /tmp/gstack-pregate-remote-8Y6W83/remote.log
+    lanes: spend: spent $0.04, reserved $0, unknown $0 (cap $2)
+    lanes:   [test:free] PASS — 717 tests, 19 files, 83s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-20-46-128Z-10311-13.log
+    lanes:   Ran 23 tests across 1 file. [108.94s]
+    lanes:   [test:free] shard 1/16: 1 files, 109s, pass
+    lanes:   [test:free] PASS — 23 tests, 1 files, 109s. Full log: /home/ubi/work/gstack/.context/free-test-logs/gstack-free-test-2026-10-26T01-20-46-103Z-10311-1.log
+    lanes:   [test:free] FILES-FROM RESULT: files=269 tests=9660 failed=0 exit=0
+    lanes:   PREGATE_VM_TREE_AFTER 8babef7f378613c21777607f14b96a58797bcd13
+    lanes:   ubi-runner: command exited 0 after 110s
+    lanes:   ubi-runner: pull: nothing matches /tmp/gstack-free-test-*
+    lanes:   ubi-runner: destroy requested: eu-central-h1/ubirun-<vm>
+    lanes:   ubi-runner: destroyed eu-central-h1/ubirun-<vm>
+    lanes:   pregate-remote: phases: create 24s, setup 74s, run 110s, teardown 7s; total 220s (target 600s)
+    lanes:   pregate-remote: log: /workspace/gstack/.context/pregate-remote/20261026T011902Z-126497/run.log
+    lanes:     setup rebuilt (committed build output, as the CI free lane rebuilds it): M	lib/diagram-render/dist/BUILD_INFO.json
+    lanes:     setup rebuilt (committed build output, as the CI free lane rebuilds it): M	lib/diagram-render/dist/diagram-render.html
+    lanes:   PREGATE_REMOTE: tree=46b75c23704fb4ae1f22677258c16b880ecd20c5 tests=9660 failed=0 spent=0.04
+stage 2 (test execution): 222297 ms
+requires-remote: free-tests.yml/macos-named-regressions (macos) 2 test(s) — uncleared; clear with gstack-pregate clear --remote free-tests.yml/macos-named-regressions --run-url <url>
+requires-remote: windows-free-tests.yml/windows-free-shard (windows) 269 test(s) — uncleared; clear with gstack-pregate clear --remote windows-free-tests.yml/windows-free-shard --run-url <url>
+requires-remote: pregate.json/remote_gate (remote) 362 test(s) — cleared by remote-gate tree=46b75c23704f tests=9660
+PREGATE: requires-remote (2 uncleared) tree=46b75c23704f head=902442f5b2b5 checks=1
+pregate.json: /workspace/gstack/.gstack/tmp/pregate.json
+GSTACK_RESULT: skill=pregate status=complete run=/workspace/gstack/.gstack/tmp/pregate.json

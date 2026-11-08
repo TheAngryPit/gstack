@@ -14,6 +14,7 @@ import { CLAUDE_JUDGE_EVAL_MODEL } from '../lib/eval-model';
 import { readOverlay } from '../scripts/resolvers/model-overlay';
 import { generateCompletenessSection } from '../scripts/resolvers/preamble/generate-completeness-section';
 import { generateSetupCommand } from '../scripts/resolvers/utility';
+import { expectMentions } from './helpers/prompt-structure';
 
 describe('model-overlay-fable-5', () => {
 function makeCtx(model: string): TemplateContext {
@@ -119,7 +120,9 @@ describe('GPT-5.6 Sol model profile', () => {
     const generic = generateModelOverlay(ctx('gpt'));
     const completeness = generateCompletenessSection(ctx('gpt'));
     expect(generic).toContain('make your best judgment and proceed');
-    expect(completeness).toContain('the complete thing is the goal');
+    expect(completeness).toContain('Complete coverage, minimal code.');
+    expect(completeness).toContain('prefer the smaller diff');
+    expectMentions(completeness, [['full coverage', 'requirement', 'error paths', 'no code beyond'], ['equal coverage', 'smaller diff'], ['no checks', 'impossible states'], ['unrelated', 'separate scope', 'never', 'gap']], 'default completeness section');
   });
 
   test('terse mode still suppresses the completeness section for Sol', () => {

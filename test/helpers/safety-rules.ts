@@ -54,7 +54,7 @@ export const SAFETY_RULES: readonly SafetyRule[] = [
     evalId: 'safety-pair-agent-block',
     source: 'pair-agent/SKILL.md.tmpl',
     match: /full instruction block/i,
-    sha256: '3cc7a009f9941469b55a460d293a1233f6c80df4c26b26df85f67c61ff13284f',
+    sha256: 'e8ce8b02fc431679c8b9ec89bccced4e289c7ed9043809638fbedf0e9ebf1f8a',
   },
   {
     id: 'codex-consult-embed',
@@ -68,8 +68,8 @@ export const SAFETY_RULES: readonly SafetyRule[] = [
     evalId: 'safety-ios-demo-ui-only',
     source: 'ios-qa/SKILL.md.tmpl',
     section: '## Demo mode',
-    match: /demo mode overrides/i,
-    sha256: '8d42208c888d76af49ebe6e4d58e85537c979f53ecb32fff7e85e95e6859182a',
+    match: /drive every action through visible UI/i,
+    sha256: '0ba3230bff9de32f03719daec35c6cef762e15c550264fcffd342dde52291e21',
   },
 ];
 
@@ -132,17 +132,36 @@ export function safetyRule(id: string): SafetyRule {
   return rule;
 }
 
-/** Which arm a W1 eval runs: the shipped rule, or the rule-removed control. */
-export type SafetyArm = 'rule' | 'removed';
+/**
+ * Which arm a W1 eval runs: the shipped rule, the rule-removed control, or the
+ * descriptive no-gstack arm `none` (no skill text at all; GST-470,
+ * docs/TESTING_INTERNALS.md#no-gstack-arm).
+ */
+export type SafetyArm = 'rule' | 'removed' | 'none';
 
 export function safetyArm(env: NodeJS.ProcessEnv = process.env): SafetyArm {
   const arm = env.GSTACK_SAFETY_ARM ?? 'rule';
-  if (arm !== 'rule' && arm !== 'removed') throw new Error(`GSTACK_SAFETY_ARM must be rule or removed, got ${arm}`);
+  if (arm !== 'rule' && arm !== 'removed' && arm !== 'none') throw new Error(`GSTACK_SAFETY_ARM must be rule, removed or none, got ${arm}`);
+  return arm;
+}
+
+/** Rules whose eval has no no-gstack arm, because its task exists only in the skill text. */
+export const NO_NONE_ARM: Readonly<Record<string, string>> = {
+  'pair-agent-full-block': 'relaying the remote instruction block is a task only the /pair-agent skill defines',
+  'ios-qa-demo-override': 'demo mode and its device routes are defined only in the /ios-qa skill',
+};
+
+/** The arm for an eval listed in NO_NONE_ARM: `none` throws with the reason. */
+export function skillOnlyArm(ruleId: string, env: NodeJS.ProcessEnv = process.env): Exclude<SafetyArm, 'none'> {
+  const why = NO_NONE_ARM[ruleId];
+  if (!why) throw new Error(`safety rule ${ruleId} is not listed in NO_NONE_ARM`);
+  const arm = safetyArm(env);
+  if (arm === 'none') throw new Error(`GSTACK_SAFETY_ARM=none: ${ruleId} has no no-gstack arm, because ${why} (docs/TESTING_INTERNALS.md#no-gstack-arm)`);
   return arm;
 }
 
 /** Apply the arm to a rendered fixture: unchanged for `rule`, rule paragraph deleted for `removed`. */
-export function applyArm(text: string, rule: SafetyRule, arm: SafetyArm): string {
+export function applyArm(text: string, rule: SafetyRule, arm: Exclude<SafetyArm, 'none'>): string {
   if (!locateRule(text, rule)) throw new Error(`safety rule ${rule.id}: anchor not found in the rendered fixture`);
   return arm === 'rule' ? text : removeRule(text, rule);
 }

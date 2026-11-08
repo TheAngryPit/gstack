@@ -12,8 +12,10 @@ import { CAPTURE_LONG_MS } from './helpers/eval-budgets';
 import { runCarveSectionCase } from './helpers/carve-section-case';
 
 describeE2ETier('periodic')('carve section-loading', () => {
+  test('carve-section-loading-benchmark', () => runCarveSectionCase('benchmark'), CAPTURE_LONG_MS);
   test('carve-section-loading-browse', () => runCarveSectionCase('browse'), CAPTURE_LONG_MS);
   test('carve-section-loading-codex', () => runCarveSectionCase('codex'), CAPTURE_LONG_MS);
+  test('carve-section-loading-context-restore', () => runCarveSectionCase('context-restore'), CAPTURE_LONG_MS);
   test('carve-section-loading-design-consultation', () => runCarveSectionCase('design-consultation'), CAPTURE_LONG_MS);
   test('carve-section-loading-design-html', () => runCarveSectionCase('design-html'), CAPTURE_LONG_MS);
   test('carve-section-loading-design-shotgun', () => runCarveSectionCase('design-shotgun'), CAPTURE_LONG_MS);
