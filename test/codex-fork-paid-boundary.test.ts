@@ -32,3 +32,13 @@ for (const file of ['evals.yml', 'evals-periodic.yml']) {
     }
   });
 }
+
+test('free regression fixtures have a non-personal Git identity', () => {
+  const workflow = Bun.YAML.parse(readFileSync(resolve(active, 'free-tests.yml'), 'utf8')) as any;
+  expect(workflow.jobs['free-suite'].env).toEqual({
+    GIT_AUTHOR_NAME: 'Downstream CI Fixture',
+    GIT_AUTHOR_EMAIL: 'downstream-ci@example.test',
+    GIT_COMMITTER_NAME: 'Downstream CI Fixture',
+    GIT_COMMITTER_EMAIL: 'downstream-ci@example.test',
+  });
+});

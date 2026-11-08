@@ -14,6 +14,11 @@ jobs:
   free-suite:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      GIT_AUTHOR_NAME: Downstream CI Fixture
+      GIT_AUTHOR_EMAIL: downstream-ci@example.test
+      GIT_COMMITTER_NAME: Downstream CI Fixture
+      GIT_COMMITTER_EMAIL: downstream-ci@example.test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
