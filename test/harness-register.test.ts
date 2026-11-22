@@ -13,6 +13,7 @@ import {
   BLOCK_BEGIN, BLOCK_END, CONTEXT_BLOCK_MAX, DOT_SKILLS_DIR, HARNESS_CODES, HYBRID_SKILLS, HarnessError, OPENCLAW_ALL_TEXTS, OPENCLAW_INSTRUCTION_MAX, ROUTER_DESCRIPTION, ROUTER_DESCRIPTION_MAX, TARGETS,
   contextBlock, contextScope, detect, listLedgers, readLedger, refresh, register, sourceSkills, unregister, type RegisterOptions,
 } from '../lib/harness-register';
+import { RETIRED_SKILLS } from '../scripts/discover-skills';
 import { QM_PACK_LIMITS, qmRequest, registerQm, removeQmPack } from '../lib/harness-qm';
 import { cleanupFixtures, cleanupSeed, makeFixture, makeSource, registryRows, runSetup, tree } from './helpers/install-fixture';
 
@@ -139,6 +140,17 @@ describe('gstack-harness register and unregister (skill folders)', () => {
     }
   }, 60_000);
 
+  test('Claude-render targets (dots, generic) never register a retired skill; /autoplan still carries its methodology', () => {
+    const d = tmp();
+    const names = sourceSkills(TARGETS.dots, ROOT, d).map(s => s.name);
+    expect(names).toContain('autoplan');
+    for (const retired of RETIRED_SKILLS) expect(names).not.toContain(retired);
+    expect(sourceSkills(TARGETS.generic, ROOT, d).map(s => s.name)).toEqual(names);
+    const r = register(opts(d, 'dots', { mode: 'all', skillsDir: path.join(d, 'all') }));
+    for (const retired of RETIRED_SKILLS) expect(fs.existsSync(path.join(r.dest, retired))).toBe(false);
+    expect(fs.existsSync(path.join(ROOT, 'plan-eng-review', 'SKILL.md'))).toBe(true);
+  }, 60_000);
+
   test('generic: the context block is replaced in place, then cut out; the user\'s lines and edits survive', () => {
     const d = tmp();
     const ctx = path.join(d, 'agent', 'AGENTS.md');
@@ -222,7 +234,7 @@ describe('GSTA-135: registered skills get used', () => {
 
   test('router lines lead with each skill\'s trigger, within 160 chars; the router description leads with task verbs', () => {
     expect(ROUTER_DESCRIPTION.length).toBeLessThanOrEqual(ROUTER_DESCRIPTION_MAX);
-    for (const verb of ['review', 'debug', 'test', 'plan', 'ship']) expect(ROUTER_DESCRIPTION.slice(0, 200), verb).toContain(verb);
+    for (const verb of ['review', 'test', 'plan', 'ship']) expect(ROUTER_DESCRIPTION.slice(0, 200), verb).toContain(verb);
     const d = tmp();
     for (const [target, mode] of [['openclaw', 'router'], ['dots', 'router']] as const) {
       const r = register(opts(d, target, { mode, skillsDir: path.join(d, target) }));

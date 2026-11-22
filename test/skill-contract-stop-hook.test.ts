@@ -7,13 +7,15 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { bunIsolationArgs } from '../lib/bun-isolation';
 import { AGENT_STALL_MS, STATE_ERROR_DOC, stateErrorLine } from '../lib/skill-contract';
 import { SWITCH_DEFAULT } from '../lib/skill-route';
 import {
-  CONTRACT_HOOK, DEBUG_REPORT, INTERACTIVE_TURNS, J1_TRANSCRIPT, ROOT, hookEnv, meta, result, runHook, say, skillsDir, slash, tmpDir, tool, user,
+  CONTRACT_HOOK, DEBUG_REPORT, INTERACTIVE_TURNS, J1_TRANSCRIPT, ROOT, SKILLS, hookEnv, meta, result, runHook, say, skillsDir, slash, tmpDir, tool, user,
 } from './helpers/skill-contract-fixture';
 
 const BIN = path.join(ROOT, 'bin', 'gstack-skill-contract');
+const SKILLS_LEGACY = SKILLS.verify.replace('      labels: [Symptom, Root cause, Fix, Evidence]\n', '      labels: [Symptom, Root cause, Fix, Evidence]\n    - id: repro-after-fix\n      kind: check_after_last_edit\n');
 const PINNED = fs.readFileSync(path.join(ROOT, 'test', 'fixtures', 'skill-contract', 'block-message.txt'), 'utf8').trimEnd().replace('{bin}', BIN);
 const STATE_ERROR = /^gstack-skill-contract: SKILL_CONTRACT_STATE_ERROR .+: .+; stop allowed, miss not recorded \(see docs\/skill-routing-and-contracts\.md#state-error\)\n$/;
 
@@ -44,7 +46,7 @@ const stop = (file: string, env: Record<string, string> = {}, extra: Record<stri
 const record = () => JSON.parse(fs.readFileSync(path.join(state, 'skill-contracts', 'sess-1.json'), 'utf8'));
 
 describe('block once, with the pinned text', () => {
-  test('J1: /investigate loaded, edited, answered with no status line -> blocked with the pinned message', () => {
+  test('J1: /verify loaded, edited, answered with no status line -> blocked with the pinned message', () => {
     const r = stop(transcript(J1_TRANSCRIPT));
     expect(r.code).toBe(0);
     expect(r.stderr).toBe('');
@@ -54,7 +56,7 @@ describe('block once, with the pinned text', () => {
     expect(out.reason).toBe(PINNED);
     expect(out.reason).not.toMatch(/skill_contracts|gstack-config|\boff\b/);
     const run = Object.values(record().runs)[0] as any;
-    expect(run).toMatchObject({ skill: 'investigate', outcome: 'blocked', missing: ['debug-report', 'repro-after-fix'] });
+    expect(run).toMatchObject({ skill: 'verify', outcome: 'blocked', missing: ['debug-report'] });
     expect(fs.statSync(path.join(state, 'skill-contracts', 'sess-1.json')).mode & 0o777).toBe(0o600);
   });
 
@@ -64,7 +66,7 @@ describe('block once, with the pinned text', () => {
     const named = /run '([^']+)' waive <item>/.exec(reason)?.[1];
     expect(named).toBe(BIN);
     const { spawnSync } = require('node:child_process') as typeof import('node:child_process');
-    const waive = spawnSync(named!, ['waive', 'repro-after-fix', '--reason', 'docs-only change'], { env: hookEnv(state, skills), encoding: 'utf8', timeout: 20_000 });
+    const waive = spawnSync(named!, ['waive', 'debug-report', '--reason', 'docs-only change'], { env: hookEnv(state, skills), encoding: 'utf8', timeout: 20_000 });
     expect(waive.status).toBe(0);
   });
 
@@ -108,7 +110,33 @@ describe('block once, with the pinned text', () => {
     expect((Object.values(record().runs)[0] as any).outcome).toBe('met');
   });
 
-  test('an /investigate run that ends with Status: BLOCKED in its DEBUG REPORT is met, not blocked', () => {
+  test('a Stop that fires before the CLI flushes the turn waits for the final message: a run that reran its check is met, not blocked', async () => {
+    const file = transcript(J1_TRANSCRIPT.slice(0, -1));
+    const proc = Bun.spawn([process.execPath, ...bunIsolationArgs(), CONTRACT_HOOK], {
+      stdin: new Blob([payload(file, { last_assistant_message: DEBUG_REPORT })]), env: hookEnv(state, skills, { GSTACK_SKILL_CONTRACTS: 'on' }), stdout: 'pipe', timeout: 20_000,
+    });
+    await Bun.sleep(300);
+    fs.appendFileSync(file, `${[tool('b9', 'Bash', { command: 'bun test test/auth.test.ts' }), result('b9', 'pass'), say(DEBUG_REPORT)].join('\n')}\n`);
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(out).toBe('');
+    expect((Object.values(record().runs)[0] as any).outcome).toBe('met');
+  });
+
+  test('a Stop that fires before the CLI flushes the load itself still checks the run once the final message lands', async () => {
+    const file = transcript(J1_TRANSCRIPT.slice(0, 1));
+    const proc = Bun.spawn([process.execPath, ...bunIsolationArgs(), CONTRACT_HOOK], {
+      stdin: new Blob([payload(file, { last_assistant_message: 'Fixed: the null check was missing in src/auth.ts.' })]), env: hookEnv(state, skills, { GSTACK_SKILL_CONTRACTS: 'on' }), stdout: 'pipe', timeout: 20_000,
+    });
+    await Bun.sleep(300);
+    fs.appendFileSync(file, `${J1_TRANSCRIPT.slice(1).join('\n')}\n`);
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(JSON.parse(out || '{}').decision).toBe('block');
+    expect((Object.values(record().runs)[0] as any).outcome).toBe('blocked');
+  });
+
+  test('an /verify run that ends with Status: BLOCKED in its DEBUG REPORT is met, not blocked', () => {
     const file = transcript([...J1_TRANSCRIPT.slice(0, -1), say(DEBUG_REPORT.replace('Status:          DONE', 'Status:          BLOCKED'))]);
     expect(stop(file)).toEqual({ code: 0, stdout: '', stderr: '' });
     expect((Object.values(record().runs)[0] as any).outcome).toBe('met');
@@ -122,13 +150,23 @@ describe('block once, with the pinned text', () => {
     expect((Object.values(record().runs)[0] as any).outcome).toBe('met');
   });
 
+  test('a custom skill whose contract still lists the removed check_after_last_edit kind: warned once, the rest still blocks', () => {
+    const legacy = SKILLS_LEGACY.replace('name: verify', 'name: legacy');
+    skills = skillsDir([], { legacy });
+    const r = stop(transcript(J1_TRANSCRIPT.map(l => l.replace('"skill":"verify"', '"skill":"legacy"'))));
+    expect(JSON.parse(r.stdout).decision).toBe('block');
+    expect(r.stderr).toBe(`gstack-skill-contract: SKILL_CONTRACT_SKIPPED ${path.join(skills, 'legacy', 'SKILL.md')}: repro-after-fix: kind check_after_last_edit was removed from gstack, so this item is not checked; delete it from the contract
+`);
+    expect(Object.values(record().runs)[0]).toMatchObject({ skill: 'legacy', outcome: 'blocked', missing: ['debug-report'] });
+  });
+
   test('a waiver read from the transcript satisfies the block but counts against follow', () => {
     const lines = [...J1_TRANSCRIPT.slice(0, -1),
-      tool('w1', 'Bash', { command: 'gstack-skill-contract waive repro-after-fix --reason "no test runner in this repo"' }),
-      result('w1', 'SKILL_CONTRACT_WAIVED repro-after-fix: no test runner in this repo'),
-      say(DEBUG_REPORT)];
+      tool('w1', 'Bash', { command: 'gstack-skill-contract waive debug-report --reason "a docs-only change, no bug to report"' }),
+      result('w1', 'SKILL_CONTRACT_WAIVED debug-report: a docs-only change, no bug to report'),
+      say('Updated the README.')];
     expect(stop(transcript(lines)).stdout).toBe('');
-    expect((Object.values(record().runs)[0] as any)).toMatchObject({ outcome: 'met_waived', waived: ['repro-after-fix'] });
+    expect((Object.values(record().runs)[0] as any)).toMatchObject({ outcome: 'met_waived', waived: ['debug-report'] });
   });
 });
 
@@ -210,7 +248,7 @@ describe('fails open on state errors with one stderr line', () => {
     const bad = runHook(CONTRACT_HOOK, '{oops', hookEnv(state, skills, { GSTACK_SKILL_CONTRACTS: 'on' }));
     expect(bad.code).toBe(0);
     expect(bad.stderr).toMatch(STATE_ERROR);
-    const invalid = skillsDir([], { investigate: '---\nname: investigate\ncontract:\n  version: 2\n  items: []\n---\n' });
+    const invalid = skillsDir([], { verify: '---\nname: verify\ncontract:\n  version: 2\n  items: []\n---\n' });
     const r = runHook(CONTRACT_HOOK, payload(transcript(J1_TRANSCRIPT)), hookEnv(state, invalid, { GSTACK_SKILL_CONTRACTS: 'on' }));
     fs.rmSync(invalid, { recursive: true, force: true });
     expect(r.stdout).toBe('');

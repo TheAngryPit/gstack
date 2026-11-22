@@ -308,7 +308,7 @@ pass, display only those bytes verbatim for manual filing; otherwise retain the
 private files and report their allocated paths.
 
 ` + text.slice(manualEndIndex + manualEnd.length);
-    const approachCleanup = 'rm -f "$APPROACH_FILE"';
+    const approachCleanup = 'rm "$APPROACH_FILE" 2>/dev/null || :';
     if (text.indexOf(approachCleanup) < 0 || text.indexOf(approachCleanup) !== text.lastIndexOf(approachCleanup)) {
       throw new Error('spec native approach-input cleanup anchor drift');
     }

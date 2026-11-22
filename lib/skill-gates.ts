@@ -16,9 +16,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { atomicWriteSync } from './fs-atomic';
 import { resolveStateRoot } from './state-root';
+import { StateError, UnknownShape, parseTranscript, readTranscriptFile, withFinalMessage, type Transcript } from './skill-contract';
 import { appendHookTrace, readStdinBounded, type TraceHook } from './skill-route';
 
-export type GateHook = 'investigate-gate' | 'ceo-review-gate';
+export type GateHook = 'ceo-review-gate' | 'autoplan-gate';
 export type GateEvent = 'fired' | 'blocked' | 'released' | 'observed' | 'exhausted' | 'skipped' | 'error';
 export const GATE_DOC = 'docs/skill-gates.md';
 export const DEADLINE_MS = 5000;
@@ -59,6 +60,61 @@ export class GateError extends Error {
   constructor(readonly code: string, why: string) { super(why); }
 }
 
+const SETTLE_MS = 2000;
+const SETTLE_POLL_MS = 50;
+
+/**
+ * A stop's transcript once it holds the payload's final message (raw text and
+ * parsed). Claude Code can run Stop before it flushes the turn's last lines (a
+ * smoke run saw a scope call and a phase publication land about 200 ms after
+ * Stop fired), so a stale read can hold a finished run or miss a run's load.
+ * Re-read until the final text is there, for at most maxWaitMs (SETTLE_MS by
+ * default), then judge what exists. Read and parse errors (StateError,
+ * UnknownShape) pass through for the caller to classify.
+ */
+export function readSettledTranscript(file: string, finalMessage: unknown, opts: { includeSidechain?: boolean; maxWaitMs?: number } = {}): { raw: string; t: Transcript } {
+  const until = Date.now() + (opts.maxWaitMs ?? SETTLE_MS);
+  for (;;) {
+    const raw = readTranscriptFile(file);
+    const t = parseTranscript(raw, opts);
+    const settled = withFinalMessage(t, finalMessage);
+    if (settled === t || Date.now() >= until) return { raw, t: settled };
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, SETTLE_POLL_MS);
+  }
+}
+
+/** readSettledTranscript for a gate hook: waits at most half its deadline, and a transcript it cannot read is GATE_TRANSCRIPT. */
+export function settledTranscript(file: string, finalMessage: unknown, opts: { includeSidechain?: boolean } = {}): { raw: string; t: Transcript } {
+  try {
+    return readSettledTranscript(file, finalMessage, { ...opts, maxWaitMs: Math.min(SETTLE_MS, remainingMs() / 2) });
+  } catch (e) {
+    if (e instanceof StateError || e instanceof UnknownShape) throw new GateError('GATE_TRANSCRIPT', e.message);
+    throw e;
+  }
+}
+
+/**
+ * A PreToolUse gate's transcript once it holds the tool call being decided,
+ * cut after that call (the text sent with it precedes it), or null when the call is not
+ * there within the settle window: the caller lets the call run (fail open).
+ */
+export function transcriptWithToolUse(file: string, toolUseId: string): Transcript | null {
+  if (!toolUseId) return null;
+  const until = Date.now() + Math.min(SETTLE_MS, remainingMs() / 2);
+  try {
+    for (;;) {
+      const t = parseTranscript(readTranscriptFile(file));
+      const at = t.events.findIndex(e => e.kind === 'tool_use' && e.id === toolUseId);
+      if (at >= 0) return { ...t, events: t.events.slice(0, at + 1) };
+      if (Date.now() >= until) return null;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, SETTLE_POLL_MS);
+    }
+  } catch (e) {
+    if (e instanceof StateError || e instanceof UnknownShape) throw new GateError('GATE_TRANSCRIPT', e.message);
+    throw e;
+  }
+}
+
 export const cleanSessionId = (sid: string) => sid.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'unknown';
 const markerValue = (v: string | number) => String(v).replace(/\s+/g, '_').slice(0, 240);
 
@@ -76,6 +132,14 @@ export interface GateRun {
   file?: string;
   /** the subagent transcript's basename, for a run gated at SubagentStop */
   agent?: string;
+  /** the run's applicable phases and the phases it published (autoplan-gate) */
+  phases?: string[];
+  published?: string[];
+  /** autoplan-gate: the missing step the last counted Stop blocks were at, and how many (the per-step budget) */
+  step?: string;
+  step_blocks?: number;
+  /** autoplan-gate: publish no-ops refused at PreToolUse */
+  denied?: number;
   blocked: number;
   observed: number;
   exhausted_at?: string;

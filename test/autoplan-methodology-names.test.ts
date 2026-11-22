@@ -4,6 +4,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rm
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createSnapshot, prepareMethodology } from '../bin/gstack-autoplan-snapshot';
+import { AUTOPLAN_SIBLING_METHODOLOGIES } from '../scripts/discover-skills';
 
 const ROOT = resolve(import.meta.dir, '..');
 const owned: string[] = [];
@@ -22,13 +23,16 @@ function fixture(phase: string, layout: string) {
     });
     expect(generated.status, generated.stderr).toBe(0);
   }
-  const source = layout === 'inlineCodex' ? join(dir, '.agents/skills', `gstack-${skill}`) : join(ROOT, skill);
-  const target = join(dir, skill);
+  // /autoplan reads a sibling methodology file beside its own SKILL.md on external hosts.
+  const siblingInline = layout === 'inlineCodex' && AUTOPLAN_SIBLING_METHODOLOGIES.includes(skill);
+  const source = layout === 'inlineCodex' ? join(dir, '.agents/skills', siblingInline ? 'gstack-autoplan' : `gstack-${skill}`) : join(ROOT, skill);
+  const fileName = siblingInline ? `${skill}.md` : 'SKILL.md';
+  const target = join(dir, siblingInline ? 'gstack-autoplan' : skill);
   mkdirSync(target);
-  cpSync(join(source, 'SKILL.md'), join(target, 'SKILL.md'));
+  cpSync(join(source, fileName), join(target, fileName));
   // C4: Codex carves plan-ceo-review too, so an install that has sections/ copies it.
   // Every tier 2+ skill ships sections/preamble.md; carving is the review section.
-  const carved = existsSync(join(source, 'sections', 'review-sections.md'));
+  const carved = !siblingInline && existsSync(join(source, 'sections', 'review-sections.md'));
   if (existsSync(join(source, 'sections'))) cpSync(join(source, 'sections'), join(target, 'sections'), { recursive: true });
   if (layout === 'patchedClaude') {
     const result = spawnSync('bash', [join(ROOT, 'bin/gstack-patch-names'), dir, 'true'], { encoding: 'utf8', timeout: 10_000 });
@@ -39,7 +43,7 @@ function fixture(phase: string, layout: string) {
   const restore = join(dir, 'restore.md');
   writeFileSync(active, '## Implementation plan\nBuild the widget.\n## Review record\n');
   writeFileSync(restore, 'Restore point.\n');
-  return { dir, file: join(target, 'SKILL.md'), active, restore, skill, carved };
+  return { dir, file: join(target, fileName), active, restore, skill, carved };
 }
 
 describe('installed methodology identities', () => {

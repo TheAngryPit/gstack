@@ -94,7 +94,7 @@ describe('original source to native obligations', () => {
     const output = adaptNativeTemplate(read(path), ctx('autoplan'), path);
     const headings = ['## Phase 1: CEO', '## Phase 2: Design', '## Phase 2.5: DX', '## Phase 3: Eng', '## Phase 4: Final'];
     expect(headings.map(h => output.indexOf(h))).toEqual(headings.map(h => output.indexOf(h)).sort((a,b) => a-b));
-    for (const contract of ['The 6 Decision Principles', 'Mechanical', 'Taste', 'User Challenge', 'Never auto-decide User Challenges', 'Decision Audit Trail', '## Decision Audit Trail', '| # | Phase | Decision | Classification | Principle | Rationale | Rejected |', 'Max 3 cycles', 'Re-run Eng, then re-present the gate.', 'human gate']) expect(output).toContain(contract);
+    for (const contract of ['The 6 Decision Principles', 'Mechanical', 'Taste', 'User Challenge', 'Never auto-decide User Challenges', 'Decision Audit Trail', '## Decision Audit Trail', '| # | Phase | Decision | Classification | Principle | Rationale | Rejected |', 'max 3 cycles', 're-run Eng, re-present the gate.', 'human gate']) expect(output).toContain(contract);
     expect(normalize(output).toLowerCase()).toContain('an unavailable required review stays pending');
     for (const phase of ['ceo', 'dx', 'eng']) {
       const path = `autoplan/sections/${phase}-phase.md.tmpl`;

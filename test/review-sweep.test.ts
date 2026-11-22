@@ -6,11 +6,13 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { BIG_BYTES, foundLines, inventory, networkRemote, quarantineStage, redactUrl, sweepDiff, sweepResult } from '../lib/review-sweep';
+import { BIG_BYTES, foundLines, ignoredLines, inventory, networkRemote, quarantineStage, redactUrl, sweepDiff, sweepResult } from '../lib/review-sweep';
+import { FIXTURE_MARKER } from '../lib/fixture-marker';
 import { collect, ledgerBlockers } from '../lib/review-ledger';
 import { ledgerPass } from '../lib/review-scope';
 import type { Manifest } from '../lib/review-pass';
 import { RELEASE_RESULT_CODES } from '../lib/result-codes-release';
+import { bin, manifest, repo, spec, writeManifestFile } from './helpers/review-pass-harness';
 
 const made: string[] = [];
 const FAKE = 'FAKETOKEN';
@@ -66,6 +68,44 @@ describe('review-sweep inventory diff', () => {
     expect(lines.filter(l => l.startsWith('DELETE:'))).toEqual([]);
     expect(lines.filter(l => l.startsWith('KEEP:'))).toHaveLength(2);
     expect(lines[0]).toMatch(/^FETCH_VIOLATION: stage=specialists attempt=1 kind=repo .* readers=specialist\/security \(attributed to the stage/);
+  });
+
+  // Value: protects=a test fixture root carrying the marker, or a repository whose network remote resolves to a local path through url.<base>.insteadOf, is never a fetch and is printed as ignored, while an unmarked network clone beside them, and a local remote that insteadOf sends to the network, still are;
+  //   fails_when=a concurrent or leftover `bun test` (ship-bin's https://github.com/fx/fx.git, a sweep fixture's sealed-org remote) quarantines a stage and blocks its rerun, a marker on a sweep root hides the whole root, or insteadOf hides a network remote;
+  //   why_new=GST-1695 (FETCH_RERUN_BLOCKED on /tmp/ship-bin-YUgvjd cost three /ship passes on 11-06/07); seam=inventory, sweepResult, ignoredLines; no_claim=that a clone made inside a live fixture root is seen
+  test('a marked fixture root and an insteadOf-local repository are ignored and printed; unmarked and insteadOf-network clones are still found', async () => {
+    const root = tmp();
+    const checkout = path.join(root, 'checkout');
+    repoAt(checkout);
+    fs.writeFileSync(path.join(root, FIXTURE_MARKER), '');
+    const start = inventory([root], checkout, []);
+    await Bun.sleep(30);
+    const fixture = path.join(root, 'gst-left');
+    fs.mkdirSync(fixture);
+    fs.writeFileSync(path.join(fixture, FIXTURE_MARKER), '');
+    repoAt(path.join(fixture, 'sweep-x', 'BEAM'), 'https://github.com/sealed-org/BEAM.git');
+    const config = (dir: string, key: string, value: string) => expect(spawnSync('git', ['config', key, value], { cwd: dir, encoding: 'utf8', timeout: 30_000 }).status).toBe(0);
+    const shipBin = path.join(root, 'ship-bin-left', 'work');
+    repoAt(shipBin, 'https://github.com/fx/fx.git');
+    config(shipBin, `url.${path.join(root, 'ship-bin-left', 'origin.git')}.insteadOf`, 'https://github.com/fx/fx.git');
+    repoAt(path.join(root, 'mirror'), 'https://github.com/fx/fx.git');
+    config(path.join(root, 'mirror'), 'url.https://example.com/m/.insteadOf', 'https://github.com/');
+    repoAt(path.join(root, 'fromlocal'), '/srv/app.git');
+    config(path.join(root, 'fromlocal'), 'url.https://github.com/x/.insteadOf', '/srv/');
+    repoAt(path.join(root, 'BEAM'), 'https://github.com/sealed-org/BEAM.git');
+    const r = sweepResult(start, inventory([root], checkout, []));
+    expect(r.verdict).toBe('violation');
+    expect(r.found.map(f => [path.relative(root, f.path), f.remote]).sort()).toEqual([
+      ['BEAM', 'https://github.com/sealed-org/BEAM.git'], ['fromlocal', 'https://github.com/x/app.git'], ['mirror', 'https://example.com/m/fx/fx.git'],
+    ]);
+    expect((r.ignored ?? []).map(i => [path.relative(root, i.path), i.reason, i.remote]).sort()).toEqual([
+      ['gst-left', 'fixture-marker', undefined], [path.join('ship-bin-left', 'work'), 'local-remote', 'https://github.com/fx/fx.git'],
+    ]);
+    const lines = ignoredLines('specialists', 1, r.ignored ?? []);
+    expect(lines.sort()).toEqual([
+      expect.stringMatching(new RegExp(`^FETCH_IGNORED: stage=specialists attempt=1 path='${fixture}' reason=fixture-marker \\(`)),
+      expect.stringMatching(new RegExp(`^FETCH_IGNORED: stage=specialists attempt=1 path='${shipBin}' reason=local-remote remote=https://github.com/fx/fx.git \\(`)),
+    ]);
   });
 
   // Value: protects=a start walk that stopped at its bounds cannot tell a repository it never reached from a new one, so what the end walk finds past it is a note, never a quarantine;
@@ -190,5 +230,64 @@ describe('review-sweep quarantine and printed paths (GST-1322 PR B /ship pass 1)
     repoAt(path.join(root, 'tilde'), `bot:${FAKE}@host:~/sealed.git`);
     const found = sweepDiff(start, inventory([root], checkout, []));
     expect(found.map(f => [path.relative(root, f.path), f.remote])).toEqual([['tilde', '<redacted>']]);
+  });
+});
+
+describe('review-sweep and Capy platform state (GST-3359)', () => {
+  const home = (dir: string) => {
+    const h = path.join(dir, 'home');
+    fs.mkdirSync(path.join(h, '.capy', 'drive-engine', 'loc'), { recursive: true });
+    fs.mkdirSync(path.join(h, '.capy', 'work'), { recursive: true });
+    fs.mkdirSync(path.join(h, 'dl'), { recursive: true });
+    fs.writeFileSync(path.join(h, '.capy', 'drive-engine', 'loc', 'state.db'), 'x');
+    fs.writeFileSync(path.join(h, 'dl', 'old.bin'), 'x');
+    return h;
+  };
+  const sweepStage = (dir: string, env: NodeJS.ProcessEnv, during: () => void) => {
+    const m = manifest([spec('security')]);
+    made.push(m.out);
+    const f = writeManifestFile(m);
+    const run = (phase: string) => bin(dir, env, ['sweep', '--manifest', f, '--stage', 'specialists', '--phase', phase]);
+    const start = run('start');
+    expect(start.status, start.stderr).toBe(0);
+    during();
+    const end = run('end');
+    expect(end.status, end.stderr).toBe(0);
+    return end.stdout;
+  };
+
+  // Value: protects=Capy's own drive sync database, present at the stage's start and grown past BIG_BYTES during it, is neither a fetch nor a FETCH_RERUN_BLOCKED path, through the registered sweep command with HOME as Capy sets it;
+  //   fails_when=~/.capy/drive-engine/<location>/state.db crossing 100 MB quarantines the stage and blocks every later stage of the pass; why_new=GST-3359 (GEVA-558 on gstack-evals#393 at 1.102.1.0);
+  //   seam=gstack-review-dispatch sweep --phase start/end, inventory's drive-engine database exemption; no_claim=that a download a reader names state.db under ~/.capy/drive-engine is seen
+  test('Capy\'s drive sync database growing past the line during a stage is not a download', () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const real = fs.realpathSync(dir);
+    const h = home(real);
+    const out = sweepStage(real, { ...env, HOME: h, GSTACK_SWEEP_ROOTS: real }, () => fs.truncateSync(path.join(h, '.capy', 'drive-engine', 'loc', 'state.db'), BIG_BYTES + 1));
+    expect(out).toContain('FETCH_SWEEP: clean stage=specialists attempt=1 found=0');
+    expect(out).not.toContain('FETCH_VIOLATION');
+  });
+
+  // Value: protects=the exemption is the drive sync engine's database files only: a stage that downloads a new big file under ~/.capy/drive-engine, ~/.capy/work or home, or writes an existing small file past the line, is still a violation;
+  //   fails_when=the drive-engine exemption widens to the whole folder, to ~/.capy/work, to ~/.capy, or to every file present at the start; why_new=GST-3359 deny control (the guard changes additively against main);
+  //   seam=gstack-review-dispatch sweep --phase end; no_claim=that a download under 100 MB is seen
+  test('a real large download under ~/.capy/drive-engine or ~/.capy/work, and a file the stage wrote past the line, are still violations', () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const real = fs.realpathSync(dir);
+    const h = home(real);
+    const out = sweepStage(real, { ...env, HOME: h, GSTACK_SWEEP_ROOTS: real }, () => {
+      fs.writeFileSync(path.join(h, '.capy', 'work', 'chats.tar'), '');
+      fs.truncateSync(path.join(h, '.capy', 'work', 'chats.tar'), BIG_BYTES);
+      fs.truncateSync(path.join(h, 'dl', 'old.bin'), BIG_BYTES);
+      fs.writeFileSync(path.join(h, '.capy', 'drive-engine', 'loc', 'repo.tar'), '');
+      fs.truncateSync(path.join(h, '.capy', 'drive-engine', 'loc', 'repo.tar'), BIG_BYTES);
+    });
+    const found = out.split('\n').filter(l => l.startsWith('FETCH_VIOLATION:'));
+    expect(found.map(l => /kind=(\w+) path='([^']*)'/.exec(l)!.slice(1).join(' ')).sort()).toEqual([
+      `download ${path.join(h, '.capy', 'drive-engine', 'loc', 'repo.tar')}`, `download ${path.join(h, '.capy', 'work', 'chats.tar')}`, `download ${path.join(h, 'dl', 'old.bin')}`,
+    ]);
+    expect(out).toContain('FETCH_SWEEP: violation stage=specialists attempt=1 found=3');
   });
 });
