@@ -101,7 +101,7 @@ describe('complete native Codex output', () => {
     expect(output).toContain('plain-text question');
     expect(output).toContain('still needs explicit approval; writing the recommendation in prose and continuing is the failure this gate prevents.');
     expect(output).toContain('Do NOT proceed to Phase 4.25, 4.5, 5 or 6');
-    expect(output).toContain('DONE — design doc APPROVED');
+    expect(output).toContain('DONE — design doc or memo APPROVED');
     expect(read('plan-eng-review')).toContain('NO UNRESOLVED DECISIONS');
   });
 
