@@ -137,8 +137,11 @@ there is refused with the usual `--for <skill>` fix.
    trailer: `behind=<n> (latest: <ver>); fix: <command>` (see the trailer
    grammar below).
    **Daily (R75).** When the oldest origin commit the checkout lacks is more
-   than 24 hours old, the trailer adds `stale=<h>h` after `behind=`, and
-   unlike a bare `behind=` the agent runs the fix before the first workflow.
+   than 24 hours old, the trailer adds `stale=<h>h` after `behind=`. Either
+   way the agent runs the fix before the next workflow: `behind=1` or more
+   always calls for it, and `stale=` adds that a pin with no recorded reason
+   no longer holds. A `fix:` that starts `unset GSTACK_CAPY_` lifts a pin:
+   skip it while the pin has a recorded reason.
    A pin (`GSTACK_CAPY_SELF_UPGRADE=off`, `GSTACK_CAPY_AUTO_UPGRADE=0`, a
    detached HEAD or another branch) then holds only with a recorded reason:
    `GSTACK_PIN_REASON=<why>`, `git -C <root> config gstack.pinReason <why>`,
@@ -251,9 +254,11 @@ by rename, prune) and reclaim (reread, then delete only the record judged
 stale) run under one lock in the lease directory, a `.lock` directory whose
 `owner` file names its holder's pid and start identity, so a renewal is never
 deleted and a live lease never disappears from a concurrent scan. The lock is a
-directory because `mkdir` is atomic on every host, while Git Bash on Windows
-cannot `ln -s` to a target that does not exist (#3330). A taker publishes a
-claim before its `mkdir` and renames it in as the owner after, so an ownerless
+directory taken with `gstack_lock_take` (`bin/gstack-lock.sh`), which creates
+the `owner` file with O_EXCL, because `mkdir`'s exit status is no lock on
+Ubuntu 26.04's uutils `mkdir` and Git Bash on Windows cannot `ln -s` to a
+target that does not exist (#3330). A taker publishes a claim before its
+`mkdir` and removes it only after its owner file is written, so an ownerless
 lock is broken only once no claimant lives and the lock is at least 2 s old
 and unchanged while checked, which keeps a taker between its two steps safe.
 A claim that records no start identity is abandoned after 2 minutes, so a
@@ -295,7 +300,9 @@ uses it to refuse a base merge under an open run
    runs; the pins, the doctor and the install verdict all use the resolved
    directory) with the doctor's own parser (`bin/gstack-runtime-pins.ts`: engines,
    packageManager, `.tool-versions`, `.bun-version` and CI `bun-version:` lanes
-   for this platform). CI exact pins for this platform are alternatives: a
+   for this platform), run with an isolated Bun (`--no-env-file
+   --config="${GSTACK_BUN_CONFIG:-/dev/null}"`) so the project's `bunfig.toml`
+   and `.env` never load into the installer. CI exact pins for this platform are alternatives: a
    repository may test several Bun versions (gstack's own CI pins 1.4.2 and
    runs one job on 1.4.4), so a Bun equal to any one of them satisfies CI;
    CI ranges and every non-CI pin stay required. One resolver picks the Bun (`gstack_bun_resolve` in
@@ -523,11 +530,16 @@ GSTACK_LAUNCH_FILE: <verdict file without .json>.env
 The file also appends the checkout's `bin/` directory to PATH, after everything
 already there and only once, so a shell that sourced only this file runs a bare
 `gstack-ship-budget` (GSTA-167: a /ship child got `command not found`, exit 127).
+Then it appends `crew/bin/` the same way, so the crew commands that live there
+(`gstack-release-gate`, `gstack-coauthor-trailers`; see crew/README.md) keep
+their bare names on Capy. Nothing outside this launch file puts `crew/bin/` on
+PATH, so a non-Capy install never sees them.
 When the session starts from the Drive skill (a bootstrapper outside the
 checkout), the file also exports `GSTACK_PREFERENCES_FILE`, the path of
 `preferences.yaml` beside that skill's SKILL.md, which the `GSTACK_LAUNCH` line
 leaves out; `gstack-models resolve --role agent` reads it
-([your model preference](model-policy.md#your-model-preference)).
+([your model preference](model-policy.md#your-model-preference)), and
+`gstack-telemetry-tier` reads its Capy telemetry opt-in ([privacy](privacy.md)).
 The file is part of the ok verdict: a passing run that cannot write it exits 1
 with `gstack: fail launch-file — could not write the launch file <path>; fix:
 make <dir> writable, or set GSTACK_STATE_ROOT to a writable directory
@@ -630,7 +642,7 @@ them). The guide is
 `GSTACK_CAPY_ASKS=0` drops the block for one session. The controller's side (the
 READY contract, merge trains, the digest, the daily flaky pass, with templates for the
 crew rules file and the Captain's drive) is the `/captain` skill and
-[captain.md](captain.md).
+[captain.md](../crew/docs/captain.md).
 
 ## Raising the supported minimum
 

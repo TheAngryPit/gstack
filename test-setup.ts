@@ -15,13 +15,15 @@
  * means new tests don't have to remember the dance, and the bug class
  * stays dead.
  */
-import { afterEach, beforeAll } from 'bun:test';
+import { afterAll, afterEach, beforeAll } from 'bun:test';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { FIXTURE_MARKER } from './lib/fixture-marker';
 import { CAPY_LAUNCH_MARKERS } from './scripts/lib/shard-engine';
 
 // State-root hermeticity (docs/state-root.md). Tests isolate state with
-// GSTACK_HOME, but GSTACK_STATE_ROOT and GSTACK_STATE_DIR outrank or join it
+// GSTACK_HOME, but GSTACK_STATE_ROOT, GSTACK_STATE_DIR and CLAUDE_PLUGIN_DATA outrank or join it
 // in the chain, so an ambient value from the parent shell would redirect
 // every test's state. Strip them before any test module loads. The merged
 // privacy keys also read $HOME/.gstack; point that second root at a
@@ -34,6 +36,8 @@ for (const name of ['GSTACK_STATE_ROOT', 'GSTACK_STATE_DIR']) {
   delete process.env[name];
   process.stderr.write(`test-setup: stripped inherited ${name}; tests isolate state via GSTACK_HOME\n`);
 }
+// The chain's plugin link (CLAUDE_PLUGIN_DATA) goes too; no test runs as a Claude plugin.
+delete process.env.CLAUDE_PLUGIN_DATA;
 // The Capy installer's launch markers (GSTA-99, GSTA-104): a focused `bun test`
 // run from a shell that sourced the launch file would hand every product child
 // an unattended Capy session it never set up. The shard engine strips the same
@@ -47,6 +51,40 @@ for (const name of ['GBRAIN_DATABASE_URL', 'GBRAIN_DIRECT_DATABASE_URL', 'DATABA
   if (process.env[name] === undefined) continue;
   delete process.env[name];
   process.stderr.write(`test-setup: stripped inherited ${name}; tests must not reach a live gbrain\n`);
+}
+// Telemetry clients fall back to supabase/config.sh, the live project, when a
+// test leaves GSTACK_SUPABASE_URL unset; that is how about 554,000 test rows
+// reached it. With this set, config.sh yields no endpoint and nothing is sent.
+// test/telemetry-no-live-endpoint.test.ts holds the tripwire.
+process.env.GSTACK_TEST_BLOCK_LIVE_TELEMETRY = '1';
+// One fixture root per test process (GST-1695). TMPDIR (TMP and TEMP on Windows)
+// points at it, so os.tmpdir() here, and $TMPDIR in a child spawned through
+// node:child_process or with this process's env, put each fixture inside it; a
+// Bun.spawn child given no env keeps the TMPDIR this process started with. It carries the fixture marker, so /ship's fetch sweep
+// (lib/review-sweep.ts) never reads a concurrent or leftover run's fixture
+// repositories as a reader's fetch, and this afterAll, which Bun runs once after
+// the last file even when a test timed out before its own cleanup, removes it.
+// Bun's test runner fires no process exit event; a killed run keeps the marker.
+// A `bun test` whose TMPDIR already sits under a marked directory (an outer
+// run's root, or a shard sandbox from scripts/lib/shard-engine.ts) keeps the
+// TMPDIR it was handed: that marker covers it and its owner removes it.
+const markedAncestor = (dir: string): string | null => {
+  for (let d = dir; ; d = path.dirname(d)) {
+    if (fs.existsSync(path.join(d, FIXTURE_MARKER))) return d;
+    if (path.dirname(d) === d) return null;
+  }
+};
+const outerRoot = markedAncestor(os.tmpdir());
+if (outerRoot) process.env.GSTACK_TEST_TMP = outerRoot;
+else {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gst-'));
+  fs.writeFileSync(path.join(fixtureRoot, FIXTURE_MARKER), `gstack test fixture root of pid ${process.pid}\n`);
+  for (const name of ['GSTACK_TEST_TMP', 'TMPDIR', 'TMP', 'TEMP']) process.env[name] = fixtureRoot;
+  afterAll(() => {
+    try { fs.rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 3 }); } catch (err) {
+      process.stderr.write(`test-setup: could not remove fixture root ${fixtureRoot}: ${(err as Error).message}\n`);
+    }
+  });
 }
 process.env.GSTACK_TEST_LEGACY_ROOT = path.join(os.tmpdir(), `gstack-test-legacy-root-${process.pid}-${Date.now()}-unused`);
 // Workflow leases (bin/gstack-lease) default to the installation's git dir;

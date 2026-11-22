@@ -13,6 +13,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { RETIRED_SKILLS } from '../scripts/discover-skills';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 
@@ -47,7 +48,8 @@ function skillTemplateDirs(): string[] {
  */
 function findInteractiveSkills(): string[] {
   const interactive: string[] = [];
-  for (const skill of skillTemplateDirs()) {
+  // A retired skill keeps its template as methodology for another skill but has no interactive entry.
+  for (const skill of skillTemplateDirs().filter(name => !RETIRED_SKILLS.includes(name))) {
     const tmplPath = path.join(ROOT, skill, 'SKILL.md.tmpl');
     if (!fs.existsSync(tmplPath)) continue;
     const content = fs.readFileSync(tmplPath, 'utf-8');
@@ -65,14 +67,15 @@ function findInteractiveSkills(): string[] {
 /**
  * Scan a test file's contents for any of the supported real-interactive
  * coverage patterns. Either: direct canUseTool usage in runAgentSdkTest,
- * the legacy plan-mode-helpers wrapper, or the new real-PTY observation
- * helper.
+ * the legacy plan-mode-helpers wrapper, or a real-PTY helper that answers
+ * the skill's native questions (observation or counting).
  */
 function hasCanUseToolCoverage(testFile: string): boolean {
   const content = fs.readFileSync(testFile, 'utf-8');
   if (content.includes('canUseTool')) return true;
   if (content.includes('runPlanModeSkillTest')) return true;
   if (content.includes('runPlanSkillObservation')) return true;
+  if (content.includes('runPlanSkillCounting')) return true;
   return false;
 }
 

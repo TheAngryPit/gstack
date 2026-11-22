@@ -161,6 +161,19 @@ describe('gstack-diff-scope', () => {
     expect(runScope(createRepo(['packages/cache/pubspec.lock'])).SCOPE_CONFIG).toBe('true');
   });
 
+  // Value: protects=an iOS UI change plans its review instead of failing closed; fails_when=.swift matches no arm and the
+  //   diff prints SCOPE_ERROR=unmatched (review-depth then forces the full panel); why_new=GST-3041: ghome#32, a 55-line
+  //   SwiftUI copy change, got 5 readers and a coverage audit; seam=none; no_claim=which readers that plan dispatches
+  test('a ghome#32-like SwiftUI change is frontend and backend, not unmatched (GST-3041)', () => {
+    const { vars, status, stdout } = runScopeFull(createRepo([
+      'App/AppModel.swift', 'App/Watch/PhoneWatchLink.swift', 'App/Review/ReviewView.swift', 'App/Health/HealthSync.swift',
+      'App/Home/SettingsView.swift', 'App/Meeting/InSessionView.swift', 'App/Meeting/MeetingRecorder.swift', 'App/Brief/YourDayViews.swift',
+    ]));
+    expect(stdout).not.toContain('SCOPE_ERROR');
+    expect(status).toBe(0);
+    expect(vars).toMatchObject({ SCOPE_FRONTEND: 'true', SCOPE_BACKEND: 'true', SCOPE_AUTH: 'false', SCOPE_CONFIG: 'false', SCOPE_API: 'false' });
+  });
+
   test('detects test files', () => {
     const dir = createRepo(['test/app.test.ts']);
     const scope = runScope(dir);
@@ -342,6 +355,32 @@ describe('glob classes (table-driven, #2526 + #2455)', () => {
     { name: 'contest_rules.py is not a test', file: 'pkg/contest_rules.py', expects: ['SCOPE_BACKEND'], alsoFalse: ['SCOPE_TESTS'] },
     { name: 'testing/ dir is not a test dir', file: 'pkg/testing/fixtures_loader.py', expects: ['SCOPE_BACKEND'], alsoFalse: ['SCOPE_TESTS'] },
     { name: 'attest_*.py is not a test', file: 'pkg/attest_signer.py', expects: ['SCOPE_BACKEND'], alsoFalse: ['SCOPE_TESTS'] },
+    // Swift and Xcode (GST-3041). Source, Interface Builder files, string catalogs and asset catalogs read as UI and app
+    // code, the way .dart and .tsx do. Files that carry real risk never read as UI: permissions (Info.plist, entitlements,
+    // the privacy manifest) are AUTH like any *permission* path; dependency manifests and locks, the project file and build
+    // settings are CONFIG like package.json and Gemfile.lock; Swift under an auth or api path keeps AUTH or API.
+    { name: 'SwiftUI view', file: 'App/Review/ReviewView.swift', expects: ['SCOPE_FRONTEND', 'SCOPE_BACKEND'], alsoFalse: ['SCOPE_AUTH', 'SCOPE_CONFIG'] },
+    { name: 'storyboard', file: 'App/Base.lproj/Main.storyboard', expects: ['SCOPE_FRONTEND'], alsoFalse: ['SCOPE_BACKEND', 'SCOPE_AUTH'] },
+    { name: 'xib', file: 'App/Cells/ItemCell.xib', expects: ['SCOPE_FRONTEND'], alsoFalse: ['SCOPE_BACKEND'] },
+    { name: 'legacy .strings', file: 'App/en.lproj/Localizable.strings', expects: ['SCOPE_FRONTEND'], alsoFalse: ['SCOPE_BACKEND'] },
+    { name: '.stringsdict plurals', file: 'App/en.lproj/Localizable.stringsdict', expects: ['SCOPE_FRONTEND'], alsoFalse: ['SCOPE_BACKEND'] },
+    { name: 'string catalog', file: 'App/Localizable.xcstrings', expects: ['SCOPE_FRONTEND'], alsoFalse: ['SCOPE_BACKEND'] },
+    { name: 'asset catalog', file: 'App/Assets.xcassets/AccentColor.colorset/Contents.json', expects: ['SCOPE_FRONTEND'], alsoFalse: ['SCOPE_BACKEND'] },
+    { name: 'Info.plist is permissions (URL schemes, ATS, usage strings)', file: 'App/Info.plist', expects: ['SCOPE_AUTH', 'SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'GoogleService-Info.plist reads as Info.plist', file: 'App/GoogleService-Info.plist', expects: ['SCOPE_AUTH', 'SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'entitlements are permissions', file: 'App/GHome.entitlements', expects: ['SCOPE_AUTH', 'SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'privacy manifest is permissions', file: 'App/PrivacyInfo.xcprivacy', expects: ['SCOPE_AUTH', 'SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'other plist is config', file: 'App/Defaults.plist', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND', 'SCOPE_AUTH'] },
+    { name: 'Package.swift is a dependency manifest, never UI', file: 'Package.swift', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND', 'SCOPE_BACKEND'] },
+    { name: 'nested Package.swift', file: 'Packages/GHomeCore/Package.swift', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND', 'SCOPE_BACKEND'] },
+    { name: 'Package.resolved in the project', file: 'GHome.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'Podfile', file: 'Podfile', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'Podfile.lock', file: 'ios/Podfile.lock', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'project.pbxproj is build settings and signing', file: 'GHome.xcodeproj/project.pbxproj', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND', 'SCOPE_BACKEND'] },
+    { name: 'xcconfig is build settings', file: 'Config/Release.xcconfig', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'shared scheme', file: 'GHome.xcodeproj/xcshareddata/xcschemes/GHome.xcscheme', expects: ['SCOPE_CONFIG'], alsoFalse: ['SCOPE_FRONTEND'] },
+    { name: 'Swift under an auth path keeps AUTH', file: 'App/Auth/SignInView.swift', expects: ['SCOPE_AUTH', 'SCOPE_FRONTEND', 'SCOPE_BACKEND'] },
+    { name: 'Swift under an api path keeps API', file: 'Sources/GHomeCore/api/GatewayClient.swift', expects: ['SCOPE_API', 'SCOPE_BACKEND'] },
   ];
 
   for (const row of TABLE) {
@@ -389,6 +428,29 @@ describe('exit-code contract (#2526)', () => {
     // Still prints all nine flags so `source <(...)` consumers get vars.
     expect(vars.SCOPE_FRONTEND).toBe('false');
     expect(vars.SCOPE_API).toBe('false');
+  });
+
+  // Value: protects=FOUN-505, a fix range of one data .json reads as data, not unmatched, so a granted fix-check can plan; an unknown
+  //   file beside data still fails closed; fails_when=a data-only range exits 2 or data hides an unknown file; seam=none; no_claim=none
+  test('a data-only range prints every flag false and exits 0; an unknown file beside data is still unmatched (FOUN-505)', () => {
+    const data = runScopeFull(createRepo(['wiki/labels.json', 'results/rows.tsv']));
+    expect(data.status).toBe(0);
+    expect(data.vars.SCOPE_ERROR).toBeUndefined();
+    expect(Object.values(data.vars).every((v) => v === 'false')).toBe(true);
+    const mixed = runScopeFull(createRepo(['wiki/labels.json', 'weird/layout.xyz']));
+    expect(mixed.status).toBe(2);
+    expect(mixed.vars.SCOPE_ERROR).toBe('unmatched');
+    expect(mixed.stdout).toContain('# unmatched: weird/layout.xyz');
+    expect(mixed.stdout).not.toContain('# unmatched: wiki/labels.json');
+  });
+
+  // Value: protects=an Apple file type no arm knows still fails closed after Swift and Xcode got arms; fails_when=a broad
+  //   *.swift-style or catch-all arm swallows unknown extensions; why_new=GST-3041 added Apple arms; seam=none; no_claim=none
+  test('an unknown Apple file type (a Metal shader) still fails closed (GST-3041)', () => {
+    const { vars, status, stdout } = runScopeFull(createRepo(['App/Shaders/Glow.metal']));
+    expect(status).toBe(2);
+    expect(vars.SCOPE_ERROR).toBe('unmatched');
+    expect(stdout).toContain('# unmatched: App/Shaders/Glow.metal');
   });
 
   test('unresolvable base → SCOPE_ERROR=no_base + exit 2 (a green would mean "could not look")', () => {
@@ -540,5 +602,136 @@ describe('uncommitted work is visible (#2299)', () => {
     const { vars, status } = runScopeFull(dir);
     expect(status).toBe(0);
     expect(vars.SCOPE_DOCS).toBe('true'); // pre-fix: git's octal quoting defeated *.md
+  });
+});
+
+describe('gstack-diff-scope template UI (GST-1718)', () => {
+  const LIT_BASE = [
+    "import { html } from 'lit';",
+    'export function rowTpl(name: string) {',
+    '  return html`<div class="permission-row"><span class="label">${name}</span></div>`;',
+    '}',
+    'export async function load(): Promise<void> {',
+    '  await fetch("/api/personas");',
+    '}',
+    '',
+  ].join('\n');
+  function templateRepo(): { dir: string; git: (...a: string[]) => ReturnType<typeof spawnSync> } {
+    const dir = createRepo([]);
+    const git = (...a: string[]) => spawnSync('git', a, { cwd: dir, stdio: 'pipe', timeout: 5000 });
+    git('checkout', '-q', 'main');
+    mkdirSync(join(dir, 'plugins', 'web-ui', 'src'), { recursive: true });
+    mkdirSync(join(dir, 'src', 'personas'), { recursive: true });
+    writeFileSync(join(dir, 'plugins', 'web-ui', 'src', 'personas.ts'), LIT_BASE);
+    writeFileSync(join(dir, 'src', 'personas', 'persona-service.ts'), 'export const svc = 1;\n');
+    git('add', '.'); git('commit', '-qm', 'base screens');
+    git('checkout', '-q', '-b', 'topic');
+    return { dir, git };
+  }
+  const edit = (dir: string, from: string, to: string) => {
+    const p = join(dir, 'plugins', 'web-ui', 'src', 'personas.ts');
+    writeFileSync(p, readFileSync(p, 'utf8').replace(from, to));
+  };
+
+  // Value: protects=a screen written as a Lit template in a .ts file reads as frontend, so /ship's design-lite check and
+  //   the design specialist run (qm#3186 read SCOPE_FRONTEND=false and both skipped silently); fails_when=the content arm
+  //   is missing, or it clears SCOPE_BACKEND for the same file; seam=a synthetic Lit file at qm#3186's path, committed and
+  //   read through --head and through the working tree; no_claim=no qm source is used.
+  test('a markup edit in a Lit template file is frontend and still backend, on --head and in the working tree', () => {
+    const { dir, git } = templateRepo();
+    edit(dir, '<span class="label">${name}</span>', '<span class="label">${name}</span><small class="note">Only owner</small>');
+    expect(runScope(dir).SCOPE_FRONTEND).toBe('true');
+    writeFileSync(join(dir, 'src', 'personas', 'persona-service.ts'), 'export const svc = 2;\n');
+    git('add', '.'); git('commit', '-qm', 'persona access');
+    const head = git('rev-parse', 'HEAD').stdout.toString().trim();
+    const out = spawnSync('bash', [SCRIPT, 'main', '--head', head], { cwd: dir, stdio: 'pipe', timeout: 5000 }).stdout.toString();
+    expect(out).toContain('SCOPE_FRONTEND=true');
+    expect(out).toContain('SCOPE_BACKEND=true');
+  });
+
+  // Value: protects=logic edits in a file that happens to hold templates, and TypeScript generics, stay backend-only, so
+  //   the design reviewers do not fire on every touch of a UI module; fails_when=the arm counts any changed line in a
+  //   template file, or reads Promise<void> as a tag; seam=none
+  test('a logic-only or generic-only edit in a template file is not frontend', () => {
+    const { dir } = templateRepo();
+    edit(dir, 'await fetch("/api/personas");', 'await fetch("/api/personas?v=2");');
+    expect(runScope(dir).SCOPE_FRONTEND).toBe('false');
+    edit(dir, 'Promise<void>', 'Promise<Map<string, number>>');
+    const vars = runScope(dir);
+    expect(vars.SCOPE_FRONTEND).toBe('false');
+    expect(vars.SCOPE_BACKEND).toBe('true');
+  });
+
+  // Value: protects=test fixtures that render templates do not turn on the design reviewers, while a brand-new or a
+  //   deleted screen does; fails_when=test paths are scanned, untracked files are ignored, or a deleted template file
+  //   reads as no change; seam=none
+  test('a template test file is not frontend; an untracked or deleted template file is', () => {
+    const t = templateRepo();
+    mkdirSync(join(t.dir, 'plugins', 'web-ui', 'test'), { recursive: true });
+    writeFileSync(join(t.dir, 'plugins', 'web-ui', 'test', 'personas-page.test.ts'), LIT_BASE);
+    writeFileSync(join(t.dir, 'plugins', 'web-ui', 'src', 'row.test.ts'), LIT_BASE);
+    expect(runScope(t.dir).SCOPE_FRONTEND).toBe('false');
+    writeFileSync(join(t.dir, 'plugins', 'web-ui', 'src', 'picker.ts'), LIT_BASE);
+    expect(runScope(t.dir).SCOPE_FRONTEND).toBe('true');
+    const d = templateRepo();
+    d.git('rm', '-q', 'plugins/web-ui/src/personas.ts');
+    d.git('commit', '-qm', 'drop screen');
+    expect(runScope(d.dir).SCOPE_FRONTEND).toBe('true');
+  });
+
+  // Value: protects=a Lit screen with a non-ASCII file name still reads as frontend (git grep octal-quotes such paths
+  //   unless -z, and the quoted path matched no pathspec), and a <placeholder> in a comment does not; fails_when=the
+  //   template arm reads git grep without -z, or counts comment lines as markup; seam=none
+  test('a non-ASCII template file is frontend on --head and in the working tree; a comment placeholder is not', () => {
+    const { dir, git } = templateRepo();
+    edit(dir, 'export async function load', '// usage: load <base> --head <sha>\nexport async function load');
+    expect(runScope(dir).SCOPE_FRONTEND).toBe('false');
+    git('checkout', '-q', '.');
+    writeFileSync(join(dir, 'plugins', 'web-ui', 'src', 'café.ts'), LIT_BASE);
+    expect(runScope(dir).SCOPE_FRONTEND).toBe('true');
+    git('add', '.'); git('commit', '-qm', 'cafe screen');
+    const head = git('rev-parse', 'HEAD').stdout.toString().trim();
+    const out = spawnSync('bash', [SCRIPT, 'main', '--head', head], { cwd: dir, stdio: 'pipe', timeout: 5000 }).stdout.toString();
+    expect(out).toContain('SCOPE_FRONTEND=true');
+  });
+
+  // Value: protects=a spacing or binding edit inside a multiline Lit template (no tag, element or class= on the changed
+  //   line) still reads as frontend, as does a screen tagged with whitespace before the backtick; fails_when=the arm
+  //   tests changed lines alone instead of their place inside a tagged template, or the tag regex requires the backtick
+  //   right after html/css/svg; seam=none
+  test('a CSS-only or binding-only edit inside a multiline template is frontend; so is html `...` with a space', () => {
+    const { dir, git } = templateRepo();
+    git('checkout', '-q', 'main');
+    const card = join(dir, 'plugins', 'web-ui', 'src', 'card.ts');
+    writeFileSync(card, [
+      "import { LitElement, css, html } from 'lit';",
+      'export class Card extends LitElement {',
+      '  static styles = css`',
+      '    .row { padding: 4px; }',
+      '  `;',
+      '  render() {',
+      '    return html`',
+      '      <div class="row">',
+      '        ${this.label}',
+      '      </div>`;',
+      '  }',
+      '}',
+      '',
+    ].join('\n'));
+    git('add', '.'); git('commit', '-qm', 'card');
+    git('checkout', '-q', '-B', 'topic', 'main');
+    const swap = (from: string, to: string) => writeFileSync(card, readFileSync(card, 'utf8').replace(from, to));
+    swap('padding: 4px;', 'padding: 12px;');
+    expect(runScope(dir).SCOPE_FRONTEND).toBe('true');
+    git('commit', '-qam', 'spacing');
+    const head = git('rev-parse', 'HEAD').stdout.toString().trim();
+    const out = spawnSync('bash', [SCRIPT, 'main', '--head', head], { cwd: dir, stdio: 'pipe', timeout: 5000 }).stdout.toString();
+    expect(out).toContain('SCOPE_FRONTEND=true');
+    git('reset', '-q', '--hard', 'HEAD~1');
+    swap('${this.label}', '${this.title}');
+    expect(runScope(dir).SCOPE_FRONTEND).toBe('true');
+    git('checkout', '-q', '.');
+    writeFileSync(join(dir, 'plugins', 'web-ui', 'src', 'row.ts'), "import { html } from 'lit';\nexport const row = html `<p>Hi</p>`;\n");
+    expect(runScope(dir).SCOPE_FRONTEND).toBe('true');
   });
 });

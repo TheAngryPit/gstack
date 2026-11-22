@@ -9,6 +9,7 @@ import { CASE_SHARDED_FILES, DEFAULT_SHARD_TIMEOUT_MS, caseFile, expandCaseShard
 import { carveSectionCaseId } from './helpers/carve-section-case';
 import { E2E_TIERS, E2E_TOUCHFILES, selectTests } from './helpers/touchfiles';
 import { E2E_KINDS } from './helpers/touchfiles-data';
+import { RETIRED_SKILLS } from '../scripts/discover-skills';
 
 describe('carved-skill cases each get a complete paid process budget', () => {
   const FILE = 'test/carve-section-loading.test.ts';
@@ -16,7 +17,11 @@ describe('carved-skill cases each get a complete paid process budget', () => {
   const source = fs.readFileSync(path.join(ROOT, FILE), 'utf8');
   const cases = [...source.matchAll(/test\('carve-section-loading-([a-z-]+)', \(\) => runCarveSectionCase\('([a-z-]+)'\), CAPTURE_LONG_MS\)/g)]
     .map(match => ({ id: `carve-section-loading-${match[1]}`, skill: match[2]! }));
-  const generic = Object.values(CARVE_GUARDS).filter(guard => guard.behavioral === 'plan' || guard.behavioral === 'prompt').map(guard => guard.skill).sort();
+  // A retired skill keeps its carve guard (its methodology still renders) but no section-loading case.
+  // plan-eng-review's case was deleted with the GST-1698 cut; the skill came back in GST-2726 without
+  // it, and whether the paid case returns is the GST-1966 measurement plan's call.
+  const NO_LOADING_CASE = [...RETIRED_SKILLS, 'plan-eng-review'];
+  const generic = Object.values(CARVE_GUARDS).filter(guard => (guard.behavioral === 'plan' || guard.behavioral === 'prompt') && !NO_LOADING_CASE.includes(guard.skill)).map(guard => guard.skill).sort();
 
   test('every generic registry entry has exactly one periodic case, under its own case id, and no external entry does', () => {
     expect(source).toContain("describeE2ETier('periodic')");

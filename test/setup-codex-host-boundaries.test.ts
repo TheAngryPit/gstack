@@ -54,7 +54,7 @@ test('minimal Codex runtime includes native lifecycle assets without Claude asse
   const linkDistsStart = setup.indexOf('_link_runtime_dists() {');
   const linkDistsEnd = setup.indexOf('\n}', linkDistsStart) + 2;
   const linkDists = setup.slice(linkDistsStart, linkDistsEnd);
-  const copyRuntimeSkillRefsStart = setup.indexOf('_copy_runtime_skill_refs() {');
+  const copyRuntimeSkillRefsStart = setup.indexOf('_link_codex_skill_refs() {');
   const copyRuntimeSkillRefsEnd = setup.indexOf('\n}', copyRuntimeSkillRefsStart) + 2;
   const copyRuntimeSkillRefs = setup.slice(copyRuntimeSkillRefsStart, copyRuntimeSkillRefsEnd);
   try {

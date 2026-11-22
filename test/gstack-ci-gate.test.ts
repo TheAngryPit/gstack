@@ -10,6 +10,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ciGateMain, evaluateChecks, parseCiGateArgs, runCiGate, type CiGateOptions, type GhResult, type GhRunner } from '../lib/ci-gate';
+import { PR303, PR303_RERUN_PASSED, ciRest, type CiAtCommit } from './helpers/ci-attempts-fixture';
 
 const HEAD = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -21,13 +22,16 @@ const row = (name: string, bucket?: string) => ({ name, state: 'X', link: `https
 const NONE = err("no checks reported on the 'feature' branch");
 const NONE_REQUIRED = err("no required checks reported on the 'feature' branch");
 
-interface Script { heads?: string[]; required?: GhResult[]; all?: GhResult[]; api?: GhResult }
+/** `rest` is REST CI at the head (none by default); null answers none of those reads, so they fall to `api`. */
+interface Script { heads?: string[]; required?: GhResult[]; all?: GhResult[]; api?: GhResult; rest?: CiAtCommit | null }
 function fakeGh(script: Script): GhRunner & { calls: string[][] } {
   const queues = { head: script.heads ?? [HEAD], required: script.required ?? [], all: script.all ?? [] };
   const next = <T>(queue: T[]): T => (queue.length > 1 ? queue.shift()! : queue[0]);
   const calls: string[][] = [];
   const gh = ((args: string[]) => {
     calls.push(args);
+    const rest = script.rest === null ? null : ciRest(args, script.rest ?? { check_runs: [] });
+    if (rest) return rest;
     if (args[0] === 'api') return script.api ?? err('gh: Not Found (HTTP 404)');
     if (args[1] === 'view') return { status: 0, stdout: `${next(queues.head)}\n`, stderr: '' };
     if (args[1] === 'merge') throw new Error('the gate must never merge');
@@ -181,8 +185,29 @@ describe('head binding', () => {
       ['pr', 'view', '42', '--repo', 'owner/project', '--json', 'headRefOid', '--jq', '.headRefOid'],
       ['pr', 'checks', '42', '--repo', 'owner/project', '--required', '--json', 'name,state,bucket,link'],
       ['pr', 'checks', '42', '--repo', 'owner/project', '--json', 'name,state,bucket,link'],
+      ['api', `repos/owner/project/commits/${HEAD}/check-runs?per_page=100&page=1`],
+      ['api', `repos/owner/project/commits/${HEAD}/check-runs?filter=all&per_page=100&page=1`],
+      ['api', `repos/owner/project/commits/${HEAD}/status?per_page=100&page=1`],
+      ['api', `repos/owner/project/actions/runs?head_sha=${HEAD}&per_page=100&page=1`],
       ['pr', 'view', '42', '--repo', 'owner/project', '--json', 'headRefOid', '--jq', '.headRefOid'],
     ]);
+  });
+});
+
+describe('every attempt of each check suite counts (GST-2252)', () => {
+  // Value: protects=the merge gate counts a failed check whose rerun attempt created no jobs and a workflow run that failed before any job, as
+  // gstack-ship-queue ready does, while a rerun that passed stays PASS and an unreadable REST read is ERROR; fails_when=the gate trusts gh pr checks
+  // (GitHub's rollup lists only each suite's latest attempt) and passes gstack-evals#303; seam=lib/ci-head-checks.ts (ciAtHead) in evaluateOnce,
+  // through the fake gh's filter=latest/all split; no_claim=GitHub's attempt grouping (the fixture is #4235's recording)
+  test('a failed check hidden behind a rerun attempt with no jobs, and a workflow run that failed with no jobs, are FAIL (gstack-evals#303)', async () => {
+    const red = await gate({ required: [NONE_REQUIRED], all: [ok([row('sealed', 'pass')])], rest: PR303 });
+    expect(red.verdict).toBe('FAIL');
+    expect(checkLines(red.lines)).toEqual(['CHECK\tchecks\tfail\trequired=n\t', 'CHECK\tsealed (run 42671854799, no jobs)\tfail\trequired=n\t']);
+    const rerun = await gate({ required: [NONE_REQUIRED], all: [ok([row('checks', 'pass'), row('sealed', 'pass')])], rest: PR303_RERUN_PASSED });
+    expect(rerun.verdict).toBe('PASS');
+    const unreadable = await gate({ required: [NONE_REQUIRED], all: [ok([row('sealed', 'pass')])], rest: null, api: err('gh: HTTP 403') });
+    expect(unreadable.verdict).toBe('ERROR');
+    expect(unreadable.lines[0]).toStartWith('CAUSE CI at aaaaaaaaaaaa is unknown');
   });
 });
 
@@ -227,30 +252,38 @@ describe('polling', () => {
   test('delayed registration: zero checks re-polled until checks appear', async () => {
     const c = clock();
     const gh = fakeGh({ required: [NONE, NONE, NONE_REQUIRED], all: [NONE, NONE, ok([row('build', 'pending')])] });
-    const result = await runCiGate(options({ registrationWaitSeconds: 60 }), gh, c.sleep, c.now);
+    const result = await runCiGate(options({ registrationWaitSeconds: 120 }), gh, c.sleep, c.now, () => 0);
     expect(result.verdict).toBe('PENDING');
-    expect(c.now()).toBe(20_000);
+    expect(c.now()).toBe(120_000);
   });
 
   test('registration wait is bounded at 60s, then NO_CHECKS', async () => {
     const c = clock();
-    const result = await runCiGate(options({ registrationWaitSeconds: 60 }), fakeGh({ required: [NONE], all: [NONE] }), c.sleep, c.now);
+    const result = await runCiGate(options({ registrationWaitSeconds: 60 }), fakeGh({ required: [NONE], all: [NONE] }), c.sleep, c.now, () => 0);
     expect(result.verdict).toBe('NO_CHECKS');
     expect(c.now()).toBe(60_000);
+  });
+
+  test('registration wait re-polls once even when the first read takes time', async () => {
+    const c = clock();
+    const base = fakeGh({ required: [NONE, NONE_REQUIRED], all: [NONE, ok([row('build', 'pending')])] });
+    const gh: GhRunner = args => { c.sleep(500); return base(args); };
+    const result = await runCiGate(options({ registrationWaitSeconds: 60 }), gh, c.sleep, c.now, () => 0);
+    expect(result.verdict).toBe('PENDING');
   });
 
   test('--wait polls PENDING until a final verdict', async () => {
     const c = clock();
     const all = [ok([row('t', 'pending')]), ok([row('t', 'pending')]), ok([row('t', 'pass')])];
-    const result = await runCiGate(options({ waitSeconds: 240 }), fakeGh({ required: [NONE_REQUIRED], all }), c.sleep, c.now);
+    const result = await runCiGate(options({ waitSeconds: 240 }), fakeGh({ required: [NONE_REQUIRED], all }), c.sleep, c.now, () => 0);
     expect(result.verdict).toBe('PASS');
-    expect(c.now()).toBe(60_000);
+    expect(c.now()).toBe(120_000);
   });
 
   test('--wait timeout reports PENDING and names the still-pending checks', async () => {
     const c = clock();
     const all = [ok([row('build', 'pass'), row('deploy-preview', 'pending')])];
-    const result = await runCiGate(options({ waitSeconds: 240 }), fakeGh({ required: [NONE_REQUIRED], all }), c.sleep, c.now);
+    const result = await runCiGate(options({ waitSeconds: 240 }), fakeGh({ required: [NONE_REQUIRED], all }), c.sleep, c.now, () => 0);
     expect(result.verdict).toBe('PENDING');
     expect(checkLines(result.lines)).toEqual(['CHECK\tdeploy-preview\tpending\trequired=n\thttps://ci.example/deploy-preview']);
     expect(result.lines.some(line => line.startsWith('NOTE still pending after waiting 240s'))).toBe(true);
@@ -259,9 +292,9 @@ describe('polling', () => {
   test('a failure during the wait stops immediately (fail fast)', async () => {
     const c = clock();
     const all = [ok([row('t', 'pending')]), ok([row('t', 'fail'), row('u', 'pending')])];
-    const result = await runCiGate(options({ waitSeconds: 240 }), fakeGh({ required: [NONE_REQUIRED], all }), c.sleep, c.now);
+    const result = await runCiGate(options({ waitSeconds: 240 }), fakeGh({ required: [NONE_REQUIRED], all }), c.sleep, c.now, () => 0);
     expect(result.verdict).toBe('FAIL');
-    expect(c.now()).toBe(30_000);
+    expect(c.now()).toBe(60_000);
   });
 });
 
